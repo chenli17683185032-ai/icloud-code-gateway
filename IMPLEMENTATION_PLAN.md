@@ -248,9 +248,9 @@ Browser runtime
 - [x] 运行全量测试、Python 编译、静态检查；提交前继续执行 `git diff --check`。
 - [x] 扫描密钥、Cookie、邮箱授权码、真实邮箱和私有主机名；当前命中仅为测试 canary。
 - [x] 用 Playwright 完成公开页/管理页桌面与移动截图、控制台和网络错误检查。
-- [ ] 建立私有 GitHub 仓库，提交并推送 `main`。
+- [x] 建立私有 GitHub 仓库，提交并推送 `main`。
 - [ ] 清理测试缓存、截图临时件、构建产物和未使用的容器，保留源码与必要 QA 记录。
-- [ ] 获得实际服务器 IP/域名/SSH 连接后，执行最小停机部署和线上闭环验收。
+- [ ] 在实际服务器执行最小停机部署和线上闭环验收。
 
 验证：GitHub `main` 与本地 HEAD 一致；工作树只保留用户明确要求保留的本地运行数据。
 
@@ -303,6 +303,8 @@ Browser runtime
 - 2026-07-26：本地容器验收通过。Browser 7 秒健康，固定 UID 102 无损接管旧 profile；Chromium 故障注入后 browser 独立恢复，app 未重启，Cookie 与 SQLite Alias 保持。Caddy WebSocket 认证缺陷已修复，登录后 101/RFB、未登录 303。SQLite/profile 备份恢复演练通过，实际 browser 停机约 28 秒。
 - 2026-07-26：只读审计德国服务器。现有 Caddy 独占 80/443；联动小铺 Mihomo 仅绑定共享网络命名空间回环。生产方案确定为：复用其订阅配置但运行独立 `cn-proxy`，app/browser 通过唯一别名接入既有 Caddy 网络，不修改或重启收款 Worker。
 - 2026-07-26：私有 GitHub 仓库 `chenli17683185032-ai/icloud-code-gateway` 已建立，首个完整实现提交已推送 `main`。服务器部署目录选定为 deploy 用户可控的 `/opt/new-api/icloud-code-gateway`，不依赖 sudo。
+- 2026-07-26：生产首次启动发现 `proxychains4` 不接受 Docker DNS 名 `cn-proxy` 作为首个代理节点；故障 browser 已停止，app 与独立 cn-proxy 保持健康。修复限定为 browser 配置渲染时将代理主机解析为容器网络 IPv4，解析失败继续失败关闭；HME 请求仍保留 `socks5h` 主机名语义。当前节点为 H 的线上闭环验收，完成后进入 I 的定向清理。
+- 2026-07-26：browser 代理 DNS 修复完成本地闭环：新增解析成功与失败关闭回归测试，全量 `79 passed`；Ruff、compileall、Compose 合并配置与 `git diff --check` 均通过。
 - 2026-07-25：建立本计划。当前节点为 A，尚未修改业务代码、访问 Apple 远程写接口或部署服务。
 - 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
 - 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。

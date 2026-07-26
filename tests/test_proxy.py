@@ -9,6 +9,7 @@ from icloud_gateway.proxy import (
     ProxyConfigurationError,
     parse_proxy_spec,
     proxy_from_environment,
+    render_browser_proxy_config,
     write_proxychains_config,
 )
 
@@ -70,6 +71,52 @@ def test_proxy_environment_supports_the_worker_style_fields() -> None:
 
     assert proxy is not None
     assert proxy.requests_url == "http://user:pass@proxy.example:8080"
+
+
+def test_browser_proxy_config_resolves_docker_dns_name(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "icloud_gateway.proxy.socket.gethostbyname",
+        lambda host: "172.30.0.12" if host == "cn-proxy" else "",
+    )
+
+    target = tmp_path / "proxychains.conf"
+    proxy = render_browser_proxy_config(
+        target,
+        {
+            "BROWSER_PROXY_SERVER": "socks5h://cn-proxy:7891",
+            "BROWSER_PROXY_REQUIRED": "1",
+        },
+    )
+
+    assert proxy is not None
+    assert proxy.requests_url == "socks5h://cn-proxy:7891"
+    assert "socks5 172.30.0.12 7891" in target.read_text(encoding="utf-8")
+    assert "socks5 cn-proxy 7891" not in target.read_text(encoding="utf-8")
+
+
+def test_browser_proxy_dns_failure_fails_closed(monkeypatch, tmp_path) -> None:
+    def fail_resolution(host: str) -> str:
+        raise OSError(f"cannot resolve {host}")
+
+    monkeypatch.setattr(
+        "icloud_gateway.proxy.socket.gethostbyname",
+        fail_resolution,
+    )
+    target = tmp_path / "proxychains.conf"
+
+    with pytest.raises(ProxyConfigurationError, match="cannot be resolved"):
+        render_browser_proxy_config(
+            target,
+            {
+                "BROWSER_PROXY_SERVER": "socks5h://cn-proxy:7891",
+                "BROWSER_PROXY_REQUIRED": "1",
+            },
+        )
+
+    assert not target.exists()
 
 
 def test_settings_loads_hme_proxy_and_rejects_missing_required_proxy(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -160,7 +161,18 @@ def render_browser_proxy_config(
     if proxy is None:
         target.unlink(missing_ok=True)
         return None
-    write_proxychains_config(target, proxy)
+    try:
+        resolved_host = socket.gethostbyname(proxy.host)
+    except OSError as exc:
+        raise ProxyConfigurationError("browser proxy host cannot be resolved") from exc
+    browser_proxy = ProxySpec(
+        scheme=proxy.scheme,
+        host=resolved_host,
+        port=proxy.port,
+        username=proxy.username,
+        password=proxy.password,
+    )
+    write_proxychains_config(target, browser_proxy)
     return proxy
 
 
