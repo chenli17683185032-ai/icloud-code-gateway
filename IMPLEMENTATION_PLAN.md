@@ -261,8 +261,8 @@ Browser runtime
 - [x] 备份共享 Caddyfile，使用 graceful reload 上线站点；Caddy 与业务容器重启计数保持不变。
 - [x] 公网 `/healthz`、首页、管理员登录、未登录 noVNC 拒绝以及登录后 noVNC WebSocket/RFB 全部通过。
 - [x] 修正 CDP 运维探针并把服务器部署结果写回本文件、`OPERATIONS.md` 与云贝唯一连接手册。
-- [ ] 全量门禁通过，提交并推送 GitHub `main`，随后只清理本任务 builder、QA 标签和悬空镜像。
-- [ ] 清理后复测服务并记录 `docker system df` 与根卷可用空间前后值，最终工作树保持干净。
+- [x] 全量门禁通过，提交并推送 GitHub `main`，随后只清理本任务 builder、QA 标签和悬空镜像。
+- [x] 清理后复测服务并记录 `docker system df` 与根卷可用空间前后值，最终工作树保持干净。
 
 验证：GitHub `main` 与本地 HEAD 一致；工作树只保留用户明确要求保留的本地运行数据。
 
@@ -319,6 +319,7 @@ Browser runtime
 - 2026-07-26：browser 代理 DNS 修复完成本地闭环：新增解析成功与失败关闭回归测试，全量 `79 passed`；Ruff、compileall、Compose 合并配置与 `git diff --check` 均通过。
 - 2026-07-26：服务器验证发现 proxychains 的 `LD_PRELOAD` 与 Chromium 多进程冲突，Chromium 在 CDP 就绪后以 133 退出，随后 fluxbox 令清理阶段失去上界。隔离 QA 证明 Chromium 原生 SOCKS5 可稳定加载真实 iCloud CN 页面；实现调整为启动时解析/校验代理后传入原生 `--proxy-server`，并为所有子进程增加 5 秒有界清理与最终 KILL。
 - 2026-07-26：`icloud.yunbay.xyz` 生产入口上线。共享 Caddy 主动健康检查曾因 Docker 别名 Host 被 Trusted Host 中间件返回 400，现已固定携带域名 Host；候选与挂载配置均通过 Caddy 2.11.4 验证并 graceful reload，Caddy/app/browser/cn-proxy 全程 `restart=0`。公网健康、首页、管理员登录、未登录 noVNC 303、登录后 noVNC 200 以及 WebSocket 101/RFB 3.8 均通过。浏览器 profile 尚未完成真实 Apple 登录，管理员首次登录仍是唯一外部输入。
+- 2026-07-26：完成定向清理。删除专用 `icg-builder-20260726`、两个 `qa-*` 标签、本任务 2026-07-26 悬空 browser 镜像和 Caddy 候选临时件；保留 `latest/prod/rollback-37adf3f`、三个正式数据卷、默认 builder 及其他项目 2026-07-16 的两个悬空镜像。清理前 Docker 为 Images `61.54GB`、Volumes `4.965GB`、Build Cache `57.65GB`，根卷可用 `56GB`；清理后分别为 `61.54GB`、`1.02GB`、`57.65GB`，根卷可用 `59GB`。SQLite quick check、Chromium CDP、公网健康和 noVNC 未登录拒绝复测通过，容器仍全为 `restart=0`。
 - 2026-07-25：建立本计划。当前节点为 A，尚未修改业务代码、访问 Apple 远程写接口或部署服务。
 - 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
 - 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。

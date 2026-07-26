@@ -282,3 +282,4 @@ docker compose ps
 - 2026-07-26：生产 `icloud.yunbay.xyz` 已通过 Cloudflare 代理上线。共享 Caddyfile 备份为 `/opt/new-api/app/Caddyfile.bak-20260726T055403Z`，候选与挂载配置均通过 Caddy 2.11.4 验证后 graceful reload；Caddy、app、browser、cn-proxy 全程 `restart=0`。
 - 2026-07-26：生产主动健康检查必须携带 `Host: icloud.yunbay.xyz`；实测该 Host 返回 200，而 `icloud-code-gateway-app` 返回 400。公网 `/healthz`、首页、管理员登录页为 200；未登录 noVNC 为 303；登录后认证探针为 204、noVNC 页面为 200、WebSocket 为 101 并收到 RFB 3.8。
 - 2026-07-26：browser 使用 Chromium 原生代理，生产出口为 `116.31.164.94`（中国广东）；杀死 Chromium 后约 11 秒恢复且 app 未重启，持久 profile 停启 Cookie 测试通过。当前 profile 尚无真实 iCloud 登录 Cookie，首次 Apple 登录和 HME 捕获需由管理员在 noVNC 中完成。
+- 2026-07-26：定向删除专用 `icg-builder-20260726`、`qa-f1d8c4a`、`qa-37adf3f`、本任务悬空 browser 镜像 `7af025cae297` 和候选临时件；保留正式/回滚镜像、三个正式卷、默认 builder 与其他项目镜像。清理前 `docker system df` 为 Images `61.54GB`、Volumes `4.965GB`、Build Cache `57.65GB`，根卷可用 `56GB`；清理后为 `61.54GB`、`1.02GB`、`57.65GB`，根卷可用 `59GB`。清理后 SQLite、CDP、公网健康与认证边界复测通过，所有容器仍 `restart=0`。
