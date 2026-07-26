@@ -143,11 +143,11 @@ class Database:
         connection.execute("BEGIN IMMEDIATE")
         try:
             yield connection
+            connection.commit()
         except Exception:
             with suppress(sqlite3.Error):
                 connection.rollback()
             raise
-        connection.commit()
 
     def set_secret(self, key: str, value: Mapping[str, Any]) -> None:
         name = _clean_text(key, limit=120)

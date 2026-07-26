@@ -7,6 +7,8 @@
   const issuedList = document.querySelector("#issued-key-list");
   let modalReturnFocus = null;
 
+  class AuthenticationRequiredError extends Error {}
+
   async function api(url, options = {}) {
     const headers = new Headers(options.headers || {});
     headers.set("X-CSRF-Token", csrf);
@@ -29,7 +31,7 @@
       // The 8-hour session expired mid-page; a generic failure message here
       // reads as "the action broke" rather than "you were signed out".
       window.location.assign("/admin/login");
-      throw new Error("unauthenticated");
+      throw new AuthenticationRequiredError();
     }
     if (!response.ok) throw new Error(data.status || "error");
     return data;
@@ -129,7 +131,8 @@
           ? `已创建 ${data.created.length} 个，批次已停止。`
           : `已创建 ${data.created.length} 个。密钥关闭后不再显示。`,
       );
-    } catch (_error) {
+    } catch (error) {
+      if (error instanceof AuthenticationRequiredError) return;
       createMessage.textContent = "创建失败，未完成的 Alias 可通过对账恢复。";
     } finally {
       createButton.disabled = false;
@@ -145,7 +148,8 @@
           method: "POST",
         });
         openModal([data], "密钥已签发。关闭后不再显示。");
-      } catch (_error) {
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
         window.alert("密钥签发失败。");
         button.disabled = false;
       }
@@ -161,7 +165,8 @@
           method: "DELETE",
         });
         window.location.reload();
-      } catch (_error) {
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
         window.alert("密钥撤销失败。");
         button.disabled = false;
       }
@@ -189,6 +194,10 @@
         cache: "no-store",
         credentials: "same-origin",
       });
+      if (response.status === 401 || response.status === 403) {
+        window.location.assign("/admin/login");
+        return;
+      }
       if (!response.ok) return;
       const data = await response.json();
       capture.querySelector("[data-capture-state]").textContent =

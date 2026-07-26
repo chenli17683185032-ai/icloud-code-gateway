@@ -70,3 +70,5 @@ def test_admin_password_comparison_has_exact_semantics() -> None:
     assert not verify_admin_password(
         "correct horse battery staple", "correct horse battery stapler"
     )
+    assert verify_admin_password("中文管理员口令", "中文管理员口令")
+    assert not verify_admin_password("中文管理员口令", "中文管理员口令错误")

@@ -312,13 +312,14 @@ def test_combined_search_falls_back_to_one_search_per_header() -> None:
 
 
 def test_candidates_are_fetched_in_batches_not_one_message_per_round_trip() -> None:
-    connection = FakeImap(mailbox(60))
+    connection = FakeImap(mailbox(120))
 
     result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
 
     assert result is not None
-    assert len(connection.fetches) == 3
-    assert sum(len(batch) for batch in connection.fetches) == 60
+    assert len(connection.searches) + len(connection.fetches) == 6
+    assert len(connection.fetches) == 5
+    assert sum(len(batch) for batch in connection.fetches) == 120
 
 
 def test_batched_fetch_falls_back_to_single_uids_when_the_server_refuses_sets() -> None:
@@ -331,9 +332,13 @@ def test_batched_fetch_falls_back_to_single_uids_when_the_server_refuses_sets() 
     assert [len(batch) for batch in connection.fetches] == [3, 3, 1, 1, 1]
 
 
-def test_within_capability_narrows_the_search_window() -> None:
+@pytest.mark.parametrize(
+    "capabilities",
+    (("IMAP4REV1", "WITHIN"), (b"IMAP4REV1", b"WITHIN")),
+)
+def test_within_capability_narrows_the_search_window(capabilities) -> None:
     without = FakeImap(mailbox(2))
-    with_within = FakeImap(mailbox(2), capabilities=("IMAP4REV1", "WITHIN"))
+    with_within = FakeImap(mailbox(2), capabilities=capabilities)
 
     reader(without).find_latest_code("target@icloud.com", now_ts=NOW)
     reader(with_within).find_latest_code("target@icloud.com", now_ts=NOW)

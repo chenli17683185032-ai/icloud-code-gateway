@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -451,6 +452,57 @@ def test_chunked_body_within_the_limit_still_reaches_the_route(client, service) 
     assert response.json() == {"status": "invalid_key"}
 
 
+def test_http2_style_stream_without_length_is_still_limited(settings, service) -> None:
+    app = create_app(settings, service=service)
+
+    async def request() -> list[dict]:
+        incoming = [
+            {"type": "http.request", "body": b"x" * (1024 * 1024), "more_body": True},
+            {"type": "http.request", "body": b"x" * (1024 * 1024), "more_body": True},
+            {"type": "http.request", "body": b"x", "more_body": False},
+        ]
+        outgoing: list[dict] = []
+
+        async def receive() -> dict:
+            return incoming.pop(0)
+
+        async def send(message: dict) -> None:
+            outgoing.append(message)
+
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "2",
+                "method": "POST",
+                "scheme": "https",
+                "path": "/api/code",
+                "raw_path": b"/api/code",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                ],
+                "client": ("203.0.113.9", 44321),
+                "server": ("testserver", 443),
+                "state": {},
+            },
+            receive,
+            send,
+        )
+        return outgoing
+
+    messages = asyncio.run(request())
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
+    )
+
+    assert start["status"] == 413
+    assert body == b'{"status":"request_too_large"}'
+
+
 @pytest.mark.parametrize("token", (b"", b"wrong-token", b"\xe9\xe9"))
 def test_non_matching_csrf_tokens_are_rejected_without_a_server_error(
     client, settings, service, token: bytes
@@ -486,6 +538,17 @@ def test_non_ascii_admin_password_is_rejected_rather_than_raising(client) -> Non
     response = client.post("/admin/login", data={"password": "错误的中文密码错误的中文密码"})
 
     assert response.status_code == 401
+
+
+def test_admin_script_redirects_expired_sessions_without_generic_action_errors() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "icloud_gateway" / "static" / "admin.js"
+    ).read_text()
+
+    assert "class AuthenticationRequiredError extends Error" in script
+    assert script.count("instanceof AuthenticationRequiredError") == 3
+    assert "response.status === 401 || response.status === 403" in script
+    assert 'window.location.assign("/admin/login")' in script
 
 
 def test_every_template_icon_exists() -> None:

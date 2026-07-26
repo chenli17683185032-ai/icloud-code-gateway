@@ -452,7 +452,13 @@ def _supports_within(connection: Any) -> bool:
     capabilities = getattr(connection, "capabilities", ())
     if not isinstance(capabilities, (list, tuple, set, frozenset)):
         return False
-    return any(str(item).strip().upper() == "WITHIN" for item in capabilities)
+    return any(
+        (item.decode("ascii", errors="ignore") if isinstance(item, bytes) else str(item))
+        .strip()
+        .upper()
+        == "WITHIN"
+        for item in capabilities
+    )
 
 
 def _messages_from_fetch(

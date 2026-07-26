@@ -134,7 +134,7 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml build browser
 docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy browser app
 ```
 
-覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信；主动健康检查必须携带 `Host: icloud.yunbay.xyz`，否则应用的 Trusted Host 中间件会把 Docker 别名 Host 拒绝为 400。
+覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信；主动健康检查必须携带 `Host: icloud.yunbay.xyz`，否则应用的 Trusted Host 中间件会把 Docker 别名 Host 拒绝为 400。站点片段只在直连对端属于 Cloudflare 官方网段时采用 `CF-Connecting-IP`；部署前应与 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6` 核对网段，不能无条件信任该请求头。
 
 ## 4. 在线 iCloud 维护
 
@@ -283,3 +283,4 @@ docker compose ps
 - 2026-07-26：生产主动健康检查必须携带 `Host: icloud.yunbay.xyz`；实测该 Host 返回 200，而 `icloud-code-gateway-app` 返回 400。公网 `/healthz`、首页、管理员登录页为 200；未登录 noVNC 为 303；登录后认证探针为 204、noVNC 页面为 200、WebSocket 为 101 并收到 RFB 3.8。
 - 2026-07-26：browser 使用 Chromium 原生代理，生产出口为 `116.31.164.94`（中国广东）；杀死 Chromium 后约 11 秒恢复且 app 未重启，持久 profile 停启 Cookie 测试通过。当前 profile 尚无真实 iCloud 登录 Cookie，首次 Apple 登录和 HME 捕获需由管理员在 noVNC 中完成。
 - 2026-07-26：定向删除专用 `icg-builder-20260726`、`qa-f1d8c4a`、`qa-37adf3f`、本任务悬空 browser 镜像 `7af025cae297` 和候选临时件；保留正式/回滚镜像、三个正式卷、默认 builder 与其他项目镜像。清理前 `docker system df` 为 Images `61.54GB`、Volumes `4.965GB`、Build Cache `57.65GB`，根卷可用 `56GB`；清理后为 `61.54GB`、`1.02GB`、`57.65GB`，根卷可用 `59GB`。清理后 SQLite、CDP、公网健康与认证边界复测通过，所有容器仍 `restart=0`。
+- 2026-07-26：本地审查 `82463cf` 安全与性能修订。确认 Caddy 默认已拒绝不可信 XFF，生产片段改为仅在直连对端命中 Cloudflare 官方网段时采用 `CF-Connecting-IP`；运行时注入证明直连伪造失败、可信链恢复真实客户端地址。另补齐 SQLite 提交失败回滚与 IMAP bytes 能力识别；全量 `104 passed`，Compose、Caddy 2.11.4 和服务器当前完整候选配置只读验证通过。本次未 reload、未部署生产服务。

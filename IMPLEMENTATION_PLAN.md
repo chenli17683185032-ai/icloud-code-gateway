@@ -324,3 +324,60 @@ Browser runtime
 - 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
 - 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。
 - 2026-07-25：完成节点 E-G。新增 Web/API、管理员会话、CSRF、请求体限制、Trusted Host、批量部分成功、凭据失败不覆盖等回归测试；IMAP 超时改为贯穿整次测量的总截止时间。当前 66 项测试、`ruff`、Python 编译和 `git diff --check` 通过。浏览器在 `1440x900`、`1024x768`、`390x844`、`360x800` 的浅色/深色视口完成验收，网络和控制台错误为 0。当前节点转为 H。
+
+## 12. `82463cf` 安全与性能修订审查计划
+
+### 12.1 目标与验收指标
+
+目标是审查 `harden-gateway` 上的 10 项修订，先证明安全边界与性能改造形成可重复闭环，再合并并推送 GitHub `main`。CDP 9222 网络归属不在本轮范围。
+
+- 空或不可解析的 HME 快照不得改变已有 Alias 状态和访问密钥。
+- Caddy 必须丢弃客户端伪造的来源头，同时保留 Cloudflare 后真实客户端 IP 的可信恢复路径。
+- Unicode 管理密码和 CSRF 输入只产生确定的认证结果，不返回 500。
+- 120 个候选邮件的正常 IMAP 路径不超过 6 次 UID 往返；组合 SEARCH、批量 FETCH、单 UID 回退和总截止时间都保持兼容。
+- SQLite 每线程只建立一个连接，事务失败可回滚，线程退出/服务关闭不留下错误状态，审计数据长期有界。
+- 无 `Content-Length` 的分块请求超过 2 MiB 时返回 413，小请求仍完整到达路由。
+- Alias 活动项优先、管理会话失效跳转、代理默认失败关闭和 Docker 构建上下文排除规则均有验证。
+- 全量测试、Ruff、Python 编译、Compose/Caddy 配置、`git diff --check` 和秘密扫描通过。
+- 最终 `main` 与 `origin/main` 一致，工作树干净；不自动部署生产服务器。
+
+### 12.2 控制结构与扰动
+
+| 控制元素 | 本轮对象 |
+| --- | --- |
+| 目标 | 消除破坏性同步、身份伪造和无界资源使用，同时降低查询时延 |
+| 被控对象 | HME 映射、访问密钥、IMAP 会话、SQLite、Caddy 信任边界、管理会话 |
+| 测量 | 回归测试、UID 命令计数、事务/线程试验、Caddy 适配、Compose 展开、静态检查 |
+| 控制器 | 失败关闭、字节常量时比较、可信头重建、批处理、线程本地连接、周期清理 |
+| 扰动 | Apple 空响应、Cloudflare 转发、Unicode、IMAP 能力差异、分块传输、并发线程、代理缺失 |
+| 稳定性策略 | 先拒绝不确定状态，再优化速度；所有回退有界且不改变选择语义 |
+
+### 12.3 GitHub 经验复核
+
+- Caddy 同类部署在可信代理链中区分直连对端与解析后的客户端 IP；生产站点不能直接信任任意 `CF-Connecting-IP`。
+- Python 项目在 `hmac.compare_digest` 前统一为 UTF-8 字节，保持精确比较并兼容非 ASCII 输入。
+- IMAP 客户端以组合 SEARCH 和 UID sequence-set FETCH 降低往返，但需兼容服务端能力差异及不支持集合的服务器。
+- SQLite 长寿命连接通常按线程归属并由显式事务控制；连接复用必须验证异常回滚和关闭后重建。
+
+### 12.4 实施节点
+
+- [x] 节点 1：确认正确仓库、提交、分支和远端；`82463cf` 当前仅在本地 `harden-gateway`。
+- [x] 节点 2：逐文件审查实现与测试；确认核心修复通过，发现 Caddy 默认信任模型说明错误、Cloudflare 真实客户端链未建立，以及多项共享行为缺少直接测试。
+- [x] 节点 3：修正 Cloudflare 可信代理边界、覆盖无长度流请求，并补齐数据库、配置、Unicode、前端会话和精确 IMAP 往返测试；运行时注入继续发现并移除无条件 `CF-Connecting-IP` 覆写，同时补上 SQLite 提交失败回滚与 IMAP bytes 能力识别。
+- [x] 节点 4：全量 `104 passed`；Ruff、格式化、Python 编译、Compose 基础/服务器覆盖、Caddy 2.11.4、来源头运行时注入、diff 与秘密扫描通过。
+- [ ] 节点 5（进行中）：提交审查修正，快进合并到 `main`，推送 GitHub，并清理本轮临时镜像。
+
+### 12.5 回滚边界
+
+- 本轮只提交和推送代码，不部署服务器；生产上线仍需先备份 SQLite 与共享 Caddy 配置，再以健康检查和 60 秒内回滚为约束。
+- 任何代理、来源 IP 或上游快照无法建立可信事实时均失败关闭，不采用直连或破坏本地状态作为恢复手段。
+
+### 12.6 验证记录
+
+- `82463cf` 原始提交通过 `95 passed`；补齐边界修正与直接测试后为 `104 passed`，唯一警告是 TestClient 的上游迁移提示。
+- 真实 Uvicorn HTTP/1.1 分块试验：3 MiB 返回 413，界内 JSON 正常到达路由；直接 ASGI HTTP/2 无长度流同样返回 413。
+- Caddy 2.11.4 源码确认默认不信任任何代理并丢弃不可信 `X-Forwarded-*`。独立配置移除多余覆写；生产片段只对 Cloudflare 官方网段信任 `CF-Connecting-IP`，直连请求仍失败关闭。
+- Caddy 运行时注入证明仅配置 `trusted_proxies` 不能约束无条件 `header_up CF-Connecting-IP`；现改为先以直连 `remote_ip` 匹配 Cloudflare，再重写请求 XFF，并由同一组网段建立反代信任边界。
+- 来源头运行时闭环：直连请求同时伪造 XFF 与 `CF-Connecting-IP` 时，上游只收到直连 socket IP；Cloudflare 网段对端得到 `CF-Connecting-IP, Cloudflare-peer`，Uvicorn 继续解析首个真实客户端地址。
+- 本地 Caddy 配置、站点片段以及服务器当前完整共享 Caddyfile 加新片段均只读验证通过；未 reload、未部署生产服务。
+- Compose 两种展开配置通过；跟踪文件秘密扫描无 API Key、私钥或长 Apple Session 命中，`.env.example` 保持允许跟踪。

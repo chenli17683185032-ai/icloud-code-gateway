@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+CLOUDFLARE_RANGE_COUNT = 22
+
 
 def test_browser_forward_auth_does_not_forward_websocket_upgrade_headers() -> None:
     caddyfile = (Path(__file__).resolve().parents[1] / "Caddyfile").read_text()
@@ -10,6 +12,7 @@ def test_browser_forward_auth_does_not_forward_websocket_upgrade_headers() -> No
     assert "uri /admin/api/browser/auth" in forward_auth
     assert "header_up -Connection" in forward_auth
     assert "header_up -Upgrade" in forward_auth
+    assert "header_up X-Forwarded-For" not in caddyfile
 
 
 def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> None:
@@ -29,6 +32,33 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "health_uri /healthz" in caddy_site
     assert "health_headers {" in caddy_site
     assert "Host icloud.yunbay.xyz" in caddy_site
+    matcher_line = next(
+        line.strip() for line in caddy_site.splitlines() if line.strip().startswith("@cloudflare ")
+    )
+    matcher_ranges = set(matcher_line.split()[2:])
+    trusted_ranges = {
+        value
+        for line in caddy_site.splitlines()
+        if line.strip().startswith("trusted_proxies ")
+        for value in line.split()[1:]
+    }
+    assert len(matcher_ranges) == CLOUDFLARE_RANGE_COUNT
+    assert matcher_ranges == trusted_ranges
+    assert (
+        "request_header @cloudflare X-Forwarded-For {http.request.header.CF-Connecting-IP}"
+        in caddy_site
+    )
+    assert "header_up X-Forwarded-For" not in caddy_site
+
+
+def test_proxy_defaults_fail_closed_and_build_context_excludes_secrets() -> None:
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.yml").read_text()
+    ignored = set((root / ".dockerignore").read_text().splitlines())
+
+    assert compose.count("${CN_PROXY_REQUIRED:-1}") == 2
+    assert "${CN_PROXY_REQUIRED:-0}" not in compose
+    assert {".env*", "!.env.example", "secrets", "*.pem", "*.key"} <= ignored
 
 
 def test_browser_uses_native_proxy_and_bounded_process_cleanup() -> None:

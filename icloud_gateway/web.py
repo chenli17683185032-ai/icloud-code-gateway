@@ -198,16 +198,17 @@ def create_app(
     @app.middleware("http")
     async def security_boundary(request: Request, call_next):
         content_length = request.headers.get("content-length")
-        if content_length:
+        if content_length is not None:
             try:
-                if int(content_length) > MAX_REQUEST_BYTES:
+                declared_length = int(content_length)
+                if declared_length < 0 or declared_length > MAX_REQUEST_BYTES:
                     return _too_large(request)
             except ValueError:
                 return _too_large(request)
-        elif request.headers.get("transfer-encoding"):
-            # A chunked body declares no length, so cap it as it streams in
-            # rather than letting the route read an unbounded amount. Assigning
-            # _body is how BaseHTTPMiddleware hands a buffered body downstream.
+        else:
+            # Chunked HTTP/1 and HTTP/2 streams may have no declared length.
+            # Buffer only up to the hard limit, then replay the bounded body to
+            # Starlette through its cached request-body path.
             received = 0
             chunks: list[bytes] = []
             async for chunk in request.stream():
