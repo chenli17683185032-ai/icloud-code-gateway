@@ -252,6 +252,18 @@ Browser runtime
 - [ ] 清理测试缓存、截图临时件、构建产物和未使用的容器，保留源码与必要 QA 记录。
 - [ ] 在实际服务器执行最小停机部署和线上闭环验收。
 
+当前线上闭环（2026-07-26）：
+
+- [x] 独立 browser、app、cn-proxy 在生产持续健康，异常 Chromium 可在 60 秒内自恢复且不重启 app。
+- [x] Cloudflare 控制面新增 `icloud.yunbay.xyz A 13.140.180.223`，开启代理并使用自动 TTL。
+- [x] Cloudflare 权威服务与 Cloudflare/Google 公共 DoH 返回该代理记录。
+- [x] 为共享 Caddy 主动健康检查显式设置 `Host: icloud.yunbay.xyz`，回归测试和候选配置验证通过。
+- [x] 备份共享 Caddyfile，使用 graceful reload 上线站点；Caddy 与业务容器重启计数保持不变。
+- [x] 公网 `/healthz`、首页、管理员登录、未登录 noVNC 拒绝以及登录后 noVNC WebSocket/RFB 全部通过。
+- [x] 修正 CDP 运维探针并把服务器部署结果写回本文件、`OPERATIONS.md` 与云贝唯一连接手册。
+- [ ] 全量门禁通过，提交并推送 GitHub `main`，随后只清理本任务 builder、QA 标签和悬空镜像。
+- [ ] 清理后复测服务并记录 `docker system df` 与根卷可用空间前后值，最终工作树保持干净。
+
 验证：GitHub `main` 与本地 HEAD 一致；工作树只保留用户明确要求保留的本地运行数据。
 
 ## 8. 测试矩阵
@@ -306,6 +318,7 @@ Browser runtime
 - 2026-07-26：生产首次启动发现 `proxychains4` 不接受 Docker DNS 名 `cn-proxy` 作为首个代理节点；故障 browser 已停止，app 与独立 cn-proxy 保持健康。修复限定为 browser 配置渲染时将代理主机解析为容器网络 IPv4，解析失败继续失败关闭；HME 请求仍保留 `socks5h` 主机名语义。当前节点为 H 的线上闭环验收，完成后进入 I 的定向清理。
 - 2026-07-26：browser 代理 DNS 修复完成本地闭环：新增解析成功与失败关闭回归测试，全量 `79 passed`；Ruff、compileall、Compose 合并配置与 `git diff --check` 均通过。
 - 2026-07-26：服务器验证发现 proxychains 的 `LD_PRELOAD` 与 Chromium 多进程冲突，Chromium 在 CDP 就绪后以 133 退出，随后 fluxbox 令清理阶段失去上界。隔离 QA 证明 Chromium 原生 SOCKS5 可稳定加载真实 iCloud CN 页面；实现调整为启动时解析/校验代理后传入原生 `--proxy-server`，并为所有子进程增加 5 秒有界清理与最终 KILL。
+- 2026-07-26：`icloud.yunbay.xyz` 生产入口上线。共享 Caddy 主动健康检查曾因 Docker 别名 Host 被 Trusted Host 中间件返回 400，现已固定携带域名 Host；候选与挂载配置均通过 Caddy 2.11.4 验证并 graceful reload，Caddy/app/browser/cn-proxy 全程 `restart=0`。公网健康、首页、管理员登录、未登录 noVNC 303、登录后 noVNC 200 以及 WebSocket 101/RFB 3.8 均通过。浏览器 profile 尚未完成真实 Apple 登录，管理员首次登录仍是唯一外部输入。
 - 2026-07-25：建立本计划。当前节点为 A，尚未修改业务代码、访问 Apple 远程写接口或部署服务。
 - 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
 - 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。

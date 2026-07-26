@@ -83,10 +83,12 @@ docker compose port browser 9222
 
 ```bash
 docker compose exec app python - <<'PY'
+from icloud_gateway.browser_capture import _resolve_cdp_endpoint
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.connect_over_cdp("http://browser:9222")
+    endpoint = _resolve_cdp_endpoint("http://browser:9222")
+    browser = playwright.chromium.connect_over_cdp(endpoint)
     page = browser.contexts[0].new_page()
     page.goto("http://ip-api.com/line/?fields=query", wait_until="domcontentloaded", timeout=20_000)
     print(page.locator("body").inner_text().strip())
@@ -132,7 +134,7 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml build browser
 docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy browser app
 ```
 
-覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信。
+覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信；主动健康检查必须携带 `Host: icloud.yunbay.xyz`，否则应用的 Trusted Host 中间件会把 Docker 别名 Host 拒绝为 400。
 
 ## 4. 在线 iCloud 维护
 
@@ -277,3 +279,6 @@ docker compose ps
 - 2026-07-26：完成本地容器闭环。确认复用 Playwright 基础镜像层、独立 Chromium/profile；旧 profile 从 UID 102 无损接管。故障注入后 browser 自动重启，app 未重启，Cookie 与 SQLite Alias 保持。
 - 2026-07-26：发现并修复 Caddy `forward_auth` 携带 WebSocket Upgrade 头导致 403 的问题。验收结果为：未登录 WebSocket 303 拒绝，登录后 101 Upgrade 并收到 RFB 3.8 握手。
 - 2026-07-26：使用无效代理端点执行隔离容器测试，连接失败且没有直连降级。
+- 2026-07-26：生产 `icloud.yunbay.xyz` 已通过 Cloudflare 代理上线。共享 Caddyfile 备份为 `/opt/new-api/app/Caddyfile.bak-20260726T055403Z`，候选与挂载配置均通过 Caddy 2.11.4 验证后 graceful reload；Caddy、app、browser、cn-proxy 全程 `restart=0`。
+- 2026-07-26：生产主动健康检查必须携带 `Host: icloud.yunbay.xyz`；实测该 Host 返回 200，而 `icloud-code-gateway-app` 返回 400。公网 `/healthz`、首页、管理员登录页为 200；未登录 noVNC 为 303；登录后认证探针为 204、noVNC 页面为 200、WebSocket 为 101 并收到 RFB 3.8。
+- 2026-07-26：browser 使用 Chromium 原生代理，生产出口为 `116.31.164.94`（中国广东）；杀死 Chromium 后约 11 秒恢复且 app 未重启，持久 profile 停启 Cookie 测试通过。当前 profile 尚无真实 iCloud 登录 Cookie，首次 Apple 登录和 HME 捕获需由管理员在 noVNC 中完成。
