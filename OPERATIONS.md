@@ -110,7 +110,7 @@ docker run --rm --name icg-proxy-failclosed-check \
 云贝服务器上的联动小铺代理只绑定其网络命名空间回环地址，不能让 iCloud app/browser 直接加入该命名空间，否则双方重启边界会耦合。生产采用以下方式：
 
 - 只读复用 `/opt/new-api/secrets/ldxp-browser-proxy.yaml` 中的代理订阅与规则。
-- 复制为 `/opt/icloud-code-gateway/secrets/cn-proxy.yaml`，权限 `0600`。
+- 复制为 `/opt/new-api/icloud-code-gateway/secrets/cn-proxy.yaml`，权限 `0600`。
 - 在副本中设置 `allow-lan: true`、`bind-address: 0.0.0.0`；该容器不发布宿主端口，只加入项目私有 `gateway` 网络。
 - `CN_PROXY_SERVER=socks5h://cn-proxy:7891`，app 与 browser 使用同一端点。
 - 联动小铺现有 proxy/worker 容器、配置文件和数据目录不修改、不重启。
