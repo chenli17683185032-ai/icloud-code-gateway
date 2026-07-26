@@ -7,7 +7,7 @@ import re
 import ssl
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,6 +42,15 @@ _REVERSE_CONTEXT_OTP_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"', re.IGNORECASE)
+_UID_RE = re.compile(rb"\bUID (\d+)", re.IGNORECASE)
+_FETCH_SPECS = ("(UID INTERNALDATE BODY.PEEK[])", "(UID INTERNALDATE RFC822)")
+# One FETCH per candidate turns a 120-message scan into 120 round trips, which
+# alone can exceed the public lookup budget on a remote mailbox.
+_FETCH_BATCH_SIZE = 25
+# SEARCH SINCE only has day granularity. Where the server supports RFC 5032
+# WITHIN, YOUNGER narrows the candidate set to the OTP window plus a wide
+# allowance for server clock skew, rather than everything since midnight.
+_YOUNGER_SKEW_ALLOWANCE_SECONDS = 900
 
 
 class ImapError(RuntimeError):
@@ -178,11 +187,10 @@ class ImapOtpReader:
                 raise ImapError("IMAP folder is unavailable") from exc
             if str(status).upper() != "OK":
                 raise ImapError("IMAP folder is unavailable")
-            for uid in self._candidate_uids(connection, target, oldest, deadline):
-                fetched = self._fetch_message(connection, uid, deadline)
-                if fetched is None:
-                    continue
-                message, internal_timestamp = fetched
+            uids = self._candidate_uids(connection, target, oldest, float(now_ts), deadline)
+            for uid, message, internal_timestamp in self._fetch_messages(
+                connection, uids, deadline
+            ):
                 if not _message_matches_alias(message, target):
                     continue
                 if sender_filter and not _message_matches_sender(message, sender_filter):
@@ -231,55 +239,95 @@ class ImapOtpReader:
         connection: Any,
         alias: str,
         oldest: float,
+        now_ts: float,
         deadline: float,
     ) -> list[str]:
         matched: set[str] = set()
-        searched = False
-        since_date = datetime.fromtimestamp(oldest, tz=UTC).strftime("%d-%b-%Y")
-        for header in RECIPIENT_HEADERS:
-            self._set_operation_timeout(connection, deadline)
-            try:
-                status, data = connection.uid(
-                    "search", None, "SINCE", since_date, "HEADER", header, alias
-                )
-            except Exception:
-                continue
-            if str(status).upper() != "OK":
-                continue
-            searched = True
+        window = list(self._window_terms(connection, oldest, now_ts - oldest))
+        combined = _recipient_search_terms(alias)
+        self._set_operation_timeout(connection, deadline)
+        status, data = self._search(connection, window + combined)
+        searched = status is not None and str(status).upper() == "OK"
+        if searched:
             matched.update(_uids_from_search(data))
+        else:
+            # Not every server accepts a deeply nested OR; fall back to one
+            # SEARCH per recipient header.
+            for header in RECIPIENT_HEADERS:
+                self._set_operation_timeout(connection, deadline)
+                status, data = self._search(connection, [*window, "HEADER", header, alias])
+                if status is None or str(status).upper() != "OK":
+                    continue
+                searched = True
+                matched.update(_uids_from_search(data))
         if not matched:
             self._set_operation_timeout(connection, deadline)
-            try:
-                status, data = connection.uid("search", None, "SINCE", since_date)
-            except Exception as exc:
+            status, data = self._search(connection, window)
+            if status is None:
                 if searched:
                     return []
-                raise ImapError("IMAP search failed") from exc
+                raise ImapError("IMAP search failed")
             if str(status).upper() == "OK":
                 matched.update(_uids_from_search(data))
         return sorted(matched, key=_uid_sort_key, reverse=True)[: self.scan_limit]
 
-    def _fetch_message(
+    @staticmethod
+    def _window_terms(connection: Any, oldest: float, window_seconds: float) -> tuple[str, ...]:
+        since_date = datetime.fromtimestamp(oldest, tz=UTC).strftime("%d-%b-%Y")
+        terms = ("SINCE", since_date)
+        if not _supports_within(connection):
+            return terms
+        age = int(max(0.0, float(window_seconds))) + _YOUNGER_SKEW_ALLOWANCE_SECONDS
+        return (*terms, "YOUNGER", str(age))
+
+    @staticmethod
+    def _search(connection: Any, terms: Sequence[str]) -> tuple[Any, Any]:
+        try:
+            return connection.uid("search", None, *terms)
+        except Exception:
+            return None, []
+
+    def _fetch_messages(
         self,
         connection: Any,
-        uid: str,
+        uids: Sequence[str],
         deadline: float,
-    ) -> tuple[Message, float | None] | None:
-        for fetch_spec in ("(INTERNALDATE BODY.PEEK[])", "(INTERNALDATE RFC822)"):
+    ) -> Iterator[tuple[str, Message, float | None]]:
+        for start in range(0, len(uids), _FETCH_BATCH_SIZE):
+            batch = list(uids[start : start + _FETCH_BATCH_SIZE])
+            fetched = self._fetch_batch(connection, batch, deadline)
+            if fetched is None and len(batch) > 1:
+                # A server that rejects UID sets still answers one UID at a time.
+                fetched = {}
+                for uid in batch:
+                    single = self._fetch_batch(connection, [uid], deadline)
+                    if single:
+                        fetched.update(single)
+            for uid in batch:
+                item = (fetched or {}).get(uid)
+                if item is not None:
+                    yield (uid, item[0], item[1])
+
+    def _fetch_batch(
+        self,
+        connection: Any,
+        uids: Sequence[str],
+        deadline: float,
+    ) -> dict[str, tuple[Message, float | None]] | None:
+        if not uids:
+            return {}
+        uid_set = ",".join(uids)
+        for fetch_spec in _FETCH_SPECS:
             self._set_operation_timeout(connection, deadline)
             try:
-                status, data = connection.uid("fetch", uid, fetch_spec)
+                status, data = connection.uid("fetch", uid_set, fetch_spec)
             except Exception:
                 continue
             if str(status).upper() != "OK":
                 continue
-            raw = _first_message_bytes(data)
-            if raw is not None:
-                return (
-                    email.message_from_bytes(raw, policy=default),
-                    _internal_timestamp(data),
-                )
+            parsed = _messages_from_fetch(data, fallback_uid=uids[0] if len(uids) == 1 else "")
+            if parsed:
+                return parsed
         return None
 
     def _set_operation_timeout(self, connection: Any, deadline: float) -> None:
@@ -377,23 +425,60 @@ def _message_timestamp(message: Message) -> float | None:
     return value.timestamp()
 
 
-def _internal_timestamp(data: Any) -> float | None:
-    if not isinstance(data, (list, tuple)):
+def _internal_timestamp(metadata: bytes) -> float | None:
+    match = _INTERNALDATE_RE.search(metadata)
+    if match is None:
         return None
+    try:
+        value = datetime.strptime(match.group(1).decode("ascii"), "%d-%b-%Y %H:%M:%S %z")
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value.timestamp()
+
+
+def _recipient_search_terms(alias: str) -> list[str]:
+    """Build one OR-composed SEARCH key covering every recipient header.
+
+    IMAP OR takes exactly two keys, so N terms nest as
+    `OR t1 OR t2 ... OR t(n-1) tn`.
+    """
+    terms: list[str] = ["HEADER", RECIPIENT_HEADERS[-1], alias]
+    for header in reversed(RECIPIENT_HEADERS[:-1]):
+        terms = ["OR", "HEADER", header, alias, *terms]
+    return terms
+
+
+def _supports_within(connection: Any) -> bool:
+    capabilities = getattr(connection, "capabilities", ())
+    if not isinstance(capabilities, (list, tuple, set, frozenset)):
+        return False
+    return any(str(item).strip().upper() == "WITHIN" for item in capabilities)
+
+
+def _messages_from_fetch(
+    data: Any,
+    *,
+    fallback_uid: str = "",
+) -> dict[str, tuple[Message, float | None]]:
+    result: dict[str, tuple[Message, float | None]] = {}
+    if not isinstance(data, (list, tuple)):
+        return result
     for item in data:
-        candidates = item if isinstance(item, tuple) else (item,)
-        for part in candidates:
-            if not isinstance(part, bytes):
-                continue
-            match = _INTERNALDATE_RE.search(part)
-            if match is None:
-                continue
-            try:
-                value = datetime.strptime(match.group(1).decode("ascii"), "%d-%b-%Y %H:%M:%S %z")
-            except (UnicodeDecodeError, ValueError):
-                continue
-            return value.timestamp()
-    return None
+        if not isinstance(item, tuple) or len(item) < 2:
+            continue
+        metadata = item[0] if isinstance(item[0], bytes) else b""
+        raw = next((part for part in item[1:] if isinstance(part, bytes) and b"\n" in part), None)
+        if raw is None:
+            continue
+        match = _UID_RE.search(metadata)
+        uid = match.group(1).decode("ascii") if match else fallback_uid
+        if not uid:
+            continue
+        result[uid] = (
+            email.message_from_bytes(raw, policy=default),
+            _internal_timestamp(metadata),
+        )
+    return result
 
 
 def _uids_from_search(data: Any) -> set[str]:
@@ -410,19 +495,6 @@ def _uids_from_search(data: Any) -> set[str]:
 
 def _uid_sort_key(value: str) -> tuple[int, str]:
     return (int(value), value) if value.isdigit() else (-1, value)
-
-
-def _first_message_bytes(data: Any) -> bytes | None:
-    if not isinstance(data, (list, tuple)):
-        return None
-    for item in data:
-        if isinstance(item, tuple):
-            for part in item:
-                if isinstance(part, bytes) and b"\n" in part:
-                    return part
-        elif isinstance(item, bytes) and b"\n" in item:
-            return item
-    return None
 
 
 def _create_imap_connection(config: ImapConfig, timeout: float) -> Any:

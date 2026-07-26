@@ -25,6 +25,12 @@
     } catch (_error) {
       data = { status: "error" };
     }
+    if (response.status === 401 || response.status === 403) {
+      // The 8-hour session expired mid-page; a generic failure message here
+      // reads as "the action broke" rather than "you were signed out".
+      window.location.assign("/admin/login");
+      throw new Error("unauthenticated");
+    }
     if (!response.ok) throw new Error(data.status || "error");
     return data;
   }

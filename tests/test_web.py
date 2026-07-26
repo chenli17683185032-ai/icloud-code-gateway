@@ -425,6 +425,69 @@ def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, 
     assert service.get_imap_config() == original_imap
 
 
+def test_chunked_body_cannot_bypass_the_request_size_limit(client) -> None:
+    def oversized_chunks():
+        for _ in range(3):
+            yield b"x" * (1024 * 1024)
+
+    response = client.post("/api/code", content=oversized_chunks())
+
+    assert response.status_code == 413
+    assert response.json() == {"status": "request_too_large"}
+
+
+def test_chunked_body_within_the_limit_still_reaches_the_route(client, service) -> None:
+    def small_chunks():
+        yield b'{"access_key":'
+        yield b' "not-a-valid-key"}'
+
+    response = client.post(
+        "/api/code",
+        content=small_chunks(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"status": "invalid_key"}
+
+
+@pytest.mark.parametrize("token", (b"", b"wrong-token", b"\xe9\xe9"))
+def test_non_matching_csrf_tokens_are_rejected_without_a_server_error(
+    client, settings, service, token: bytes
+) -> None:
+    # Headers arrive as latin-1, so a non-ASCII byte reaches the comparison as a
+    # non-ASCII str.
+    codec = AdminSessionCodec(settings.master_key, lifetime_seconds=3600)
+    cookie, _session = codec.issue()
+    client.cookies.set(ADMIN_COOKIE, cookie)
+
+    response = client.post(
+        "/admin/api/aliases",
+        json={"count": 1, "label_prefix": "x"},
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 403
+
+
+def test_non_ascii_form_csrf_token_is_rejected_without_a_server_error(
+    client, settings, service
+) -> None:
+    codec = AdminSessionCodec(settings.master_key, lifetime_seconds=3600)
+    cookie, _session = codec.issue()
+    client.cookies.set(ADMIN_COOKIE, cookie)
+
+    response = client.post("/admin/logout", data={"csrf_token": "令牌"})
+
+    assert response.status_code == 403
+
+
+def test_non_ascii_admin_password_is_rejected_rather_than_raising(client) -> None:
+    response = client.post("/admin/login", data={"password": "错误的中文密码错误的中文密码"})
+
+    assert response.status_code == 401
+
+
 def test_every_template_icon_exists() -> None:
     package = Path(__file__).resolve().parents[1] / "icloud_gateway"
     referenced = set()

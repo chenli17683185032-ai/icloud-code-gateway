@@ -159,7 +159,12 @@ class AdminSessionCodec:
 
 
 def verify_admin_password(expected: str, supplied: str) -> bool:
-    return hmac.compare_digest(str(expected), str(supplied or ""))
+    # compare_digest rejects str operands that are not pure ASCII, so a non-ASCII
+    # admin password would raise instead of returning False.
+    return hmac.compare_digest(
+        str(expected).encode("utf-8"),
+        str(supplied or "").encode("utf-8"),
+    )
 
 
 __all__ = [

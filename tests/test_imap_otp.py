@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from icloud_gateway.imap_otp import (
+    RECIPIENT_HEADERS,
     ImapConfig,
     ImapCredentialsError,
     ImapError,
@@ -49,10 +50,29 @@ def raw_message(
 
 
 class FakeImap:
-    def __init__(self, messages=None, *, login_error=False):
+    """Stands in for imaplib.IMAP4_SSL.
+
+    Answers UID sets on FETCH the way a real server does, so tests exercise the
+    batched protocol rather than a one-UID-at-a-time fallback.
+    """
+
+    def __init__(
+        self,
+        messages=None,
+        *,
+        login_error=False,
+        capabilities=(),
+        reject_uid_sets=False,
+        reject_combined_search=False,
+    ):
         self.messages = dict(messages or {})
         self.login_error = login_error
+        self.capabilities = tuple(capabilities)
+        self.reject_uid_sets = reject_uid_sets
+        self.reject_combined_search = reject_combined_search
         self.logged_out = False
+        self.searches: list[tuple] = []
+        self.fetches: list[list[str]] = []
 
     def login(self, _username, _password):
         if self.login_error:
@@ -62,20 +82,31 @@ class FakeImap:
     def select(self, _folder, readonly=False):
         return ("OK", [b"1"]) if readonly else ("NO", [])
 
+    def _fetch_one(self, uid):
+        item = self.messages.get(uid)
+        if item is None:
+            return None
+        raw, received_at = item
+        internal = datetime.fromtimestamp(received_at, tz=UTC).strftime("%d-%b-%Y %H:%M:%S +0000")
+        metadata = f'{uid} (UID {uid} INTERNALDATE "{internal}" BODY[] {{{len(raw)}}}'
+        return (metadata.encode("ascii"), raw)
+
     def uid(self, command, *args):
         if command == "search":
+            terms = tuple(str(item) for item in args if item is not None)
+            self.searches.append(terms)
+            if self.reject_combined_search and "OR" in terms:
+                return "NO", []
             return "OK", [" ".join(self.messages).encode("ascii")]
         if command == "fetch":
-            uid = str(args[0])
-            item = self.messages.get(uid)
-            if item is None:
+            uids = [part for part in str(args[0]).split(",") if part]
+            self.fetches.append(uids)
+            if self.reject_uid_sets and len(uids) > 1:
                 return "NO", []
-            raw, received_at = item
-            internal = datetime.fromtimestamp(received_at, tz=UTC).strftime(
-                "%d-%b-%Y %H:%M:%S +0000"
-            )
-            metadata = f'{uid} (UID {uid} INTERNALDATE "{internal}")'.encode("ascii")
-            return "OK", [(metadata, raw)]
+            payload = [item for item in (self._fetch_one(uid) for uid in uids) if item is not None]
+            if not payload:
+                return "NO", []
+            return "OK", [*payload, b")"]
         raise AssertionError((command, args))
 
     def logout(self):
@@ -244,6 +275,74 @@ def test_imap_auth_error_is_sanitized() -> None:
         reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
 
     assert "secret detail" not in str(caught.value)
+
+
+def mailbox(count: int, *, match_from: int = 0) -> dict:
+    return {
+        str(uid): (
+            raw_message(
+                recipient=("target@icloud.com" if uid >= match_from else "other@icloud.com"),
+                code=f"{uid:06d}",
+            ),
+            NOW - (100 - uid),
+        )
+        for uid in range(1, count + 1)
+    }
+
+
+def test_recipient_headers_are_searched_in_one_round_trip() -> None:
+    connection = FakeImap(mailbox(3))
+
+    reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert len(connection.searches) == 1
+    terms = connection.searches[0]
+    assert terms.count("OR") == len(RECIPIENT_HEADERS) - 1
+    for header in RECIPIENT_HEADERS:
+        assert header in terms
+
+
+def test_combined_search_falls_back_to_one_search_per_header() -> None:
+    connection = FakeImap(mailbox(3), reject_combined_search=True)
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert len(connection.searches) == 1 + len(RECIPIENT_HEADERS)
+
+
+def test_candidates_are_fetched_in_batches_not_one_message_per_round_trip() -> None:
+    connection = FakeImap(mailbox(60))
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert len(connection.fetches) == 3
+    assert sum(len(batch) for batch in connection.fetches) == 60
+
+
+def test_batched_fetch_falls_back_to_single_uids_when_the_server_refuses_sets() -> None:
+    connection = FakeImap(mailbox(3), reject_uid_sets=True)
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    # The set is attempted once per FETCH syntax before dropping to single UIDs.
+    assert [len(batch) for batch in connection.fetches] == [3, 3, 1, 1, 1]
+
+
+def test_within_capability_narrows_the_search_window() -> None:
+    without = FakeImap(mailbox(2))
+    with_within = FakeImap(mailbox(2), capabilities=("IMAP4REV1", "WITHIN"))
+
+    reader(without).find_latest_code("target@icloud.com", now_ts=NOW)
+    reader(with_within).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert "YOUNGER" not in without.searches[0]
+    terms = with_within.searches[0]
+    assert "YOUNGER" in terms
+    # 300s OTP window plus a wide allowance for server clock skew.
+    assert terms[terms.index("YOUNGER") + 1] == "1200"
 
 
 def test_lookup_timeout_is_a_total_deadline_across_imap_operations() -> None:

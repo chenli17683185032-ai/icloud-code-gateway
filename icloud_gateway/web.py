@@ -99,19 +99,26 @@ def _admin_session(request: Request, codec: AdminSessionCodec) -> AdminSession |
         return None
 
 
+def _csrf_matches(expected: str, supplied: Any) -> bool:
+    # compare_digest rejects str operands that are not pure ASCII, so a token
+    # carrying any non-ASCII byte has to be compared as bytes or it raises.
+    token = str(supplied or "")
+    if not token:
+        return False
+    return hmac.compare_digest(str(expected).encode("utf-8"), token.encode("utf-8"))
+
+
 def _require_admin_json(request: Request, codec: AdminSessionCodec) -> AdminSession:
     session = _admin_session(request, codec)
     if session is None:
         raise HTTPException(status_code=401, detail="admin authentication required")
-    supplied = str(request.headers.get("X-CSRF-Token") or "")
-    if not supplied or not hmac.compare_digest(session.csrf_token, supplied):
+    if not _csrf_matches(session.csrf_token, request.headers.get("X-CSRF-Token")):
         raise HTTPException(status_code=403, detail="CSRF validation failed")
     return session
 
 
 def _validate_form_csrf(session: AdminSession, supplied: Any) -> None:
-    token = str(supplied or "")
-    if not token or not hmac.compare_digest(session.csrf_token, token):
+    if not _csrf_matches(session.csrf_token, supplied):
         raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
@@ -183,21 +190,32 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
 
+    def _too_large(response_request: Request) -> JSONResponse:
+        response = JSONResponse({"status": "request_too_large"}, status_code=413)
+        _apply_security_headers(response, request=response_request, settings=settings)
+        return response
+
     @app.middleware("http")
     async def security_boundary(request: Request, call_next):
         content_length = request.headers.get("content-length")
         if content_length:
             try:
-                too_large = int(content_length) > MAX_REQUEST_BYTES
+                if int(content_length) > MAX_REQUEST_BYTES:
+                    return _too_large(request)
             except ValueError:
-                too_large = True
-            if too_large:
-                response = JSONResponse(
-                    {"status": "request_too_large"},
-                    status_code=413,
-                )
-                _apply_security_headers(response, request=request, settings=settings)
-                return response
+                return _too_large(request)
+        elif request.headers.get("transfer-encoding"):
+            # A chunked body declares no length, so cap it as it streams in
+            # rather than letting the route read an unbounded amount. Assigning
+            # _body is how BaseHTTPMiddleware hands a buffered body downstream.
+            received = 0
+            chunks: list[bytes] = []
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > MAX_REQUEST_BYTES:
+                    return _too_large(request)
+                chunks.append(chunk)
+            request._body = b"".join(chunks)
         response = await call_next(request)
         _apply_security_headers(response, request=request, settings=settings)
         return response

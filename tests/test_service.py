@@ -11,6 +11,7 @@ from icloud_gateway.imap_otp import ImapConfig, OtpResult
 from icloud_gateway.rate_limit import SlidingWindowRateLimiter
 from icloud_gateway.security import hash_access_key
 from icloud_gateway.service import (
+    GatewayError,
     GatewayRateLimitedError,
     GatewayService,
 )
@@ -276,6 +277,26 @@ def test_invalid_key_and_no_code_have_distinct_safe_states(tmp_path) -> None:
     assert invalid.status == "invalid_key"
     assert waiting.status == "waiting"
     assert waiting.retry_after == 5
+
+
+def test_empty_remote_list_does_not_deactivate_every_alias(tmp_path) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": True},
+        {"hme": "two@icloud.com", "anonymousId": "two", "isActive": True},
+    ]
+    gateway.save_hme_session(hme_session())
+    gateway.sync_aliases()
+    for alias in gateway.database.list_aliases():
+        gateway.database.issue_access_key(alias["id"])
+
+    FakeHmeClient.aliases = []
+    with pytest.raises(GatewayError):
+        gateway.sync_aliases()
+
+    aliases = gateway.database.list_aliases()
+    assert [item["state"] for item in aliases] == ["active", "active"]
+    assert all(item["has_access_key"] for item in aliases)
 
 
 def test_key_dimension_rate_limit_does_not_depend_on_ip_limit(tmp_path) -> None:

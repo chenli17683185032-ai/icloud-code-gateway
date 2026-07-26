@@ -118,6 +118,7 @@ class GatewayService:
 
     def shutdown(self) -> None:
         self.capture_manager.shutdown(timeout=10.0)
+        self.database.close()
 
     def get_hme_session(self) -> ICloudHmeSession | None:
         value = self.database.get_secret(HME_SETTING_KEY)
@@ -154,6 +155,14 @@ class GatewayService:
                     synced_at=synced_at,
                 )
                 seen.append(email)
+            if not seen and self.database.count_remote_aliases():
+                # An empty or unparseable alias list would otherwise deactivate
+                # every alias and destroy every access key, which cannot be
+                # undone because keys are only ever displayed once. Apple
+                # returning nothing is far likelier than the operator having
+                # deleted every alias, so refuse instead of reconciling.
+                self.database.record_audit_event("hme_sync", "refused_empty")
+                raise GatewayError("iCloud HME returned no aliases; refusing to deactivate all")
             self.database.finish_remote_sync(seen, synced_at=synced_at)
             self.database.record_audit_event("hme_sync", "succeeded")
         return self.database.list_aliases()

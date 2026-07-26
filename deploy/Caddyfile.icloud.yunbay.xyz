@@ -23,6 +23,13 @@ icloud.yunbay.xyz {
 
     handle {
         reverse_proxy icloud-code-gateway-app:8080 {
+            # Overwrite rather than append: reverse_proxy keeps a client-supplied
+            # X-Forwarded-For, and uvicorn trusts the leftmost entry, so without
+            # this the caller picks their own rate-limit bucket and audit identity.
+            # Behind Cloudflare, use {http.request.header.CF-Connecting-IP} instead
+            # and restrict trusted_proxies to Cloudflare ranges.
+            header_up X-Forwarded-For {http.request.remote.host}
+
             health_uri /healthz
             health_headers {
                 Host icloud.yunbay.xyz

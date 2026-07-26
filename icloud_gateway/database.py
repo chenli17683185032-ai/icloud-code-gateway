@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -13,6 +14,10 @@ from typing import Any
 from .security import SecretBox, generate_access_key, hash_access_key
 
 SCHEMA_VERSION = 1
+AUDIT_RETENTION_DAYS = 7
+# The lifespan hook only purges at startup, so a long-lived process trims the
+# audit log on write as well.
+AUDIT_PURGE_INTERVAL = 500
 
 
 class DatabaseError(RuntimeError):
@@ -59,15 +64,17 @@ class Database:
     def __init__(self, path: str | Path, secret_box: SecretBox) -> None:
         self.path = Path(path).expanduser()
         self.secret_box = secret_box
+        self._local = threading.local()
+        self._audit_lock = threading.Lock()
+        self._audit_writes = 0
 
     def initialize(self) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with suppress(OSError):
             self.path.parent.chmod(0o700)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS metadata (
+        self._connect().executescript(
+            """
+            CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
@@ -111,7 +118,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS audit_events_alias_id_idx
                     ON audit_events(alias_id, created_at);
                 """
-            )
+        )
+        with self.transaction() as connection:
             current = connection.execute(
                 "SELECT value FROM metadata WHERE key = 'schema_version'"
             ).fetchone()
@@ -122,25 +130,24 @@ class Database:
                 )
             elif int(current["value"]) != SCHEMA_VERSION:
                 raise DatabaseError("database schema version is unsupported")
-            connection.commit()
         with suppress(OSError):
             self.path.chmod(0o600)
 
     def quick_check(self) -> str:
-        with self._connect() as connection:
-            row = connection.execute("PRAGMA quick_check").fetchone()
+        row = self._connect().execute("PRAGMA quick_check").fetchone()
         return str(row[0] if row else "")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._connect() as connection:
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except Exception:
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield connection
+        except Exception:
+            with suppress(sqlite3.Error):
                 connection.rollback()
-                raise
+            raise
+        connection.commit()
 
     def set_secret(self, key: str, value: Mapping[str, Any]) -> None:
         name = _clean_text(key, limit=120)
@@ -166,10 +173,11 @@ class Database:
 
     def get_secret(self, key: str) -> dict[str, Any] | None:
         name = _clean_text(key, limit=120)
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT value_blob, purpose FROM settings WHERE key = ?", (name,)
-            ).fetchone()
+        row = (
+            self._connect()
+            .execute("SELECT value_blob, purpose FROM settings WHERE key = ?", (name,))
+            .fetchone()
+        )
         if row is None:
             return None
         plaintext = self.secret_box.decrypt(bytes(row["value_blob"]), str(row["purpose"]))
@@ -346,6 +354,14 @@ class Database:
                 )
         return self.get_alias(alias_id)
 
+    def count_remote_aliases(self) -> int:
+        row = (
+            self._connect()
+            .execute("SELECT COUNT(*) AS total FROM aliases WHERE remote_blob IS NOT NULL")
+            .fetchone()
+        )
+        return 0 if row is None else int(row["total"])
+
     def finish_remote_sync(self, seen_emails: list[str], *, synced_at: str) -> int:
         digests = [
             self.secret_box.digest(_normalize_email(email), "alias-email-index")
@@ -382,27 +398,32 @@ class Database:
             return int(cursor.rowcount)
 
     def list_aliases(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
+        rows = (
+            self._connect()
+            .execute(
                 """
                 SELECT * FROM aliases
-                ORDER BY state DESC, created_at DESC, id
+                ORDER BY state ASC, created_at DESC, id
                 """
-            ).fetchall()
+            )
+            .fetchall()
+        )
         return [self._alias_from_row(row) for row in rows]
 
     def get_alias(self, alias_id: str) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM aliases WHERE id = ?", (str(alias_id),)
-            ).fetchone()
+        row = (
+            self._connect()
+            .execute("SELECT * FROM aliases WHERE id = ?", (str(alias_id),))
+            .fetchone()
+        )
         if row is None:
             raise NotFoundError("alias not found")
         return self._alias_from_row(row)
 
     def find_alias_by_access_key_hash(self, digest: bytes) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        row = (
+            self._connect()
+            .execute(
                 """
                 SELECT * FROM aliases
                 WHERE access_key_hash = ?
@@ -410,7 +431,9 @@ class Database:
                   AND state = 'active'
                 """,
                 (sqlite3.Binary(digest),),
-            ).fetchone()
+            )
+            .fetchone()
+        )
         return None if row is None else self._alias_from_row(row)
 
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
@@ -488,6 +511,7 @@ class Database:
         clean_state = str(state or "").strip()
         if clean_state not in {"active", "inactive"}:
             raise ValueError("alias state is invalid")
+        timestamp = _now()
         with self.transaction() as connection:
             cursor = connection.execute(
                 """
@@ -504,8 +528,8 @@ class Database:
                     clean_state,
                     clean_state,
                     clean_state,
-                    _now(),
-                    _now(),
+                    timestamp,
+                    timestamp,
                     str(alias_id),
                 ),
             )
@@ -531,11 +555,22 @@ class Database:
                 """,
                 (clean_type, alias_id, clean_outcome, clean_ip, _now()),
             )
+        if self._audit_purge_is_due():
+            self.purge_old_audit_events(days=AUDIT_RETENTION_DAYS)
+
+    def _audit_purge_is_due(self) -> bool:
+        with self._audit_lock:
+            self._audit_writes += 1
+            if self._audit_writes < AUDIT_PURGE_INTERVAL:
+                return False
+            self._audit_writes = 0
+        return True
 
     def list_audit_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 500))
-        with self._connect() as connection:
-            rows = connection.execute(
+        rows = (
+            self._connect()
+            .execute(
                 """
                 SELECT id, event_type, alias_id, outcome, ip_digest, created_at
                 FROM audit_events
@@ -543,7 +578,9 @@ class Database:
                 LIMIT ?
                 """,
                 (bounded,),
-            ).fetchall()
+            )
+            .fetchall()
+        )
         return [dict(row) for row in rows]
 
     def purge_old_audit_events(self, *, days: int = 7) -> int:
@@ -590,13 +627,27 @@ class Database:
             "last_synced_at": row["last_synced_at"],
         }
 
+    def close(self) -> None:
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            self._local.connection = None
+            with suppress(sqlite3.Error):
+                connection.close()
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15.0)
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            return connection
+        # isolation_level=None keeps sqlite3 out of transaction management so that
+        # transaction() owns every BEGIN/COMMIT on a connection that now outlives
+        # the call. One connection per thread also satisfies check_same_thread.
+        connection = sqlite3.connect(self.path, timeout=15.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 15000")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA busy_timeout = 15000")
+        self._local.connection = connection
         return connection
 
 
