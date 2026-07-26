@@ -50,6 +50,16 @@ class ProxySpec:
         return f"{self.scheme}://{credentials}{host}:{self.port}"
 
     @property
+    def chromium_url(self) -> str:
+        if self.username:
+            raise ProxyConfigurationError(
+                "authenticated browser proxies require an authentication-free relay"
+            )
+        scheme = "socks5" if self.scheme in {"socks5", "socks5h"} else "http"
+        host = f"[{self.host}]" if ":" in self.host and not self.host.startswith("[") else self.host
+        return f"{scheme}://{host}:{self.port}"
+
+    @property
     def proxychains_line(self) -> str:
         proxy_type = "socks5" if self.scheme in {"socks5", "socks5h"} else "http"
         line = f"{proxy_type} {self.host} {self.port}"
@@ -161,6 +171,10 @@ def render_browser_proxy_config(
     if proxy is None:
         target.unlink(missing_ok=True)
         return None
+    if proxy.username:
+        raise ProxyConfigurationError(
+            "authenticated browser proxies require an authentication-free relay"
+        )
     try:
         resolved_host = socket.gethostbyname(proxy.host)
     except OSError as exc:
@@ -173,7 +187,7 @@ def render_browser_proxy_config(
         password=proxy.password,
     )
     write_proxychains_config(target, browser_proxy)
-    return proxy
+    return browser_proxy
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -182,10 +196,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("usage: proxy.py OUTPUT", file=sys.stderr)
         return 2
     try:
-        render_browser_proxy_config(arguments[0])
+        proxy = render_browser_proxy_config(arguments[0])
     except (OSError, ProxyConfigurationError):
         print("browser proxy configuration is invalid", file=sys.stderr)
         return 2
+    if proxy is not None:
+        print(proxy.chromium_url)
     return 0
 
 

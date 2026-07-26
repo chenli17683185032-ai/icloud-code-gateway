@@ -12,6 +12,9 @@ from icloud_gateway.proxy import (
     render_browser_proxy_config,
     write_proxychains_config,
 )
+from icloud_gateway.proxy import (
+    main as proxy_main,
+)
 
 
 def test_proxy_spec_is_shared_by_requests_and_proxychains() -> None:
@@ -26,9 +29,9 @@ def test_proxy_spec_is_shared_by_requests_and_proxychains() -> None:
     assert proxy.requests_url == (
         "socks5h://account%40example.com:p%40ssword@cn-proxy.example:1080"
     )
-    assert proxy.proxychains_line == (
-        "socks5 cn-proxy.example 1080 account@example.com p@ssword"
-    )
+    assert proxy.proxychains_line == "socks5 cn-proxy.example 1080 account@example.com p@ssword"
+    with pytest.raises(ProxyConfigurationError, match="authentication-free relay"):
+        _ = proxy.chromium_url
 
 
 def test_proxy_required_and_invalid_values_fail_closed() -> None:
@@ -92,9 +95,11 @@ def test_browser_proxy_config_resolves_docker_dns_name(
     )
 
     assert proxy is not None
-    assert proxy.requests_url == "socks5h://cn-proxy:7891"
-    assert "socks5 172.30.0.12 7891" in target.read_text(encoding="utf-8")
-    assert "socks5 cn-proxy 7891" not in target.read_text(encoding="utf-8")
+    assert proxy.requests_url == "socks5h://172.30.0.12:7891"
+    assert proxy.chromium_url == "socks5://172.30.0.12:7891"
+    content = target.read_text(encoding="utf-8")
+    assert "socks5 172.30.0.12 7891" in content
+    assert "socks5 cn-proxy 7891" not in content
 
 
 def test_browser_proxy_dns_failure_fails_closed(monkeypatch, tmp_path) -> None:
@@ -117,6 +122,40 @@ def test_browser_proxy_dns_failure_fails_closed(monkeypatch, tmp_path) -> None:
         )
 
     assert not target.exists()
+
+
+def test_browser_proxy_authentication_requires_local_relay(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "icloud_gateway.proxy.socket.gethostbyname",
+        lambda host: "172.30.0.12",
+    )
+
+    with pytest.raises(ProxyConfigurationError, match="authentication-free relay"):
+        render_browser_proxy_config(
+            tmp_path / "proxychains.conf",
+            {
+                "BROWSER_PROXY_SERVER": "socks5h://cn-proxy:7891",
+                "BROWSER_PROXY_USERNAME": "user",
+                "BROWSER_PROXY_PASSWORD": "secret",
+                "BROWSER_PROXY_REQUIRED": "1",
+            },
+        )
+
+
+def test_proxy_cli_prints_resolved_native_chromium_url(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("BROWSER_PROXY_SERVER", "socks5h://cn-proxy:7891")
+    monkeypatch.setenv("BROWSER_PROXY_REQUIRED", "1")
+    monkeypatch.setattr(
+        "icloud_gateway.proxy.socket.gethostbyname",
+        lambda host: "172.30.0.12",
+    )
+
+    assert proxy_main([str(tmp_path / "proxychains.conf")]) == 0
+    assert capsys.readouterr().out.strip() == "socks5://172.30.0.12:7891"
 
 
 def test_settings_loads_hme_proxy_and_rejects_missing_required_proxy(

@@ -148,7 +148,7 @@ Browser runtime
 - 访问密钥：`icg_` 前缀 + 32 字节随机值，只在签发或轮换时显示一次。
 - 管理会话：`HttpOnly` + `Secure` + `SameSite=Strict`，有限有效期，所有管理写请求校验 CSRF。
 - 在线浏览器：Caddy 对 noVNC 页面、资源和 WebSocket 逐请求执行管理员会话前置校验；noVNC 继续要求独立 VNC 密码。
-- 回国代理：端点和认证凭据不入库、不入 Git、不进程参数明文展示；已启用代理时无直连降级。
+- 回国代理：端点和认证凭据不入库、不入 Git、不进程参数明文展示；已启用代理时无直连降级。Chromium 使用无认证内网 relay 的原生代理参数，避免凭据出现在进程参数；HME API 仍支持认证代理。
 - 公开响应：`Cache-Control: no-store`、`Pragma: no-cache`、`Referrer-Policy: no-referrer`、严格 CSP。
 - 限流：按 IP 和密钥摘要双维滑动窗口；连续失败时延长冷却，不影响其他密钥。
 - 日志：应用层禁止打印 request body，所有异常转换为不包含上游响应正文的结构化错误。
@@ -236,7 +236,7 @@ Browser runtime
 
 - [x] App Dockerfile：非 root 运行、健康检查、持久 `/data`。
 - [x] Browser Dockerfile：复用联动小铺的 Playwright/Chromium 基础镜像层，独立 Chromium + Xvfb + noVNC，唯一持久 `/browser-data/profile`，跨容器独占锁与异常恢复，Chromium CDP 回环监听并通过不映射宿主的内部代理供 app 使用。
-- [x] 德国机房出站：browser 和 HME API 复用同一回国代理配置，支持 HTTP/SOCKS5 与可选认证，代理开启后故障失败关闭；生产使用独立 Mihomo 进程，避免与收款 Worker 共用重启边界。
+- [x] 德国机房出站：browser 和 HME API 复用同一回国代理配置，支持 HTTP/SOCKS5，代理开启后故障失败关闭；browser 使用无认证内网 Mihomo 端点，HME API 可选认证；生产使用独立 Mihomo 进程，避免与收款 Worker 共用重启边界。
 - [x] Docker Compose：app/browser/Caddy，持久卷，重启策略，noVNC 原始端口只绑定 `127.0.0.1`；共享服务器覆盖文件禁用内置 Caddy并接入既有 edge 网络。
 - [x] Caddy HTTPS：域名环境变量、安全头、请求体限制、管理员认证后的 `/admin/browser/*` noVNC 页面与 WebSocket 转发。
 - [x] 运维手册：网站内在线登录、SSH 隧道备用访问、Session 续期、备份、恢复、密钥轮换。
@@ -305,6 +305,7 @@ Browser runtime
 - 2026-07-26：私有 GitHub 仓库 `chenli17683185032-ai/icloud-code-gateway` 已建立，首个完整实现提交已推送 `main`。服务器部署目录选定为 deploy 用户可控的 `/opt/new-api/icloud-code-gateway`，不依赖 sudo。
 - 2026-07-26：生产首次启动发现 `proxychains4` 不接受 Docker DNS 名 `cn-proxy` 作为首个代理节点；故障 browser 已停止，app 与独立 cn-proxy 保持健康。修复限定为 browser 配置渲染时将代理主机解析为容器网络 IPv4，解析失败继续失败关闭；HME 请求仍保留 `socks5h` 主机名语义。当前节点为 H 的线上闭环验收，完成后进入 I 的定向清理。
 - 2026-07-26：browser 代理 DNS 修复完成本地闭环：新增解析成功与失败关闭回归测试，全量 `79 passed`；Ruff、compileall、Compose 合并配置与 `git diff --check` 均通过。
+- 2026-07-26：服务器验证发现 proxychains 的 `LD_PRELOAD` 与 Chromium 多进程冲突，Chromium 在 CDP 就绪后以 133 退出，随后 fluxbox 令清理阶段失去上界。隔离 QA 证明 Chromium 原生 SOCKS5 可稳定加载真实 iCloud CN 页面；实现调整为启动时解析/校验代理后传入原生 `--proxy-server`，并为所有子进程增加 5 秒有界清理与最终 KILL。
 - 2026-07-25：建立本计划。当前节点为 A，尚未修改业务代码、访问 Apple 远程写接口或部署服务。
 - 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
 - 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。

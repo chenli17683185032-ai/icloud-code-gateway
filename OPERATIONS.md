@@ -79,10 +79,19 @@ docker compose port browser 9222
 
 ## 3. 回国代理验收
 
-浏览器出口：
+浏览器出口（通过现有 CDP 打开一次临时页面，随后立即关闭）：
 
 ```bash
-docker compose exec browser proxychains4 -q -f /run/icloud-browser/proxychains.conf curl -fsS --max-time 15 https://api.ipify.org
+docker compose exec app python - <<'PY'
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    browser = playwright.chromium.connect_over_cdp("http://browser:9222")
+    page = browser.contexts[0].new_page()
+    page.goto("http://ip-api.com/line/?fields=query", wait_until="domcontentloaded", timeout=20_000)
+    print(page.locator("body").inner_text().strip())
+    page.close()
+PY
 ```
 
 HME API 使用的出口：
@@ -98,9 +107,9 @@ docker compose exec app python -c "from icloud_gateway.config import Settings; i
 ```bash
 docker run --rm --name icg-proxy-failclosed-check \
   -e BROWSER_PROXY_REQUIRED=1 \
-  -e BROWSER_PROXY_SERVER=http://127.0.0.1:9 \
+  -e BROWSER_PROXY_SERVER=socks5h://127.0.0.1:9 \
   --entrypoint bash icloud-code-gateway-browser \
-  -lc 'python3 /usr/local/lib/icloud-browser/proxy.py /tmp/proxychains.conf && exec proxychains4 -q -f /tmp/proxychains.conf curl -fsS --max-time 5 https://www.icloud.com.cn/ -o /dev/null'
+  -lc 'proxy=$(python3 /usr/local/lib/icloud-browser/proxy.py /tmp/proxychains.conf); timeout 15s /ms-playwright/chromium-*/chrome-linux64/chrome --headless=new --no-sandbox --proxy-server="$proxy" --dump-dom https://www.icloud.com.cn/ 2>/dev/null | grep -q ERR_PROXY_CONNECTION_FAILED'
 ```
 
 预期为连接失败；成功访问反而表示验收失败。
@@ -112,7 +121,7 @@ docker run --rm --name icg-proxy-failclosed-check \
 - 只读复用 `/opt/new-api/secrets/ldxp-browser-proxy.yaml` 中的代理订阅与规则。
 - 复制为 `/opt/new-api/icloud-code-gateway/secrets/cn-proxy.yaml`，权限 `0600`。
 - 在副本中设置 `allow-lan: true`、`bind-address: 0.0.0.0`；该容器不发布宿主端口，只加入项目私有 `gateway` 网络。
-- `CN_PROXY_SERVER=socks5h://cn-proxy:7891`，app 与 browser 使用同一端点。
+- `CN_PROXY_SERVER=socks5h://cn-proxy:7891`，app 与 browser 使用同一无认证端点；browser 启动时将其解析为 Chromium 原生 `socks5://<container-ip>:7891`，HME API 保留 `socks5h` 语义。
 - 联动小铺现有 proxy/worker 容器、配置文件和数据目录不修改、不重启。
 
 共享服务器使用覆盖文件：

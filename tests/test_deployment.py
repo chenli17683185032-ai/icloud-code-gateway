@@ -26,3 +26,15 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "header_up -Connection" in caddy_site
     assert "header_up -Upgrade" in caddy_site
     assert "reverse_proxy icloud-code-gateway-browser:6080" in caddy_site
+
+
+def test_browser_uses_native_proxy_and_bounded_process_cleanup() -> None:
+    entrypoint = (
+        Path(__file__).resolve().parents[1] / "docker" / "browser-entrypoint.sh"
+    ).read_text()
+
+    assert 'browser_proxy="$(python3 ' in entrypoint
+    assert 'browser_command+=("--proxy-server=$browser_proxy")' in entrypoint
+    assert "browser_command=(proxychains4" not in entrypoint
+    assert "for _ in {1..50}" in entrypoint
+    assert 'kill -KILL "${pids[@]}"' in entrypoint

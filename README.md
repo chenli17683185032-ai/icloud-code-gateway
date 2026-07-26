@@ -14,6 +14,7 @@
 - iCloud Chromium、noVNC、健康检查和重启不影响收款 Worker。
 - 浏览器容器重建后继续使用原 Cookie；捕获任务只连接该 Chromium，不创建临时 profile。
 - browser 与 HME API 可复用同一个回国代理端点，但不会在代理故障时静默改走德国 IP。
+- Chromium 使用原生代理参数，避免 `LD_PRELOAD` 代理库破坏其多进程稳定性；browser 端点应为无认证的内网代理，HME API 仍可使用带认证的上游代理。
 
 ## 核心保证
 
@@ -34,7 +35,7 @@ admin       -> Caddy -> FastAPI admin
 admin       -> Caddy -> forward_auth -> noVNC -> persistent Chromium
 FastAPI     -> Docker-only CDP -> persistent Chromium
 FastAPI     -> configured CN proxy -> iCloud HME API
-Chromium    -> proxychains strict_chain -> configured CN proxy
+Chromium    -> native SOCKS5/HTTP proxy -> configured CN proxy
 ```
 
 ## 快速启动

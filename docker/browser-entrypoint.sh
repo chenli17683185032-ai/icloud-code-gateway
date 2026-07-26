@@ -10,7 +10,7 @@ umask 077
 mkdir -p /browser-data/profile /run/icloud-browser
 
 proxy_config=/run/icloud-browser/proxychains.conf
-python3 /usr/local/lib/icloud-browser/proxy.py "$proxy_config"
+browser_proxy="$(python3 /usr/local/lib/icloud-browser/proxy.py "$proxy_config")"
 
 browser_executable="${BROWSER_EXECUTABLE:-}"
 if [[ -z "$browser_executable" ]]; then
@@ -98,21 +98,33 @@ browser_command=(
   "--no-default-browser-check"
   "--password-store=basic"
   "--lang=zh-CN"
-  "https://www.icloud.com.cn/icloudplus/"
 )
-if [[ -f "$proxy_config" ]]; then
-  browser_command=(proxychains4 -q -f "$proxy_config" "${browser_command[@]}")
+if [[ -n "$browser_proxy" ]]; then
+  browser_command+=("--proxy-server=$browser_proxy")
 fi
+browser_command+=("https://www.icloud.com.cn/icloudplus/")
 "${browser_command[@]}" >/run/icloud-browser/chromium.log 2>&1 &
 chromium_pid=$!
 
 cleanup() {
-  kill "$chromium_pid" "$cdp_proxy_pid" "$websockify_pid" "$x11vnc_pid" \
-    "$fluxbox_pid" "$xvfb_pid" \
-    2>/dev/null || true
-  wait "$chromium_pid" "$cdp_proxy_pid" "$websockify_pid" "$x11vnc_pid" \
-    "$fluxbox_pid" "$xvfb_pid" \
-    2>/dev/null || true
+  local pids=(
+    "$chromium_pid" "$cdp_proxy_pid" "$websockify_pid" "$x11vnc_pid"
+    "$fluxbox_pid" "$xvfb_pid"
+  )
+  kill "${pids[@]}" 2>/dev/null || true
+  for _ in {1..50}; do
+    local alive=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    [[ "$alive" -eq 0 ]] && break
+    sleep 0.1
+  done
+  kill -KILL "${pids[@]}" 2>/dev/null || true
+  wait "${pids[@]}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
