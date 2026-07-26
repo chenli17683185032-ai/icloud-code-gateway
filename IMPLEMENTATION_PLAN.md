@@ -1,0 +1,308 @@
+# iCloud 五分钟验证码网关实施计划
+
+## 1. 目标与验收指标
+
+从 `Team-Workflow` 中提取 iCloud Hide My Email (HME) 会话、Alias 生命周期和 IMAP 精确收件能力，建立一个可独立部署的网站。管理员为每个 iCloud 隐藏邮箱签发一个高强度密钥；访客输入密钥后，只能查询与该密钥绑定的 Alias，且只返回当前时刻往前 300 秒内收到的最新 6 位验证码。
+
+验收指标：
+
+- 一个有效密钥在任意时刻最多绑定一个 Alias；密钥轮换后旧密钥立即失效。
+- 邮件收件人必须精确匹配绑定 Alias，其他 Alias 或主邮箱的邮件不得返回。
+- 以 IMAP `INTERNALDATE` 作为收件时间主依据，仅接受 `now - 300s <= received_at <= now + 60s` 的邮件；缺失时才回退到带时区的 `Date` 头。
+- 公网 API 不返回邮件主题、正文、完整发件人、iCloud 会话、IMAP 凭据或 Alias 全文。
+- 公网查询有界完成：默认 IMAP 操作超时 20 秒，全请求不因网络或 Apple 会话异常无限阻塞。
+- HME Session 失效时禁止 Alias 写操作，保留上一份已验证数据，并向管理员显示可恢复状态。
+- 密钥、Apple Cookie、IMAP 密码、VNC 密码不进入 Git、计划、日志、截图或普通 API 响应。
+- Docker 服务重启后 60 秒内恢复 `/healthz` HTTP 200，SQLite 数据、浏览器 profile 和已签发密钥保持不变。
+- Chromium 始终复用唯一的 `/browser-data/profile`，容器替换或异常退出后仍保留长期 Cookie，不允许捕获任务创建临时 profile。
+- 管理员登录网站后可通过同域 HTTPS 的 `/admin/browser/*` 在线操作同一 Chromium；未登录请求不得取得 noVNC 页面、静态资源或 WebSocket。
+- 德国服务器上的 iCloud CN 浏览器与 HME API 通过显式配置的回国 HTTP/SOCKS5 代理出站；代理已配置时故障必须失败关闭，不得静默改为德国 IP 直连。
+- iCloud 与联动小铺复用同一 Playwright/Chromium 基础镜像层以减少磁盘占用，但保持独立进程、独立 profile、独立健康检查与重启边界。
+
+## 2. 工程控制抽象
+
+| 控制元素 | 本项目对象 |
+| --- | --- |
+| 目标 | 按 Alias 隔离地交付 5 分钟内的最新验证码 |
+| 被控对象 | Apple HME 资源池、转发邮箱、IMAP 收件箱、持久 Chromium profile |
+| 控制器 | FastAPI 管理服务、密钥映射、限流器、会话状态机 |
+| 测量 | HME list 只读验证、IMAP TLS/登录检测、Alias 精确收件人、`INTERNALDATE`、健康端点 |
+| 执行器 | HME generate/reserve、Session 加密更新、密钥签发/轮换/撤销、验证码响应 |
+| 环境与扰动 | Apple 会话过期、HME 限频、IMAP 延迟、邮件时钟偏差、网络抖动、并发请求、公网扫描 |
+| 稳定性策略 | 默认失败关闭、有界超时、只读验证先于写入、旧会话原子保留、无限重试禁止 |
+
+最小充分闭环：
+
+```text
+配置一个转发 IMAP
+  -> 导入或捕获一份通过 HME list 验证的 Session
+  -> 创建或接管一个 Alias
+  -> 签发一个密钥
+  -> 向该 Alias 发送测试验证码
+  -> 公开页输入密钥
+  -> 只返回 300 秒窗口内的对应验证码
+  -> 轮换密钥并证明旧密钥失效
+```
+
+这条闭环稳定、可重复后，再批量创建 Alias 和扩大并发。
+
+## 3. 已有系统与 GitHub 经验
+
+### 3.1 `Team-Workflow` 可复用部分
+
+- `team_protocol/icloud_hme.py`：HME cURL/HAR 白名单解析、Session 验证、list/generate/reserve 客户端。
+- `team_protocol/icloud_hme_capture.py`：隔离 profile、持久 Cookie/设备信任、可见登录、只捕获真实 `/v2/hme/list` 请求。
+- `team_protocol/registrar_runtime/icloud_imap_provider.py`：IMAP TLS、SOCKS/HTTP 代理、Alias 精确匹配、`BODY.PEEK[]` 不标已读、6 位码提取。
+
+提取时不引入 Team、ChatGPT、OpenBrowser、代理链、换班或账号池逻辑。源项目当前存在未提交差异，本项目只读参考，不修改源工作树。
+
+### 3.2 GitHub 项目结论
+
+- `heartmore/icloud-hme`：证明了多账号独立 Cookie/HME 会话与 Web 管理的可行性；其 JSON 明文凭据与全邮件缓存不适合本项目的公网密钥网关。
+- `pwnapplehat/icloud-hide-my-email`：证明 HME 生成与 iCloud IMAP OTP 可以形成同一条闭环，并确认 iCloud IMAP 需使用 App 专用密码。
+- `lukenmorris/icloud-hide-my-email-manager`：预览与写操作分离，破坏性操作需要额外确认。本项目首版不暴露停用或删除 Alias 能力。
+- `not-knope/Hide-My-Email-iCloud-Manager`：再次证明 Apple Cookie 等价于高权限账号凭据，不能与普通用户查询服务共享边界。
+
+采用结论：
+
+- HME 管理面与 OTP 公开面完全分离。
+- HME Session 和 IMAP 凭据只以环境主密钥加密存储。
+- 不持久化邮件正文或 OTP；每次查询从 IMAP 只读测量。
+- 远程 HME list 是 Alias 状态事实来源，本地数据不猜测 Apple 状态。
+- 浏览器 profile 持久化且只允许一个容器持有；Chromium CDP 监听浏览器自身回环并经内部代理仅暴露在 Docker 网络，不映射宿主端口，app 每次捕获前动态解析 browser 容器地址；noVNC 原始端口只绑定服务器回环地址，并额外经管理员认证后的同域 HTTPS 路由提供在线维护。
+- 联动小铺 Worker 使用 `mcr.microsoft.com/playwright:v1.61.1-jammy`；iCloud browser 使用同一基础镜像与其内置 Chromium，Docker 共享基础层，不把支付 Worker 的临时 BrowserContext 与 iCloud 长期 profile 放进同一浏览器进程。
+- 回国代理参数只由服务器 Secret/`0600` 环境文件注入；浏览器整体出站与 HME HTTPS 请求使用同一代理端点，IMAP 是否走代理仍按其邮箱可达性独立配置。
+
+## 4. 系统边界与架构
+
+```text
+公开浏览器
+  -> POST /api/code (access key)
+  -> 密钥哈希查询 + IP/密钥限流
+  -> 获得唯一 Alias
+  -> IMAP 只读扫描
+  -> Alias + 300s + 6 位码筛选
+  -> 无缓存 JSON 响应
+
+管理员浏览器
+  -> 管理员会话 + CSRF
+  -> /admin/browser/* -> 管理员会话前置校验 -> noVNC -> 唯一持久 Chromium
+  -> HME Session 导入/远程 Chromium 捕获
+  -> HME list 只读校验
+  -> Alias 同步/创建
+  -> 密钥签发/轮换/撤销
+
+FastAPI
+  -> SQLite WAL (映射与状态)
+  -> AES-GCM (凭据密文)
+  -> iCloud HME HTTPS (德国机房经显式回国代理)
+  -> iCloud/转发邮箱 IMAP TLS
+  -> Chromium CDP (Docker 内网)
+
+Browser runtime
+  -> 复用联动小铺的 Playwright/Chromium 基础镜像层
+  -> 独立 Chromium 进程 + 独立持久 profile
+  -> 回国代理出站 + noVNC 管理界面
+```
+
+首版明确不做：
+
+- 不保存或自动输入 Apple ID 密码、2FA 码、恢复密钥。
+- 不向普通用户展示收件箱、邮件正文、HME 列表或 Alias 全文。
+- 不开放 HME 停用、删除或 Apple 账户其他写操作。
+- 不把 noVNC 原始端口或 CDP 端口直接公开到互联网；noVNC 只能经管理员认证后的 HTTPS 反向代理访问。
+- 不在请求日志中记录原始密钥、OTP、Cookie 或 IMAP 密码。
+- 不复用联动小铺正在运行的 Chromium 进程、临时 BrowserContext 或 profile，也不让其收款任务重启影响 iCloud。
+
+## 5. 数据模型
+
+### `settings`
+
+- `key`：配置名。
+- `encrypted_value`：AES-GCM 密文，用途名作为 AAD。
+- `updated_at`：UTC 更新时间。
+
+存放 HME Session、IMAP 配置、可选 HME/IMAP 代理。环境主密钥不入库。
+
+### `aliases`
+
+- `id`：UUID。
+- `email`：Alias，管理面可见，公开面不返回。
+- `anonymous_id`：Apple HME 远程 ID，加密存放。
+- `label` / `note`：管理员标识。
+- `sender_filter`：可选的发件地址或域名过滤。
+- `state`：`active | inactive`。
+- `access_key_hash`：高熵密钥 SHA-256，不存原文。
+- `access_key_hint`：仅用于管理员识别的末 4 位。
+- `key_issued_at` / `key_revoked_at`。
+- `created_at` / `updated_at` / `last_synced_at`。
+
+### `audit_events`
+
+仅记录管理事件和脱敏查询结果，不记录密钥、OTP 或邮件正文。字段包含事件类型、Alias ID、结果、IP HMAC 摘要、UTC 时间。默认保留 7 天。
+
+## 6. 安全边界
+
+- 主密钥：`ICLOUD_GATEWAY_MASTER_KEY`，32 字节 URL-safe Base64，用于 AES-GCM 与会话签名派生。
+- 管理员密码：通过 Docker Secret/环境注入，仅用 `hmac.compare_digest` 校验；不写 SQLite。
+- 访问密钥：`icg_` 前缀 + 32 字节随机值，只在签发或轮换时显示一次。
+- 管理会话：`HttpOnly` + `Secure` + `SameSite=Strict`，有限有效期，所有管理写请求校验 CSRF。
+- 在线浏览器：Caddy 对 noVNC 页面、资源和 WebSocket 逐请求执行管理员会话前置校验；noVNC 继续要求独立 VNC 密码。
+- 回国代理：端点和认证凭据不入库、不入 Git、不进程参数明文展示；已启用代理时无直连降级。
+- 公开响应：`Cache-Control: no-store`、`Pragma: no-cache`、`Referrer-Policy: no-referrer`、严格 CSP。
+- 限流：按 IP 和密钥摘要双维滑动窗口；连续失败时延长冷却，不影响其他密钥。
+- 日志：应用层禁止打印 request body，所有异常转换为不包含上游响应正文的结构化错误。
+- 服务器时钟：部署验收必须检查 UTC/NTP；时钟异常时 OTP 窗口失败关闭。
+
+## 7. 实施节点
+
+### 节点 A：项目骨架与密钥存储
+
+- [x] 建立 FastAPI 应用、配置加载、SQLite WAL 与迁移。
+- [x] 实现 AES-GCM 用途隔离存储、访问密钥签发/哈希/轮换/撤销。
+- [x] 建立结构化日志脱敏和安全响应头中间件。
+
+验证：数据库 `quick_check=ok`；重启后凭据可解密；错误主密钥不能静默返回错误明文。
+
+### 节点 B：HME 客户端提取
+
+- [x] 提取 cURL/HAR/request 解析和 Apple host/path/origin 白名单。
+- [x] 提取 list/generate/reserve，保留强制直连或显式代理语义。
+- [x] 导入 Session 前调用 list 只读验证；验证失败不覆盖旧 Session。
+- [x] 同步远程 Alias 时以 HME list 为权威快照，但不自动签发密钥。
+
+验证：白名单、字段缺失、会话过期、错误响应脱敏和创建 Alias 协议测试通过。
+
+### 节点 C：持久浏览器会话
+
+- [x] 支持连接 Docker 内网 Chromium CDP，复用唯一持久 profile。
+- [x] 管理员启动捕获后，监听真实 `GET /v2/hme/list` 200 请求并提取最小 Session。
+- [x] 捕获任务状态机：`idle -> waiting_login -> verifying -> captured | failed | cancelled`。
+- [x] 捕获连接断开时不关闭远程 Chromium，不清理持久 profile。
+- [x] 提供手动 cURL/HAR 导入作为可恢复备用路径。
+- [x] 捕获任务只连接唯一 CDP 浏览器，不启动或切换临时 profile。
+
+验证：重启 app 不丢 profile；取消/超时不存无效 Session；已登录 profile 可再次捕获。
+
+### 节点 D：IMAP 五分钟 OTP 测量器
+
+- [x] 提取 IMAP TLS 和可选 HTTP/SOCKS5 代理。
+- [x] 增加 `INTERNALDATE BODY.PEEK[]` 只读获取，精确解析多种转发收件头。
+- [x] 仅扫描有界 UID 集合，对 Alias、时间窗、可选 sender 过滤后再提取 6 位码。
+- [x] 多封合格邮件时返回 `received_at` 最新的一封，不依赖 UID 大小猜测时间。
+- [x] IMAP 登录失败、网络超时和无码邮件返回不泄露上游细节的状态。
+
+验证：299/300/301 秒边界、未来时钟、缺失时间、其他 Alias、HTML/纯文本、重复码和多封排序测试通过。
+
+### 节点 E：公开查询闭环
+
+- [x] `POST /api/code`：密钥校验、双维限流、IMAP 线程隔离、统一脱敏错误。
+- [x] 公开页不保存密钥到 URL、cookie、localStorage 或 sessionStorage。
+- [x] 页面支持查询、有界自动轮询、复制验证码、结果过期清除、加载/无码/错误/限流状态。
+- [x] 服务端与浏览器端均禁止缓存敏感响应。
+
+验证：密钥串号、无效/撤销密钥、限流、超时、无代码和成功响应 API 测试；浏览器历史中不出现密钥。
+
+### 节点 F：管理工作台
+
+- [x] 管理员登录/退出、会话签名和 CSRF。
+- [x] HME Session 状态、手动导入、远程浏览器捕获、HME list 同步。
+- [x] IMAP 配置与只读连接检测，秘密字段留空表示保留旧值。
+- [x] 创建 1-5 个 Alias，每个 Alias 创建后可单独签发密钥。
+- [x] 同步已有 Alias，为选中项签发/轮换/撤销密钥。
+- [x] 管理页只显示密钥末 4 位；完整密钥只在创建结果模态框中显示一次。
+
+验证：未登录、CSRF 失败、Session 失效、IMAP 失败、Alias 重复、密钥轮换/撤销测试通过。
+
+### 节点 G：前端与可访问性
+
+设计判断：面向受邀用户的安全工具页和管理员工作台，信任优先、克制、可扫描。
+
+- `DESIGN_VARIANCE: 3`
+- `MOTION_INTENSITY: 2`
+- `VISUAL_DENSITY: 6`
+- 服务端渲染 + 原生 CSS/JavaScript，自动跟随浅色/深色系统主题。
+- 石墨中性色 + 单一青绿强调色；输入、按钮、错误和焦点对比度达到 WCAG AA。
+- 统一 6px 边角；仅在重复 Alias 项与模态框使用卡片。
+- 动效只用于加载和状态变化，完整支持 `prefers-reduced-motion`。
+
+验证：`1440x900`、`1024x768`、`390x844`、`360x800`下无横向溢出、按钮换行、文字重叠或不可达操作；键盘可完成全流程。
+
+- [x] 公开页与管理页完成上述四个视口的浅色/深色浏览器验收。
+- [x] Lucide 图标全部从官方 `lucide-static` 包提取并保留许可证。
+- [x] 浏览器控制台和网络错误为 0，移动端按钮尺寸与一次性密钥模态框通过验收。
+
+### 节点 H：容器与服务器部署
+
+- [x] App Dockerfile：非 root 运行、健康检查、持久 `/data`。
+- [x] Browser Dockerfile：复用联动小铺的 Playwright/Chromium 基础镜像层，独立 Chromium + Xvfb + noVNC，唯一持久 `/browser-data/profile`，跨容器独占锁与异常恢复，Chromium CDP 回环监听并通过不映射宿主的内部代理供 app 使用。
+- [x] 德国机房出站：browser 和 HME API 复用同一回国代理配置，支持 HTTP/SOCKS5 与可选认证，代理开启后故障失败关闭；生产使用独立 Mihomo 进程，避免与收款 Worker 共用重启边界。
+- [x] Docker Compose：app/browser/Caddy，持久卷，重启策略，noVNC 原始端口只绑定 `127.0.0.1`；共享服务器覆盖文件禁用内置 Caddy并接入既有 edge 网络。
+- [x] Caddy HTTPS：域名环境变量、安全头、请求体限制、管理员认证后的 `/admin/browser/*` noVNC 页面与 WebSocket 转发。
+- [x] 运维手册：网站内在线登录、SSH 隧道备用访问、Session 续期、备份、恢复、密钥轮换。
+
+验证：Compose 冷启动、异常重启、SQLite 持久化、Chromium Cookie/profile 持久化、基础 Chromium 镜像层复用、代理出口 IP/故障关闭、CDP/noVNC 暴露边界、未登录 noVNC 拒绝、登录后页面与 WebSocket 可用、HTTPS 与备份恢复演练通过。
+
+### 节点 I：验收、GitHub 与清理
+
+- [x] 运行全量测试、Python 编译、静态检查；提交前继续执行 `git diff --check`。
+- [x] 扫描密钥、Cookie、邮箱授权码、真实邮箱和私有主机名；当前命中仅为测试 canary。
+- [x] 用 Playwright 完成公开页/管理页桌面与移动截图、控制台和网络错误检查。
+- [ ] 建立私有 GitHub 仓库，提交并推送 `main`。
+- [ ] 清理测试缓存、截图临时件、构建产物和未使用的容器，保留源码与必要 QA 记录。
+- [ ] 获得实际服务器 IP/域名/SSH 连接后，执行最小停机部署和线上闭环验收。
+
+验证：GitHub `main` 与本地 HEAD 一致；工作树只保留用户明确要求保留的本地运行数据。
+
+## 8. 测试矩阵
+
+| 类别 | 必须覆盖 |
+| --- | --- |
+| 密钥 | 签发、哈希、串号、轮换、撤销、并发唯一性 |
+| HME | cURL/HAR/request、host/path/origin 白名单、list、generate/reserve、Session 过期 |
+| 捕获 | 唯一持久 profile、长期 Cookie、CDP 断连不关浏览器、取消、超时、无 list、无效 list |
+| IMAP | Alias 精确匹配、转发头、`INTERNALDATE`、299/300/301 秒、HTML、附件排除、发件人过滤 |
+| API | 成功、无码、无效密钥、撤销密钥、限流、IMAP 超时、无缓存头 |
+| 管理 | 登录、会话过期、CSRF、noVNC 前置认证、凭据保留语义、Alias 同步/创建、密钥只显示一次 |
+| 部署 | 非 root、持久卷、基础 Chromium 镜像层复用、回国代理/无直连降级、健康检查、异常重启恢复、CDP/noVNC 暴露边界、备份/恢复 |
+| UI | 浅色/深色、键盘、减少动效、桌面/移动、加载/空/错误/成功状态 |
+
+## 9. 部署与回滚
+
+部署前：
+
+1. 生成主密钥、管理员密码和 VNC 密码，以服务器 Secret/权限 `0600` 环境文件保存。
+2. 从联动小铺已有 Secret 取得回国代理的协议、端点和可选认证信息，注入 iCloud browser 与 HME API，不复制到仓库。
+3. 验证域名 DNS、80/443 端口、服务器 NTP 以及 browser/HME 代理出口 IP。
+4. 如有旧数据，先使用 SQLite 在线备份并检查 `quick_check`。
+5. 先启动 browser 与 app，健康后再让 Caddy 切换公网流量。
+
+回滚：
+
+- 代码回滚到上一个 Git 标签/镜像，不删除 SQLite 和 browser profile 卷。
+- 只在迁移或启动导致数据库异常时恢复部署前备份。
+- 回滚不撤销已经在 Apple 远程成功创建的 Alias；上线后通过 HME list 只读同步对账。
+- 60 秒内健康检查不恢复时立即回滚，不把服务留在等待人工输入的停机状态。
+
+## 10. 当前假设与外部输入
+
+- 首版支持一个 iCloud HME 资源池和一个转发 IMAP，数据模型不阻塞以后扩展多资源池。
+- 验证码形式以现有 `Team-Workflow` 业务的 6 位数字码为准。
+- 隐藏邮箱邮件已转发到可用 IMAP 登录的邮箱。
+- 联动小铺现有 Worker 已证明代理参数形式为 server + 可选 username/password；最终上线前仍需在服务器上只读确认实际协议、出口 IP 和 Secret 文件位置。
+- 最终上线需要实际服务器 IP/主机名、SSH 用户/密钥路径和域名。这些信息不影响本地实现与容器验收。
+- 本计划不记录任何真实 Apple/IMAP/API 凭据。
+
+## 11. 实施记录
+
+- 2026-07-25：完成源项目只读检查。确认 `Team-Workflow` 工作树存在用户未提交差异，本项目不修改该工作树。
+- 2026-07-25：完成 GitHub 相近项目检索与架构取舍，选定“HME 管理面与 OTP 公开面分离、不持久化邮件正文、服务器持久 Chromium profile”方案。
+- 2026-07-26：根据新增要求，将“唯一长期 Cookie 浏览器”和“管理员登录后通过同域网站在线可视化维护 iCloud”升级为强制验收项；SSH 隧道保留为故障恢复备用路径。
+- 2026-07-26：故障注入证明 app/browser 共享网络命名空间会在 browser 单独重启后留下旧网络引用，方案改为独立容器网络 + browser 动态地址解析，消除必须人工重启 app 的失稳点。
+- 2026-07-26：根据德国服务器与联动小铺现有回国代理，方案调整为复用同一 Playwright/Chromium 基础镜像层、独立 iCloud 进程/profile，browser 与 HME API 同代理出站且无直连降级。
+- 2026-07-26：本地容器验收通过。Browser 7 秒健康，固定 UID 102 无损接管旧 profile；Chromium 故障注入后 browser 独立恢复，app 未重启，Cookie 与 SQLite Alias 保持。Caddy WebSocket 认证缺陷已修复，登录后 101/RFB、未登录 303。SQLite/profile 备份恢复演练通过，实际 browser 停机约 28 秒。
+- 2026-07-26：只读审计德国服务器。现有 Caddy 独占 80/443；联动小铺 Mihomo 仅绑定共享网络命名空间回环。生产方案确定为：复用其订阅配置但运行独立 `cn-proxy`，app/browser 通过唯一别名接入既有 Caddy 网络，不修改或重启收款 Worker。
+- 2026-07-25：建立本计划。当前节点为 A，尚未修改业务代码、访问 Apple 远程写接口或部署服务。
+- 2026-07-25：完成节点 A-D 的本地实现；`ruff` 通过，47 项单元测试通过。新增覆盖 AES-GCM 用途隔离、Alias 密文、密钥轮换/撤销、HME 白名单、持久 Chromium 所有权边界、IMAP `INTERNALDATE` 与 299/300/301 秒边界。当前节点转为 E，仍未访问真实 Apple/IMAP 或调用远程写接口。
+- 2026-07-25：完成公开查询页、管理员登录页、管理工作台和对应 FastAPI 路由初版。Web 验收前基线为 56 项测试通过；发现 3 个 Python 文件仅有格式化差异，模板引用的 Lucide 图标尚待从官方包落盘。当前继续节点 E-G 的接口测试、静态检查与浏览器验收。
+- 2026-07-25：完成节点 E-G。新增 Web/API、管理员会话、CSRF、请求体限制、Trusted Host、批量部分成功、凭据失败不覆盖等回归测试；IMAP 超时改为贯穿整次测量的总截止时间。当前 66 项测试、`ruff`、Python 编译和 `git diff --check` 通过。浏览器在 `1440x900`、`1024x768`、`390x844`、`360x800` 的浅色/深色视口完成验收，网络和控制台错误为 0。当前节点转为 H。

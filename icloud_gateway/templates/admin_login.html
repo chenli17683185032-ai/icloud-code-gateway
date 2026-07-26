@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block body_class %}login-page{% endblock %}
+
+{% block body %}
+<main class="login-main">
+  <section class="login-panel" aria-labelledby="login-title">
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true">5</span>
+      <span>五分钟信箱</span>
+    </a>
+    <div class="login-heading">
+      <h1 id="login-title">管理员登录</h1>
+    </div>
+    <form method="post" action="/admin/login" class="login-form">
+      <div class="field">
+        <label for="admin-password">管理员密码</label>
+        <input id="admin-password" name="password" type="password" autocomplete="current-password" required autofocus>
+        {% if error %}<p class="field-error visible" role="alert">登录失败。</p>{% endif %}
+      </div>
+      <button class="primary-button" type="submit">
+        <img src="/static/icons/log-in.svg" alt="" aria-hidden="true">
+        <span>登录</span>
+      </button>
+    </form>
+  </section>
+</main>
+{% endblock %}

@@ -1,0 +1,31 @@
+icloud.yunbay.xyz {
+    encode zstd gzip
+    import security_headers
+
+    request_body {
+        max_size 2MB
+    }
+
+    handle_path /admin/browser/* {
+        forward_auth icloud-code-gateway-app:8080 {
+            uri /admin/api/browser/auth
+            header_up -Connection
+            header_up -Upgrade
+        }
+
+        header {
+            Cache-Control "no-store"
+            Pragma "no-cache"
+        }
+
+        reverse_proxy icloud-code-gateway-browser:6080
+    }
+
+    handle {
+        reverse_proxy icloud-code-gateway-app:8080 {
+            health_uri /healthz
+            health_interval 15s
+            health_timeout 3s
+        }
+    }
+}

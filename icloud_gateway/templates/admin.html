@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+
+{% block head %}<meta name="csrf-token" content="{{ csrf_token }}">{% endblock %}
+{% block body_class %}admin-page{% endblock %}
+
+{% block body %}
+<header class="admin-header">
+  <div class="admin-header-inner">
+    <a class="brand" href="/admin">
+      <span class="brand-mark" aria-hidden="true">5</span>
+      <span>iCloud 验证码网关</span>
+    </a>
+    <nav class="admin-nav" aria-label="管理导航">
+      <a href="#aliases">Alias</a>
+      <a href="#connections">连接</a>
+      <form method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="icon-button" type="submit" aria-label="退出登录" title="退出登录">
+          <img src="/static/icons/log-out.svg" alt="" aria-hidden="true">
+        </button>
+      </form>
+    </nav>
+  </div>
+</header>
+
+<main class="admin-main">
+  {% if notice %}
+  <div class="notice notice-{{ notice_kind }}" role="status">
+    <img src="/static/icons/{% if notice_kind == 'error' %}circle-alert{% else %}circle-check{% endif %}.svg" alt="" aria-hidden="true">
+    <span>{{ notice }}</span>
+  </div>
+  {% endif %}
+
+  <section class="status-band" aria-label="系统状态">
+    <div class="status-item">
+      <div class="status-icon"><img src="/static/icons/cloud.svg" alt="" aria-hidden="true"></div>
+      <div>
+        <p class="status-name">HME Session</p>
+        <p class="status-value {% if hme.configured %}status-good{% else %}status-muted{% endif %}">
+          {% if hme.configured %}已配置{% else %}未配置{% endif %}
+        </p>
+        {% if hme.host %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
+      </div>
+    </div>
+    <div class="status-item">
+      <div class="status-icon"><img src="/static/icons/mail.svg" alt="" aria-hidden="true"></div>
+      <div>
+        <p class="status-name">IMAP</p>
+        <p class="status-value {% if imap.configured %}status-good{% else %}status-muted{% endif %}">
+          {% if imap.configured %}已配置{% else %}未配置{% endif %}
+        </p>
+        {% if imap.host %}<p class="status-meta">{{ imap.host }}</p>{% endif %}
+      </div>
+    </div>
+    <div class="status-item" id="capture-status" data-active="{{ 'true' if capture.active else 'false' }}">
+      <div class="status-icon"><img src="/static/icons/radio-tower.svg" alt="" aria-hidden="true"></div>
+      <div>
+        <p class="status-name">浏览器捕获</p>
+        <p class="status-value" data-capture-state>{{ capture.state_label }}</p>
+        <p class="status-meta" data-capture-message>{{ capture.message_label }}</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="workspace-section create-section" aria-labelledby="create-title">
+    <div class="section-heading">
+      <h1 id="create-title">创建隐藏邮箱</h1>
+      <p>{{ counts.active }} 个活动 Alias，{{ counts.keyed }} 个已签发密钥</p>
+    </div>
+    <form class="create-form" id="create-alias-form">
+      <div class="field compact-field">
+        <label for="create-count">数量</label>
+        <select id="create-count" name="count">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="label-prefix">标签</label>
+        <input id="label-prefix" name="label_prefix" maxlength="140" required>
+      </div>
+      <div class="field">
+        <label for="sender-filter">发件人过滤</label>
+        <input id="sender-filter" name="sender_filter" maxlength="254" inputmode="email">
+      </div>
+      <div class="field field-wide">
+        <label for="create-note">备注</label>
+        <input id="create-note" name="note" maxlength="500">
+      </div>
+      <button class="primary-button create-submit" id="create-submit" type="submit" {% if not hme.configured %}disabled{% endif %}>
+        <img src="/static/icons/plus.svg" alt="" aria-hidden="true">
+        <span>创建并签发</span>
+      </button>
+      <p class="form-message field-wide" id="create-message" aria-live="polite"></p>
+    </form>
+  </section>
+
+  <section class="workspace-section" id="aliases" aria-labelledby="aliases-title">
+    <div class="section-toolbar">
+      <div class="section-heading">
+        <h2 id="aliases-title">Alias</h2>
+        <p>{{ counts.total }} 条本地记录</p>
+      </div>
+      <div class="toolbar-actions">
+        <label class="search-control" for="alias-filter">
+          <img src="/static/icons/search.svg" alt="" aria-hidden="true">
+          <span class="sr-only">筛选 Alias</span>
+          <input id="alias-filter" type="search" autocomplete="off">
+        </label>
+        <form method="post" action="/admin/hme/sync">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="secondary-button" type="submit" {% if not hme.configured %}disabled{% endif %}>
+            <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
+            <span>对账</span>
+          </button>
+        </form>
+      </div>
+    </div>
+
+    {% if aliases %}
+    <div class="alias-table" role="table" aria-label="Alias 列表">
+      <div class="alias-header" role="row">
+        <span role="columnheader">Alias</span>
+        <span role="columnheader">标签</span>
+        <span role="columnheader">密钥</span>
+        <span role="columnheader">状态</span>
+        <span role="columnheader">操作</span>
+      </div>
+      {% for alias in aliases %}
+      <article class="alias-row" role="row" data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}">
+        <div class="alias-identity" role="cell">
+          <strong>{{ alias.email }}</strong>
+          {% if alias.sender_filter %}<span>发件人 {{ alias.sender_filter }}</span>{% endif %}
+        </div>
+        <div class="alias-label" role="cell">{{ alias.label }}</div>
+        <div class="alias-key" role="cell">
+          {% if alias.has_access_key %}<span>末 4 位 {{ alias.access_key_hint }}</span>{% else %}<span class="muted-text">未签发</span>{% endif %}
+        </div>
+        <div class="alias-state" role="cell">
+          <span class="state-label state-{{ alias.state }}">{% if alias.state == 'active' %}活动{% else %}失活{% endif %}</span>
+        </div>
+        <div class="alias-actions" role="cell">
+          <button
+            class="icon-button issue-key-button"
+            type="button"
+            data-alias-id="{{ alias.id }}"
+            aria-label="{% if alias.has_access_key %}轮换密钥{% else %}签发密钥{% endif %}"
+            title="{% if alias.has_access_key %}轮换密钥{% else %}签发密钥{% endif %}"
+            {% if alias.state != 'active' %}disabled{% endif %}
+          >
+            <img src="/static/icons/{% if alias.has_access_key %}rotate-ccw{% else %}key-round{% endif %}.svg" alt="" aria-hidden="true">
+          </button>
+          {% if alias.has_access_key %}
+          <button class="icon-button danger-icon revoke-key-button" type="button" data-alias-id="{{ alias.id }}" aria-label="撤销密钥" title="撤销密钥">
+            <img src="/static/icons/ban.svg" alt="" aria-hidden="true">
+          </button>
+          {% endif %}
+          <details class="row-menu">
+            <summary class="icon-button" aria-label="编辑 Alias" title="编辑 Alias">
+              <img src="/static/icons/settings.svg" alt="" aria-hidden="true">
+            </summary>
+            <form method="post" action="/admin/aliases/{{ alias.id }}" class="row-edit-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="field">
+                <label for="label-{{ alias.id }}">标签</label>
+                <input id="label-{{ alias.id }}" name="label" value="{{ alias.label }}" maxlength="160" required>
+              </div>
+              <div class="field">
+                <label for="sender-{{ alias.id }}">发件人过滤</label>
+                <input id="sender-{{ alias.id }}" name="sender_filter" value="{{ alias.sender_filter }}" maxlength="254">
+              </div>
+              <div class="field">
+                <label for="note-{{ alias.id }}">备注</label>
+                <textarea id="note-{{ alias.id }}" name="note" maxlength="500" rows="3">{{ alias.note }}</textarea>
+              </div>
+              <button class="primary-button small-button" type="submit">
+                <img src="/static/icons/save.svg" alt="" aria-hidden="true">
+                <span>保存</span>
+              </button>
+            </form>
+          </details>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    <div class="empty-state" id="alias-filter-empty" hidden>没有匹配的 Alias。</div>
+    {% else %}
+    <div class="empty-state">尚未同步或创建 Alias。</div>
+    {% endif %}
+  </section>
+
+  <section class="workspace-section" id="connections" aria-labelledby="connections-title">
+    <div class="section-heading">
+      <h2 id="connections-title">连接配置</h2>
+      <p>Apple HME 与转发邮箱完全隔离。</p>
+    </div>
+
+    <div class="connection-grid">
+      <details class="config-panel" {% if not hme.configured %}open{% endif %}>
+        <summary>
+          <span>HME Session</span>
+          <span class="summary-state">{% if hme.configured %}已配置{% else %}待配置{% endif %}</span>
+        </summary>
+        <div class="config-panel-body">
+          <div class="capture-actions">
+            {% if cdp_configured %}
+            <a
+              class="secondary-button"
+              href="/admin/browser/vnc.html?path=admin%2Fbrowser%2Fwebsockify&amp;autoconnect=true&amp;resize=scale"
+              target="_blank"
+              rel="noopener"
+            >
+              <img src="/static/icons/cloud.svg" alt="" aria-hidden="true">
+              <span>打开 iCloud 浏览器</span>
+            </a>
+            {% endif %}
+            <form method="post" action="/admin/hme/capture/start">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="primary-button" type="submit" {% if not cdp_configured or capture.active %}disabled{% endif %}>
+                <img src="/static/icons/radio-tower.svg" alt="" aria-hidden="true">
+                <span>登录更新</span>
+              </button>
+            </form>
+            {% if capture.active %}
+            <form method="post" action="/admin/hme/capture/cancel">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="secondary-button" type="submit">
+                <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+                <span>取消</span>
+              </button>
+            </form>
+            {% endif %}
+          </div>
+          <form method="post" action="/admin/hme/import" class="stack-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="field">
+              <label for="session-import">cURL 或 HAR</label>
+              <textarea id="session-import" name="session_import" rows="7" required></textarea>
+            </div>
+            <button class="secondary-button" type="submit">
+              <img src="/static/icons/upload.svg" alt="" aria-hidden="true">
+              <span>验证并导入</span>
+            </button>
+          </form>
+        </div>
+      </details>
+
+      <details class="config-panel" {% if not imap.configured %}open{% endif %}>
+        <summary>
+          <span>IMAP</span>
+          <span class="summary-state">{% if imap.configured %}已配置{% else %}待配置{% endif %}</span>
+        </summary>
+        <form method="post" action="/admin/imap" class="config-panel-body stack-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="form-grid">
+            <div class="field">
+              <label for="forwarding-email">转发邮箱</label>
+              <input id="forwarding-email" name="forwarding_email" type="email" value="{{ imap.forwarding_email or '' }}" required>
+            </div>
+            <div class="field">
+              <label for="imap-host">IMAP 主机</label>
+              <input id="imap-host" name="host" value="{{ imap.host or 'imap.mail.me.com' }}" required>
+            </div>
+            <div class="field compact-field">
+              <label for="imap-port">端口</label>
+              <input id="imap-port" name="port" type="number" min="1" max="65535" value="993" required>
+            </div>
+            <div class="field">
+              <label for="imap-user">用户名</label>
+              <input id="imap-user" name="username" value="{{ imap.forwarding_email or '' }}" required>
+            </div>
+            <div class="field">
+              <label for="imap-password">App 专用密码</label>
+              <input id="imap-password" name="password" type="password" autocomplete="new-password">
+              {% if imap.configured %}<p class="field-help">留空保留已保存值。</p>{% endif %}
+            </div>
+            <div class="field">
+              <label for="imap-folder">文件夹</label>
+              <input id="imap-folder" name="folder" value="INBOX" required>
+            </div>
+            <div class="field field-wide">
+              <label for="imap-proxy">可选代理</label>
+              <input id="imap-proxy" name="proxy">
+              {% if imap.configured %}
+              <label class="checkbox-control">
+                <input type="checkbox" name="clear_proxy">
+                <span>清除已保存代理</span>
+              </label>
+              {% endif %}
+            </div>
+          </div>
+          <button class="primary-button" type="submit">
+            <img src="/static/icons/shield-check.svg" alt="" aria-hidden="true">
+            <span>测试并保存</span>
+          </button>
+        </form>
+      </details>
+    </div>
+  </section>
+
+  <section class="workspace-section audit-section" aria-labelledby="audit-title">
+    <div class="section-heading">
+      <h2 id="audit-title">最近事件</h2>
+    </div>
+    {% if audit %}
+    <div class="audit-list">
+      {% for event in audit %}
+      <div class="audit-row">
+        <span>{{ event.event_type }}</span>
+        <span>{{ event.outcome }}</span>
+        <time datetime="{{ event.created_at }}">{{ event.created_at }}</time>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">暂无事件。</div>
+    {% endif %}
+  </section>
+</main>
+
+<div class="modal" id="key-modal" hidden role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
+  <div class="modal-backdrop" data-close-modal></div>
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <h2 id="key-modal-title">访问密钥</h2>
+      <button class="icon-button" type="button" data-close-modal aria-label="关闭" title="关闭">
+        <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+      </button>
+    </div>
+    <p class="modal-message" id="key-modal-message"></p>
+    <div class="issued-key-list" id="issued-key-list"></div>
+    <div class="modal-footer">
+      <button class="primary-button" type="button" data-close-modal>完成</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/admin.js" defer></script>
+{% endblock %}

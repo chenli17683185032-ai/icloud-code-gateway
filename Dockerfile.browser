@@ -1,0 +1,45 @@
+ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.61.1-jammy
+FROM ${PLAYWRIGHT_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:99 \
+    BROWSER_SCREEN=1440x900x24 \
+    HOME=/home/browser
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        feh \
+        fluxbox \
+        fonts-liberation \
+        fonts-noto-cjk \
+        novnc \
+        proxychains4 \
+        socat \
+        tini \
+        websockify \
+        x11vnc \
+        xvfb \
+    && rm -rf /var/lib/apt/lists/* \
+    && userdel systemd-resolve \
+    && useradd --system --uid 102 --gid pwuser --home-dir /home/browser \
+        --create-home --shell /usr/sbin/nologin browser \
+    && mkdir -p /browser-data /run/icloud-browser \
+    && chown -R browser:pwuser /browser-data /run/icloud-browser /home/browser
+
+COPY --chown=browser:pwuser docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
+COPY --chown=browser:pwuser docker/fluxbox-overlay /home/browser/.fluxbox/overlay
+COPY --chown=browser:pwuser icloud_gateway/proxy.py /usr/local/lib/icloud-browser/proxy.py
+
+RUN chmod 0755 /usr/local/bin/browser-entrypoint.sh
+
+USER browser
+
+EXPOSE 6080 9222
+VOLUME ["/browser-data"]
+
+HEALTHCHECK --interval=5s --timeout=8s --start-period=10s --retries=10 \
+  CMD ["curl", "-fsS", "--max-time", "5", "http://127.0.0.1:9223/json/version"]
+
+ENTRYPOINT ["tini", "--", "/usr/local/bin/browser-entrypoint.sh"]

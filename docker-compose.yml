@@ -1,0 +1,90 @@
+name: icloud-code-gateway
+
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    environment:
+      BROWSER_SCREEN: ${BROWSER_SCREEN:-1440x900x24}
+      BROWSER_VNC_PASSWORD: ${BROWSER_VNC_PASSWORD:?set BROWSER_VNC_PASSWORD in .env}
+      BROWSER_PROXY_PASSWORD: ${CN_PROXY_PASSWORD:-}
+      BROWSER_PROXY_REQUIRED: ${CN_PROXY_REQUIRED:-0}
+      BROWSER_PROXY_SERVER: ${CN_PROXY_SERVER:-}
+      BROWSER_PROXY_USERNAME: ${CN_PROXY_USERNAME:-}
+    volumes:
+      - browser-data:/browser-data
+    expose:
+      - "9222"
+    ports:
+      - "127.0.0.1:${BROWSER_NOVNC_PORT:-6080}:6080"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - gateway
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ICLOUD_GATEWAY_ADMIN_PASSWORD: ${ICLOUD_GATEWAY_ADMIN_PASSWORD:?set ICLOUD_GATEWAY_ADMIN_PASSWORD in .env}
+      ICLOUD_GATEWAY_COOKIE_SECURE: "1"
+      ICLOUD_GATEWAY_CDP_URL: http://browser:9222
+      ICLOUD_GATEWAY_DATA_DIR: /data
+      ICLOUD_GATEWAY_FORWARDED_ALLOW_IPS: "*"
+      ICLOUD_GATEWAY_HOST: 0.0.0.0
+      ICLOUD_GATEWAY_HME_PROXY_PASSWORD: ${CN_PROXY_PASSWORD:-}
+      ICLOUD_GATEWAY_HME_PROXY_REQUIRED: ${CN_PROXY_REQUIRED:-0}
+      ICLOUD_GATEWAY_HME_PROXY_SERVER: ${CN_PROXY_SERVER:-}
+      ICLOUD_GATEWAY_HME_PROXY_USERNAME: ${CN_PROXY_USERNAME:-}
+      ICLOUD_GATEWAY_LOG_LEVEL: ${ICLOUD_GATEWAY_LOG_LEVEL:-INFO}
+      ICLOUD_GATEWAY_MASTER_KEY: ${ICLOUD_GATEWAY_MASTER_KEY:?set ICLOUD_GATEWAY_MASTER_KEY in .env}
+      ICLOUD_GATEWAY_PORT: "8080"
+      ICLOUD_GATEWAY_PUBLIC_BASE_URL: https://${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}
+      ICLOUD_GATEWAY_TRUSTED_HOSTS: ${GATEWAY_DOMAIN},app,localhost,127.0.0.1
+    volumes:
+      - gateway-data:/data
+    depends_on:
+      browser:
+        condition: service_started
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - gateway
+
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - gateway
+
+networks:
+  gateway:
+    driver: bridge
+
+volumes:
+  browser-data:
+  caddy-config:
+  caddy-data:
+  gateway-data:

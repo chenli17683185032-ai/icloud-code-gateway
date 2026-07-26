@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block body_class %}public-page{% endblock %}
+
+{% block body %}
+<header class="public-header">
+  <a class="brand" href="/" aria-label="五分钟信箱首页">
+    <span class="brand-mark" aria-hidden="true">5</span>
+    <span>五分钟信箱</span>
+  </a>
+</header>
+
+<main class="public-main">
+  <section class="lookup-panel" aria-labelledby="lookup-title">
+    <div class="lookup-heading">
+      <p class="window-label">查询窗口 5 分钟</p>
+      <h1 id="lookup-title">领取验证码</h1>
+    </div>
+
+    <form class="lookup-form" id="lookup-form" novalidate>
+      <div class="field field-grow">
+        <label for="access-key">访问密钥</label>
+        <div class="secret-input">
+          <input
+            id="access-key"
+            name="access_key"
+            type="password"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            maxlength="128"
+            required
+          >
+          <button class="input-icon-button" id="toggle-key" type="button" aria-label="显示密钥" title="显示密钥">
+            <img src="/static/icons/eye.svg" alt="" aria-hidden="true">
+          </button>
+        </div>
+        <p class="field-error" id="key-error" aria-live="polite"></p>
+      </div>
+      <button class="primary-button lookup-button" id="lookup-button" type="submit">
+        <img src="/static/icons/search.svg" alt="" aria-hidden="true">
+        <span>查询</span>
+      </button>
+    </form>
+
+    <div class="lookup-result" id="lookup-result" aria-live="polite" aria-atomic="true">
+      <div class="result-idle" id="result-idle">
+        <span class="idle-line"></span>
+        <span class="idle-line idle-line-short"></span>
+      </div>
+      <div class="result-loading" id="result-loading" hidden>
+        <span class="loading-line"></span>
+        <span class="loading-line loading-line-short"></span>
+      </div>
+      <div class="result-message" id="result-message" hidden>
+        <p class="result-title" id="result-title"></p>
+        <p class="result-detail" id="result-detail"></p>
+      </div>
+      <div class="result-code" id="result-code" hidden>
+        <div class="code-digits" id="code-digits" aria-label="验证码"></div>
+        <div class="code-actions">
+          <p class="code-expiry" id="code-expiry"></p>
+          <button class="secondary-button" id="copy-code" type="button">
+            <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
+            <span>复制</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="public-footer">
+  <a href="/admin" aria-label="打开管理员页面">管理</a>
+</footer>
+{% endblock %}
+{% block scripts %}
+<script src="/static/public.js" defer></script>
+{% endblock %}

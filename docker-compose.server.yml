@@ -1,0 +1,59 @@
+services:
+  cn-proxy:
+    image: metacubex/mihomo:v1.19.28
+    command:
+      - -d
+      - /root/.config/mihomo
+      - -f
+      - /etc/mihomo/config.yaml
+    volumes:
+      - ${CN_PROXY_CONFIG_PATH:?set CN_PROXY_CONFIG_PATH in .env}:/etc/mihomo/config.yaml:ro
+      - cn-proxy-data:/root/.config/mihomo
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -w 2 127.0.0.1 ${CN_PROXY_PORT:-7891}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 6
+    networks:
+      - gateway
+
+  browser:
+    depends_on:
+      cn-proxy:
+        condition: service_healthy
+    networks:
+      gateway:
+      edge:
+        aliases:
+          - icloud-code-gateway-browser
+
+  app:
+    depends_on:
+      browser:
+        condition: service_started
+      cn-proxy:
+        condition: service_healthy
+    networks:
+      gateway:
+      edge:
+        aliases:
+          - icloud-code-gateway-app
+
+  caddy:
+    profiles:
+      - standalone-caddy
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-app_yunbay-network}
+
+volumes:
+  cn-proxy-data:

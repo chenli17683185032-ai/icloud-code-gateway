@@ -1,0 +1,464 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from icloud_gateway.config import Settings
+from icloud_gateway.hme import HmeError, ICloudHmeSession
+from icloud_gateway.imap_otp import ImapConfig, ImapCredentialsError, OtpResult
+from icloud_gateway.security import AdminSessionCodec, hash_access_key
+from icloud_gateway.service import (
+    GatewayNotConfiguredError,
+    GatewayRateLimitedError,
+    GatewayService,
+)
+from icloud_gateway.web import ADMIN_COOKIE, MAX_REQUEST_BYTES, create_app
+
+NOW = 1_800_000_000.0
+
+
+class FakeHmeClient:
+    aliases: list[dict] = []
+    created: list[dict | Exception] = []
+    list_error: Exception | None = None
+
+    def __init__(self, _session):
+        pass
+
+    def list_aliases(self):
+        if self.list_error is not None:
+            raise self.list_error
+        return [dict(item) for item in self.aliases]
+
+    def create_alias(self, *, label, note):
+        if not self.created:
+            raise HmeError("no prepared alias")
+        result = self.created.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        value = dict(result)
+        value["label"] = label
+        value["note"] = note
+        return value
+
+
+class FakeImapReader:
+    result: OtpResult | None = None
+    check_error: Exception | None = None
+
+    def __init__(self, config):
+        self.config = config
+
+    def check(self, *, timeout):
+        if self.check_error is not None:
+            raise self.check_error
+
+    def find_latest_code(self, alias, **kwargs):
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def reset_fakes():
+    FakeHmeClient.aliases = []
+    FakeHmeClient.created = []
+    FakeHmeClient.list_error = None
+    FakeImapReader.result = None
+    FakeImapReader.check_error = None
+
+
+@pytest.fixture
+def settings(tmp_path) -> Settings:
+    return Settings(
+        data_dir=tmp_path,
+        master_key=bytes(range(32)),
+        admin_password="correct horse battery staple",
+        cookie_secure=False,
+        cdp_url="",
+        trusted_hosts=("testserver", "localhost", "127.0.0.1"),
+    )
+
+
+@pytest.fixture
+def service(settings) -> GatewayService:
+    return GatewayService(
+        settings,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeImapReader,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+
+@pytest.fixture
+def client(settings, service):
+    app = create_app(settings, service=service)
+    with TestClient(app, base_url="http://testserver") as value:
+        yield value
+
+
+def _configure_imap(service: GatewayService, *, host: str = "imap.example.com") -> ImapConfig:
+    return service.configure_imap(
+        {
+            "forwarding_email": "forwarding@example.com",
+            "host": host,
+            "port": 993,
+            "username": "forwarding@example.com",
+            "password": "app-password",
+            "folder": "INBOX",
+            "proxy": "",
+        }
+    )
+
+
+def _hme_session(*, client_id: str = "client") -> ICloudHmeSession:
+    return ICloudHmeSession(
+        host="p123-maildomainws.icloud.com.cn",
+        dsid="123",
+        client_id=client_id,
+        client_build_number="build",
+        client_mastering_number="master",
+        cookie=(
+            "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+            "X-APPLE-WEBAUTH-USER=user; "
+            "X-APPLE-WEBAUTH-TOKEN=token"
+        ),
+        origin="https://www.icloud.com.cn",
+        referer="https://www.icloud.com.cn/icloudplus/",
+    )
+
+
+def _session_curl(session: ICloudHmeSession) -> str:
+    return (
+        "curl "
+        f"'https://{session.host}/v2/hme/list?dsid={session.dsid}"
+        f"&clientId={session.client_id}"
+        f"&clientBuildNumber={session.client_build_number}"
+        f"&clientMasteringNumber={session.client_mastering_number}' "
+        f"-H 'Cookie: {session.cookie}' "
+        f"-H 'Origin: {session.origin}' "
+        f"-H 'Referer: {session.referer}'"
+    )
+
+
+def _login(client: TestClient, settings: Settings) -> str:
+    response = client.post(
+        "/admin/login",
+        data={"password": settings.admin_password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    token = client.cookies.get(ADMIN_COOKIE)
+    assert token
+    return (
+        AdminSessionCodec(
+            settings.master_key,
+            lifetime_seconds=settings.admin_session_seconds,
+        )
+        .decode(token)
+        .csrf_token
+    )
+
+
+def _create_keyed_alias(service: GatewayService):
+    alias = service.database.upsert_alias(
+        email="target@icloud.com",
+        remote_metadata={"anonymousId": "target", "isActive": True},
+        label="Target",
+    )
+    return alias, service.database.issue_access_key(alias["id"])
+
+
+def test_public_code_api_states_and_safe_response_contract(client, service) -> None:
+    _configure_imap(service)
+    _alias, issued = _create_keyed_alias(service)
+    FakeImapReader.result = OtpResult(
+        code="246810",
+        uid="55",
+        received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
+    )
+
+    found = client.post("/api/code", json={"access_key": issued.access_key})
+    assert found.status_code == 200
+    assert found.json() == {
+        "status": "found",
+        "code": "246810",
+        "received_at": "2027-01-15T07:59:58Z",
+        "expires_at": "2027-01-15T08:04:58Z",
+        "retry_after": None,
+    }
+
+    FakeImapReader.result = None
+    waiting = client.post("/api/code", json={"access_key": issued.access_key})
+    assert waiting.status_code == 200
+    assert waiting.json()["status"] == "waiting"
+    assert waiting.json()["retry_after"] == 5
+
+    invalid = client.post("/api/code", json={"access_key": "not-a-key"})
+    assert invalid.status_code == 404
+    assert invalid.json() == {"status": "invalid_key"}
+
+
+def test_public_api_maps_rate_limit_unavailable_and_timeout(client, service, monkeypatch) -> None:
+    def rate_limited(_access_key, *, client_ip):
+        raise GatewayRateLimitedError(17)
+
+    monkeypatch.setattr(service, "lookup_code", rate_limited)
+    response = client.post("/api/code", json={"access_key": "x"})
+    assert response.status_code == 429
+    assert response.json() == {"status": "rate_limited", "retry_after": 17}
+    assert response.headers["retry-after"] == "17"
+
+    def unavailable(_access_key, *, client_ip):
+        raise GatewayNotConfiguredError("not configured")
+
+    monkeypatch.setattr(service, "lookup_code", unavailable)
+    response = client.post("/api/code", json={"access_key": "x"})
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
+
+    async def timed_out(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr("icloud_gateway.web.asyncio.to_thread", timed_out)
+    response = client.post("/api/code", json={"access_key": "x"})
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
+
+
+def test_sensitive_routes_have_security_headers_and_no_input_echo(client) -> None:
+    response = client.post("/api/code", json={"access_key": "secret-input-canary" * 20})
+
+    assert response.status_code == 422
+    assert response.json() == {"status": "invalid_request"}
+    assert "secret-input-canary" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_trusted_host_and_request_size_limit(client) -> None:
+    rejected_host = client.get("/", headers={"host": "attacker.example"})
+    assert rejected_host.status_code == 400
+
+    oversized = client.post(
+        "/api/code",
+        content=b"x" * (MAX_REQUEST_BYTES + 1),
+        headers={"content-type": "application/json"},
+    )
+    assert oversized.status_code == 413
+    assert oversized.json() == {"status": "request_too_large"}
+    assert oversized.headers["cache-control"] == "no-store"
+    assert oversized.headers["x-frame-options"] == "DENY"
+
+
+def test_admin_login_cookie_expiry_and_csrf(client, settings, service) -> None:
+    wrong = client.post("/admin/login", data={"password": "wrong"})
+    assert wrong.status_code == 401
+
+    csrf = _login(client, settings)
+    cookie = client.cookies.get(ADMIN_COOKIE)
+    assert cookie
+    set_cookie = client.post(
+        "/admin/login",
+        data={"password": settings.admin_password},
+        follow_redirects=False,
+    ).headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert "Path=/admin" in set_cookie
+    csrf = (
+        AdminSessionCodec(
+            settings.master_key,
+            lifetime_seconds=settings.admin_session_seconds,
+        )
+        .decode(client.cookies.get(ADMIN_COOKIE))
+        .csrf_token
+    )
+    capture = client.get("/admin/api/capture/status")
+    assert capture.status_code == 200
+    assert capture.json()["state_label"] == "待机"
+    assert capture.json()["message_label"] == "未启动捕获。"
+
+    alias = service.database.upsert_alias(
+        email="target@icloud.com",
+        remote_metadata={"anonymousId": "target"},
+    )
+    missing_csrf = client.post(f"/admin/api/aliases/{alias['id']}/key")
+    assert missing_csrf.status_code == 403
+    issued = client.post(
+        f"/admin/api/aliases/{alias['id']}/key",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert issued.status_code == 200
+
+    client.cookies.clear()
+    expired, _session = AdminSessionCodec(
+        settings.master_key,
+        lifetime_seconds=settings.admin_session_seconds,
+    ).issue(now=1)
+    client.cookies.set(ADMIN_COOKIE, expired, path="/admin")
+    response = client.get("/admin", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin/login"
+
+
+def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
+    browser_settings = replace(settings, cdp_url="http://127.0.0.1:9222")
+    app = create_app(browser_settings, service=service)
+
+    with TestClient(app, base_url="http://testserver") as browser_client:
+        denied = browser_client.get(
+            "/admin/api/browser/auth",
+            follow_redirects=False,
+        )
+        assert denied.status_code == 303
+        assert denied.headers["location"] == "/admin/login"
+
+        _login(browser_client, browser_settings)
+        allowed = browser_client.get("/admin/api/browser/auth")
+        assert allowed.status_code == 204
+        assert allowed.headers["cache-control"] == "no-store"
+
+        dashboard = browser_client.get("/admin")
+        assert dashboard.status_code == 200
+        assert "/admin/browser/vnc.html?" in dashboard.text
+        assert "打开 iCloud 浏览器" in dashboard.text
+
+
+def test_key_rotation_and_revocation_only_return_current_plaintext_once(
+    client, settings, service
+) -> None:
+    csrf = _login(client, settings)
+    alias = service.database.upsert_alias(
+        email="person@icloud.com",
+        remote_metadata={"anonymousId": "person"},
+        label="Person",
+    )
+
+    first = client.post(
+        f"/admin/api/aliases/{alias['id']}/key",
+        headers={"X-CSRF-Token": csrf},
+    ).json()["access_key"]
+    dashboard = client.get("/admin")
+    assert first not in dashboard.text
+    assert first[-4:] in dashboard.text
+
+    second_response = client.post(
+        f"/admin/api/aliases/{alias['id']}/key",
+        headers={"X-CSRF-Token": csrf},
+    )
+    second = second_response.json()["access_key"]
+    assert first not in second_response.text
+    assert service.database.find_alias_by_access_key_hash(hash_access_key(first)) is None
+    assert service.database.find_alias_by_access_key_hash(hash_access_key(second)) is not None
+
+    revoked = client.delete(
+        f"/admin/api/aliases/{alias['id']}/key",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert revoked.status_code == 200
+    assert service.database.find_alias_by_access_key_hash(hash_access_key(second)) is None
+
+
+def test_partial_alias_batch_returns_already_created_keys(client, settings, service) -> None:
+    FakeHmeClient.aliases = []
+    service.save_hme_session(_hme_session())
+    FakeHmeClient.created = [
+        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": True},
+        HmeError("rate limited"),
+    ]
+    csrf = _login(client, settings)
+
+    response = client.post(
+        "/admin/api/aliases",
+        json={"count": 2, "label_prefix": "Person", "note": "", "sender_filter": ""},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial"
+    assert len(response.json()["created"]) == 1
+    assert response.json()["created"][0]["email"] == "one@icloud.com"
+    assert response.json()["created"][0]["access_key"].startswith("icg_")
+
+
+def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, service) -> None:
+    original_hme = _hme_session()
+    service.save_hme_session(original_hme)
+    original_imap = _configure_imap(service)
+    csrf = _login(client, settings)
+
+    FakeHmeClient.list_error = HmeError("session rejected")
+    hme_response = client.post(
+        "/admin/hme/import",
+        data={"csrf_token": csrf, "session_import": _session_curl(_hme_session(client_id="new"))},
+        follow_redirects=False,
+    )
+    assert hme_response.status_code == 303
+    assert hme_response.headers["location"] == "/admin?notice=hme_error"
+    assert service.get_hme_session() == original_hme
+
+    FakeImapReader.check_error = ImapCredentialsError("login rejected")
+    imap_response = client.post(
+        "/admin/imap",
+        data={
+            "csrf_token": csrf,
+            "forwarding_email": "new@example.com",
+            "host": "new-imap.example.com",
+            "port": "993",
+            "username": "new@example.com",
+            "password": "new-password",
+            "folder": "INBOX",
+            "proxy": "",
+        },
+        follow_redirects=False,
+    )
+    assert imap_response.status_code == 303
+    assert imap_response.headers["location"] == "/admin?notice=imap_error"
+    assert service.get_imap_config() == original_imap
+
+
+def test_every_template_icon_exists() -> None:
+    package = Path(__file__).resolve().parents[1] / "icloud_gateway"
+    referenced = set()
+    for path in (package / "templates").glob("*.html"):
+        text = path.read_text(encoding="utf-8")
+        for name in (
+            "ban",
+            "circle-alert",
+            "circle-check",
+            "cloud",
+            "copy",
+            "eye",
+            "eye-off",
+            "key-round",
+            "log-in",
+            "log-out",
+            "mail",
+            "plus",
+            "radio-tower",
+            "refresh-cw",
+            "rotate-ccw",
+            "save",
+            "search",
+            "settings",
+            "shield-check",
+            "upload",
+            "x",
+        ):
+            if f"{name}.svg" in text or name in {"circle-alert", "circle-check"}:
+                referenced.add(name)
+    referenced.update({"eye-off"})
+    missing = [
+        name
+        for name in sorted(referenced)
+        if not (package / "static/icons" / f"{name}.svg").is_file()
+    ]
+    assert missing == []
