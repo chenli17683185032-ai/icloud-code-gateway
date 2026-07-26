@@ -382,3 +382,62 @@ Browser runtime
 - 本地 Caddy 配置、站点片段以及服务器当前完整共享 Caddyfile 加新片段均只读验证通过；未 reload、未部署生产服务。
 - Compose 两种展开配置通过；跟踪文件秘密扫描无 API Key、私钥或长 Apple Session 命中，`.env.example` 保持允许跟踪。
 - 原始功能提交 `82463cf` 与审查修正 `f2f4d3c` 已进入远端 `main`；本节最终状态作为后续纯文档提交推送，完成后再次核对本地 `main == origin/main` 与干净工作树。
+
+## 13. `91369cf` 生产部署计划
+
+### 13.1 目标与验收指标
+
+目标是在不改变 browser、cn-proxy、SQLite 卷和 CDP 网络归属的前提下，把 GitHub `main` 的 `91369cf` 部署到云贝服务器，并上线新的 Cloudflare 来源 IP 信任边界。
+
+- 构建期间旧 app 持续提供服务；正式 app 替换必须有 60 秒上界，失败立即恢复旧镜像。
+- 部署前完成 SQLite 在线备份和 `quick_check=ok`，部署后再次确认数据库完整。
+- 只重建 app；browser、cn-proxy、共享 Caddy 和其他云贝服务不得重启。
+- 共享 Caddyfile 先生成候选、用运行中 Caddy 2.11.4 验证，再原位更新并 graceful reload；验证失败不改运行时配置。
+- 公网 `/healthz`、首页、管理员登录、未登录 noVNC 拒绝、分块超限 413 和安全响应头全部通过。
+- app 恢复健康应小于 60 秒；browser/cn-proxy/Caddy 的 restart count 前后不变。
+- 服务器部署标记记录实际功能提交 `91369cf`；本地计划、运维手册和云贝唯一连接手册写回结果后推送 GitHub `main`。
+- 最终本地 `main == origin/main`，工作树干净，候选容器、临时文件和无用镜像全部清理。
+
+### 13.2 控制结构与扰动
+
+| 控制元素 | 本次部署对象 |
+| --- | --- |
+| 目标 | 以最小中断上线安全、正确性和性能修订 |
+| 被控对象 | app 容器、SQLite 数据卷、共享 Caddy 配置、Cloudflare 请求链 |
+| 测量 | 镜像/提交身份、容器健康、restart count、SQLite quick check、HTTP 探针、Caddy validate |
+| 执行器 | 非删除式源码同步、app 镜像构建、单容器 force-recreate、Caddy graceful reload |
+| 扰动 | 构建失败、镜像启动失败、数据库锁、Caddy 配置错误、Cloudflare 缓存/链路时延 |
+| 稳定性策略 | 旧服务先持续运行；候选先验证；切换有界；任一步失败立即回滚且不等待人工输入 |
+
+### 13.3 GitHub 与既有经验复核
+
+- 本项目 `873a6c3` 的首次边缘部署已证明：app/browser/cn-proxy 独立重启边界、共享 Caddy graceful reload 和持久卷保持方案可行。
+- `82463cf`、`f2f4d3c` 的审查闭环证明：本次只需更新 app 源码、Compose 默认值和生产 Caddy 站点；browser 镜像与 CDP 网络无需变化。
+- 沿用 Docker Compose 的“构建不影响运行容器，随后 `--no-deps --force-recreate --no-build app`”模式；沿用 Caddy 的“候选 validate 成功后 reload”模式。
+- 服务器部署目录不是 Git 工作树，因此只同步 Git 跟踪内容，不使用 `--delete`，不覆盖 `.env`、secrets、备份或持久数据。
+
+### 13.4 实施节点
+
+- [x] 节点 1：只读核对服务器版本、容器健康/restart count、磁盘、NTP、Compose 展开、当前 Caddy 与部署标记；SQLite 与公网健康正常，Cloudflare 22 个网段与官方列表一致。
+- [x] 节点 2：建立 SQLite、共享 Caddyfile、当前 Git 跟踪源码和旧 app 镜像回滚点；备份目录为 `/opt/new-api/icloud-code-gateway/backups/hardening-20260726T170444Z-91369cf`。
+- [x] 节点 3：非删除式同步 `91369cf` 跟踪文件并逐文件校验；候选镜像 `sha256:906ffbefc34aff91ad762523cae37859b42c7d5a937acc3169e88edf865fe99e` 在独立临时 SQLite 卷上通过健康、完整性与 Unicode 认证验证。
+- [x] 节点 4：服务器侧独立 60 秒 watchdog 仅替换 app，新容器 10 秒恢复健康；SQLite、内部/公网健康和 revision 通过，未触发回滚。
+- [x] 节点 5：完整共享 Caddy 候选与挂载配置均通过 2.11.4 验证，原位写入后 graceful reload；inode、权限、容器 ID 和 `restart=0` 保持不变。
+- [x] 节点 6：公网与内部闭环通过；分块超限 413、小分块正常到达路由、Unicode 错误口令 401、来源头可信链、SQLite/CDP、安全头、日志和磁盘均正常，四个容器均为 `restart=0`。
+- [x] 节点 7：更新服务器部署标记、`OPERATIONS.md` 和云贝唯一连接手册，清理临时件；本地最终门禁为 `104 passed`、Ruff/格式/编译/diff/秘密扫描通过，最终记录提交并推送 GitHub `main`。
+
+### 13.5 回滚边界
+
+- app 失败：把部署前镜像重新标记为 Compose app 镜像，60 秒内 force-recreate，只恢复代码容器，不恢复或删除 SQLite 卷。
+- Caddy 候选失败：不写正式文件；正式文件写入后验证失败则立即从备份原位恢复，不 reload 失败配置。
+- 上线后业务异常：优先回滚 app 镜像与 Caddyfile，保留数据库和 browser profile 现场；远端 Apple Alias 不做任何写操作。
+
+### 13.6 生产验证记录
+
+- 2026-07-27：部署前 app/browser/cn-proxy/Caddy 均为 `healthy / restart=0`，NTP 正常，根卷可用 59GB；SQLite 在线备份与生产库 `quick_check=ok`。Cloudflare 配置的 22 个 IPv4/IPv6 网段与官方列表完全一致。
+- 回滚目录为 `/opt/new-api/icloud-code-gateway/backups/hardening-20260726T170444Z-91369cf`；旧 app 镜像为 `sha256:36e201c7c852e3270cb3fbc3da16633e5d573d68c31fb837050b7ac1a0eeb204`，保留标签 `rollback-pre-91369cf-20260726T170444Z`。备份内保留旧源码、SQLite、Caddy、前后元数据和 watchdog 日志，最终清单哈希为 `cbcc6b9b0d7a06b536454ea167253428ac58a31365536fca0b224dcff27bc0ed`。
+- 服务器非删除式同步 Git 提交 `91369cf1c54fb5161b4cfc5f8953c95e94878ac2`，69 个跟踪文件逐项 SHA-256 验证通过，`.env` 保持 `0600`。候选镜像在独立临时卷上通过健康、SQLite 与 Unicode 口令比较验证。
+- 服务器侧独立 60 秒 watchdog 只 force-recreate app；新 app 在 10 秒内恢复健康，镜像为 `sha256:906ffbefc34aff91ad762523cae37859b42c7d5a937acc3169e88edf865fe99e`，没有触发回滚。browser、cn-proxy 与 Caddy 的容器 ID、启动时间和 restart count 均未变化。
+- 共享 Caddy 候选只新增 Cloudflare 来源头可信边界，完整配置和挂载配置均通过运行中 Caddy 2.11.4 验证；原位写入保持 inode/权限，graceful reload 后 Caddy 容器 ID 不变且 `restart=0`。最终 Caddy SHA-256 为 `90dec04b2024eeabaa67f0dcde1d254e3ed02ce9f4bd6f9dc550f7c51f13c3f8`。
+- 公网 `/healthz`、首页、管理员登录为 200，未登录 noVNC 为 303，中文错误口令为 401；安全响应头完整。应用直连 3 MiB 分块请求为 413，小分块表单为 401。直连源站伪造 XFF/`CF-Connecting-IP` 被丢弃，经 Cloudflare 请求恢复真实出口 `202.8.9.242`。
+- 生产标记 `.icloud-code-gateway-deploy-sha` 为完整功能提交；新镜像保留 `latest/prod/release-91369cf`，旧镜像只保留专用 rollback 标签。候选容器、临时卷、候选标签、部署锁和一次性脚本均已清理，没有本轮悬空镜像；未修改 CDP 9222 网络归属，未执行 Apple/HME 远端写操作。
