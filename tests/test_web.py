@@ -26,6 +26,7 @@ class FakeHmeClient:
     aliases: list[dict] = []
     created: list[dict | Exception] = []
     list_error: Exception | None = None
+    lifecycle_calls: list[tuple[str, str]] = []
 
     def __init__(self, _session):
         pass
@@ -45,6 +46,28 @@ class FakeHmeClient:
         value["label"] = label
         value["note"] = note
         return value
+
+    def _change_state(self, action, anonymous_id, state=None):
+        self.lifecycle_calls.append((action, anonymous_id))
+        if action == "delete":
+            self.aliases[:] = [
+                item for item in self.aliases if item.get("anonymousId") != anonymous_id
+            ]
+            return {}
+        for item in self.aliases:
+            if item.get("anonymousId") == anonymous_id:
+                item["isActive"] = state
+                break
+        return {}
+
+    def deactivate_alias(self, anonymous_id):
+        return self._change_state("deactivate", anonymous_id, False)
+
+    def reactivate_alias(self, anonymous_id):
+        return self._change_state("reactivate", anonymous_id, True)
+
+    def delete_alias(self, anonymous_id):
+        return self._change_state("delete", anonymous_id)
 
 
 class FakeImapReader:
@@ -67,6 +90,7 @@ def reset_fakes():
     FakeHmeClient.aliases = []
     FakeHmeClient.created = []
     FakeHmeClient.list_error = None
+    FakeHmeClient.lifecycle_calls = []
     FakeImapReader.result = None
     FakeImapReader.check_error = None
 
@@ -368,6 +392,83 @@ def test_key_rotation_and_revocation_only_return_current_plaintext_once(
     assert service.database.find_alias_by_access_key_hash(hash_access_key(second)) is None
 
 
+def test_admin_can_manage_imported_alias_lifecycle_with_csrf_and_confirmation(
+    client, settings, service
+) -> None:
+    FakeHmeClient.aliases = [
+        {
+            "hme": "active@icloud.com",
+            "anonymousId": "active-id",
+            "label": "Historical active",
+            "isActive": True,
+        },
+        {
+            "hme": "inactive@icloud.com",
+            "anonymousId": "inactive-id",
+            "label": "Historical inactive",
+            "isActive": False,
+        },
+    ]
+    service.save_hme_session(_hme_session())
+    aliases = service.database.list_aliases()
+    active = next(item for item in aliases if item["state"] == "active")
+    inactive = next(item for item in aliases if item["state"] == "inactive")
+    csrf = _login(client, settings)
+
+    dashboard = client.get("/admin")
+    assert "从 iCloud 导入 / 刷新" in dashboard.text
+    assert "停用 Alias" in dashboard.text
+    assert "永久删除 Alias" in dashboard.text
+    assert 'id="delete-alias-modal"' in dashboard.text
+
+    missing_csrf = client.post(
+        f"/admin/api/aliases/{active['id']}/deactivate",
+        json={"confirmed": True},
+    )
+    assert missing_csrf.status_code == 403
+
+    unconfirmed = client.post(
+        f"/admin/api/aliases/{active['id']}/deactivate",
+        json={"confirmed": False},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert unconfirmed.status_code == 422
+    assert FakeHmeClient.lifecycle_calls == []
+
+    deactivated = client.post(
+        f"/admin/api/aliases/{active['id']}/deactivate",
+        json={"confirmed": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["state"] == "inactive"
+
+    reactivated = client.post(
+        f"/admin/api/aliases/{active['id']}/reactivate",
+        json={"confirmed": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert reactivated.status_code == 200
+    assert reactivated.json()["state"] == "active"
+
+    wrong_confirmation = client.request(
+        "DELETE",
+        f"/admin/api/aliases/{inactive['id']}",
+        json={"confirmation": "wrong@icloud.com"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert wrong_confirmation.status_code == 409
+
+    deleted = client.request(
+        "DELETE",
+        f"/admin/api/aliases/{inactive['id']}",
+        json={"confirmation": "inactive@icloud.com"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {"status": "deleted"}
+
+
 def test_partial_alias_batch_returns_already_created_keys(client, settings, service) -> None:
     FakeHmeClient.aliases = []
     service.save_hme_session(_hme_session())
@@ -404,6 +505,22 @@ def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, 
     )
     assert hme_response.status_code == 303
     assert hme_response.headers["location"] == "/admin?notice=hme_error"
+    assert service.get_hme_session() == original_hme
+
+    FakeHmeClient.list_error = None
+    FakeHmeClient.aliases = [
+        {"hme": "broken@icloud.com", "anonymousId": "broken", "isActive": "yes"}
+    ]
+    malformed_response = client.post(
+        "/admin/hme/import",
+        data={
+            "csrf_token": csrf,
+            "session_import": _session_curl(_hme_session(client_id="new")),
+        },
+        follow_redirects=False,
+    )
+    assert malformed_response.status_code == 303
+    assert malformed_response.headers["location"] == "/admin?notice=hme_error"
     assert service.get_hme_session() == original_hme
 
     FakeImapReader.check_error = ImapCredentialsError("login rejected")
@@ -546,7 +663,9 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     ).read_text()
 
     assert "class AuthenticationRequiredError extends Error" in script
-    assert script.count("instanceof AuthenticationRequiredError") == 3
+    assert script.count("instanceof AuthenticationRequiredError") == 6
+    assert "window.prompt" not in script
+    assert 'querySelector("#delete-alias-form")' in script
     assert "response.status === 401 || response.status === 403" in script
     assert 'window.location.assign("/admin/login")' in script
 

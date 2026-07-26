@@ -536,6 +536,15 @@ class Database:
             if cursor.rowcount != 1:
                 raise NotFoundError("alias not found")
 
+    def delete_alias(self, alias_id: str) -> None:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM aliases WHERE id = ?",
+                (str(alias_id),),
+            )
+            if cursor.rowcount != 1:
+                raise NotFoundError("alias not found")
+
     def record_audit_event(
         self,
         event_type: str,

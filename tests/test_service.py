@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from icloud_gateway.config import Settings
+from icloud_gateway.database import ConflictError, NotFoundError
 from icloud_gateway.hme import HmeError, ICloudHmeSession
 from icloud_gateway.imap_otp import ImapConfig, OtpResult
 from icloud_gateway.rate_limit import SlidingWindowRateLimiter
@@ -49,6 +50,9 @@ def hme_session() -> ICloudHmeSession:
 class FakeHmeClient:
     aliases = []
     created = []
+    lifecycle_error = None
+    confirm_lifecycle = True
+    lifecycle_calls = []
 
     def __init__(self, _session):
         pass
@@ -63,6 +67,32 @@ class FakeHmeClient:
         item["label"] = label
         item["note"] = note
         return item
+
+    def _change_state(self, action, anonymous_id, state=None):
+        self.lifecycle_calls.append((action, anonymous_id))
+        if self.lifecycle_error is not None:
+            raise self.lifecycle_error
+        if not self.confirm_lifecycle:
+            return {}
+        if action == "delete":
+            self.aliases[:] = [
+                item for item in self.aliases if item.get("anonymousId") != anonymous_id
+            ]
+            return {}
+        for item in self.aliases:
+            if item.get("anonymousId") == anonymous_id:
+                item["isActive"] = state
+                break
+        return {}
+
+    def deactivate_alias(self, anonymous_id):
+        return self._change_state("deactivate", anonymous_id, False)
+
+    def reactivate_alias(self, anonymous_id):
+        return self._change_state("reactivate", anonymous_id, True)
+
+    def delete_alias(self, anonymous_id):
+        return self._change_state("delete", anonymous_id)
 
 
 class FakeReader:
@@ -85,6 +115,9 @@ class FakeReader:
 def reset_fakes():
     FakeHmeClient.aliases = []
     FakeHmeClient.created = []
+    FakeHmeClient.lifecycle_error = None
+    FakeHmeClient.confirm_lifecycle = True
+    FakeHmeClient.lifecycle_calls = []
     FakeReader.result = None
     FakeReader.checked = []
 
@@ -116,10 +149,41 @@ def configure_imap(value: GatewayService) -> ImapConfig:
 
 def test_hme_session_is_saved_only_after_read_only_validation(tmp_path) -> None:
     value = service(tmp_path)
-    FakeHmeClient.aliases = [{"hme": "one@icloud.com", "anonymousId": "one"}]
+    FakeHmeClient.aliases = [{"hme": "one@icloud.com", "anonymousId": "one", "isActive": True}]
 
     assert value.save_hme_session(hme_session()) == 1
     assert value.get_hme_session() == hme_session()
+
+
+def test_hme_session_save_imports_historical_aliases_and_active_alias_can_receive_key(
+    tmp_path,
+) -> None:
+    value = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {
+            "hme": "active@icloud.com",
+            "anonymousId": "active-id",
+            "label": "Historical active",
+            "isActive": True,
+        },
+        {
+            "hme": "inactive@icloud.com",
+            "anonymousId": "inactive-id",
+            "label": "Historical inactive",
+            "isActive": False,
+        },
+    ]
+
+    assert value.save_hme_session(hme_session()) == 2
+
+    aliases = value.database.list_aliases()
+    active = next(item for item in aliases if item["email"] == "active@icloud.com")
+    inactive = next(item for item in aliases if item["email"] == "inactive@icloud.com")
+    assert active["state"] == "active"
+    assert inactive["state"] == "inactive"
+    assert value.issue_access_key(active["id"]).access_key.startswith("icg_")
+    with pytest.raises(ConflictError):
+        value.issue_access_key(inactive["id"])
 
     class RejectingClient(FakeHmeClient):
         def list_aliases(self):
@@ -297,6 +361,116 @@ def test_empty_remote_list_does_not_deactivate_every_alias(tmp_path) -> None:
     aliases = gateway.database.list_aliases()
     assert [item["state"] for item in aliases] == ["active", "active"]
     assert all(item["has_access_key"] for item in aliases)
+
+
+def test_invalid_remote_snapshot_is_rejected_before_local_state_changes(tmp_path) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": True},
+        {"hme": "two@icloud.com", "anonymousId": "two", "isActive": True},
+    ]
+    gateway.save_hme_session(hme_session())
+    one = next(
+        item for item in gateway.database.list_aliases() if item["email"] == "one@icloud.com"
+    )
+    issued = gateway.issue_access_key(one["id"])
+
+    FakeHmeClient.aliases = [
+        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": False},
+        {"hme": "broken", "anonymousId": "two", "isActive": False},
+    ]
+
+    with pytest.raises(GatewayError):
+        gateway.sync_aliases()
+
+    unchanged = gateway.database.get_alias(one["id"])
+    assert unchanged["state"] == "active"
+    assert gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key))
+
+
+def test_remote_lifecycle_changes_require_readback_before_local_mutation(tmp_path) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+    issued = gateway.issue_access_key(alias["id"])
+
+    FakeHmeClient.confirm_lifecycle = False
+    with pytest.raises(GatewayError):
+        gateway.deactivate_alias(alias["id"])
+
+    unchanged = gateway.database.get_alias(alias["id"])
+    assert unchanged["state"] == "active"
+    assert gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key))
+    assert FakeHmeClient.lifecycle_calls == [("deactivate", "person")]
+
+    FakeHmeClient.confirm_lifecycle = True
+    deactivated = gateway.deactivate_alias(alias["id"])
+    assert deactivated["state"] == "inactive"
+    assert (
+        gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key)) is None
+    )
+
+    reactivated = gateway.reactivate_alias(alias["id"])
+    assert reactivated["state"] == "active"
+
+
+def test_remote_lifecycle_rejects_partial_confirmation_snapshot(tmp_path) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": True},
+        {"hme": "two@icloud.com", "anonymousId": "two", "isActive": True},
+    ]
+    gateway.save_hme_session(hme_session())
+    one = next(
+        item for item in gateway.database.list_aliases() if item["email"] == "one@icloud.com"
+    )
+    issued = gateway.issue_access_key(one["id"])
+
+    class PartialConfirmationClient(FakeHmeClient):
+        def deactivate_alias(self, anonymous_id):
+            result = super().deactivate_alias(anonymous_id)
+            self.aliases[:] = [
+                item for item in self.aliases if item.get("anonymousId") == anonymous_id
+            ]
+            return result
+
+    gateway.hme_client_factory = PartialConfirmationClient
+
+    with pytest.raises(GatewayError):
+        gateway.deactivate_alias(one["id"])
+
+    unchanged = gateway.database.get_alias(one["id"])
+    assert unchanged["state"] == "active"
+    assert gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key))
+
+
+def test_permanent_delete_requires_inactive_state_confirmation_and_remote_absence(
+    tmp_path,
+) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": False}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+
+    with pytest.raises(ConflictError):
+        gateway.delete_alias(alias["id"], confirmation="wrong@icloud.com")
+    assert FakeHmeClient.lifecycle_calls == []
+
+    FakeHmeClient.confirm_lifecycle = False
+    with pytest.raises(GatewayError):
+        gateway.delete_alias(alias["id"], confirmation="person@icloud.com")
+    assert gateway.database.get_alias(alias["id"])["state"] == "inactive"
+    assert FakeHmeClient.lifecycle_calls == [("delete", "person")]
+
+    FakeHmeClient.confirm_lifecycle = True
+    gateway.delete_alias(alias["id"], confirmation="person@icloud.com")
+    with pytest.raises(NotFoundError):
+        gateway.database.get_alias(alias["id"])
 
 
 def test_key_dimension_rate_limit_does_not_depend_on_ip_limit(tmp_path) -> None:

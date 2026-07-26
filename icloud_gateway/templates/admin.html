@@ -102,7 +102,7 @@
     <div class="section-toolbar">
       <div class="section-heading">
         <h2 id="aliases-title">Alias</h2>
-        <p>{{ counts.total }} 条本地记录</p>
+        <p>{{ counts.active }} 条活动，{{ counts.total - counts.active }} 条失活，{{ counts.keyed }} 条已签发密钥</p>
       </div>
       <div class="toolbar-actions">
         <label class="search-control" for="alias-filter">
@@ -112,9 +112,9 @@
         </label>
         <form method="post" action="/admin/hme/sync">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="secondary-button" type="submit" {% if not hme.configured %}disabled{% endif %}>
+          <button class="secondary-button" type="submit" aria-label="从 iCloud 导入 / 刷新" title="从 iCloud 导入 / 刷新" {% if not hme.configured %}disabled{% endif %}>
             <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
-            <span>对账</span>
+            <span>导入 / 刷新</span>
           </button>
         </form>
       </div>
@@ -155,8 +155,22 @@
           </button>
           {% if alias.has_access_key %}
           <button class="icon-button danger-icon revoke-key-button" type="button" data-alias-id="{{ alias.id }}" aria-label="撤销密钥" title="撤销密钥">
+            <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+          </button>
+          {% endif %}
+          {% if alias.remote_metadata and alias.remote_metadata.anonymousId %}
+            {% if alias.state == 'active' %}
+          <button class="icon-button danger-icon deactivate-alias-button" type="button" data-alias-id="{{ alias.id }}" data-alias-email="{{ alias.email }}" aria-label="停用 Alias" title="停用 Alias">
             <img src="/static/icons/ban.svg" alt="" aria-hidden="true">
           </button>
+            {% else %}
+          <button class="icon-button reactivate-alias-button" type="button" data-alias-id="{{ alias.id }}" data-alias-email="{{ alias.email }}" aria-label="恢复 Alias" title="恢复 Alias">
+            <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
+          </button>
+          <button class="icon-button danger-icon delete-alias-button" type="button" data-alias-id="{{ alias.id }}" data-alias-email="{{ alias.email }}" aria-label="永久删除 Alias" title="永久删除 Alias">
+            <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+          </button>
+            {% endif %}
           {% endif %}
           <details class="row-menu">
             <summary class="icon-button" aria-label="编辑 Alias" title="编辑 Alias">
@@ -335,6 +349,35 @@
     <div class="modal-footer">
       <button class="primary-button" type="button" data-close-modal>完成</button>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="delete-alias-modal" hidden role="dialog" aria-modal="true" aria-labelledby="delete-alias-modal-title">
+  <div class="modal-backdrop" data-close-delete-modal></div>
+  <div class="modal-dialog delete-modal-dialog" tabindex="-1">
+    <div class="modal-header">
+      <h2 id="delete-alias-modal-title">永久删除 Alias</h2>
+      <button class="icon-button" type="button" data-close-delete-modal aria-label="关闭" title="关闭">
+        <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+      </button>
+    </div>
+    <form id="delete-alias-form">
+      <div class="delete-confirm-body">
+        <p class="modal-message">此操作会从 iCloud 永久删除 <strong id="delete-alias-email"></strong>，无法恢复。</p>
+        <div class="field">
+          <label for="delete-alias-confirmation">输入完整邮箱确认</label>
+          <input id="delete-alias-confirmation" type="email" autocomplete="off" spellcheck="false" required>
+        </div>
+        <p class="form-message" id="delete-alias-message" aria-live="polite"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-button" type="button" data-close-delete-modal>取消</button>
+        <button class="primary-button danger-command" id="delete-alias-submit" type="submit">
+          <img src="/static/icons/x.svg" alt="" aria-hidden="true">
+          <span>永久删除</span>
+        </button>
+      </div>
+    </form>
   </div>
 </div>
 {% endblock %}

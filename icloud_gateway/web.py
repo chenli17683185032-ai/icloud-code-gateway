@@ -4,7 +4,7 @@ import asyncio
 import hmac
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -45,7 +45,7 @@ MAX_REQUEST_BYTES = 2 * 1024 * 1024
 NOTICE_MESSAGES = {
     "imap_saved": "IMAP 配置已验证并保存。",
     "imap_error": "IMAP 配置未保存，请检查连接信息。",
-    "hme_saved": "HME Session 已通过只读验证并保存。",
+    "hme_saved": "HME Session 已验证并保存，历史 Alias 已导入。",
     "hme_error": "HME Session 未更新，原有会话保持不变。",
     "capture_started": "已连接持久浏览器，请打开 iCloud 浏览器完成 Apple 登录。",
     "capture_busy": "HME Session 捕获正在进行。",
@@ -86,6 +86,14 @@ class CreateAliasesRequest(BaseModel):
     label_prefix: Annotated[str, Field(min_length=1, max_length=140)]
     note: Annotated[str, Field(max_length=500)] = ""
     sender_filter: Annotated[str, Field(max_length=254)] = ""
+
+
+class ConfirmedAliasAction(BaseModel):
+    confirmed: Literal[True]
+
+
+class DeleteAliasRequest(BaseModel):
+    confirmation: Annotated[str, Field(min_length=3, max_length=254)]
 
 
 def _client_ip(request: Request) -> str:
@@ -395,7 +403,7 @@ def create_app(
             await asyncio.to_thread(
                 gateway.import_hme_session, str(form.get("session_import") or "")
             )
-        except (HmeError, HmeSessionError, ValueError):
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError, ValueError):
             return _redirect_notice("hme_error")
         return _redirect_notice("hme_saved")
 
@@ -496,6 +504,61 @@ def create_app(
         except (NotFoundError, DatabaseError):
             return JSONResponse({"status": "error"}, status_code=404)
         return {"status": "revoked"}
+
+    @app.post("/admin/api/aliases/{alias_id}/deactivate")
+    async def deactivate_alias(
+        alias_id: str,
+        request: Request,
+        _payload: ConfirmedAliasAction,
+    ):
+        _require_admin_json(request, session_codec)
+        try:
+            alias = await asyncio.to_thread(gateway.deactivate_alias, alias_id)
+        except ConflictError:
+            return JSONResponse({"status": "conflict"}, status_code=409)
+        except NotFoundError:
+            return JSONResponse({"status": "error"}, status_code=404)
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError, ValueError):
+            return JSONResponse({"status": "error"}, status_code=502)
+        return {"status": "deactivated", "state": alias["state"]}
+
+    @app.post("/admin/api/aliases/{alias_id}/reactivate")
+    async def reactivate_alias(
+        alias_id: str,
+        request: Request,
+        _payload: ConfirmedAliasAction,
+    ):
+        _require_admin_json(request, session_codec)
+        try:
+            alias = await asyncio.to_thread(gateway.reactivate_alias, alias_id)
+        except ConflictError:
+            return JSONResponse({"status": "conflict"}, status_code=409)
+        except NotFoundError:
+            return JSONResponse({"status": "error"}, status_code=404)
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError, ValueError):
+            return JSONResponse({"status": "error"}, status_code=502)
+        return {"status": "reactivated", "state": alias["state"]}
+
+    @app.delete("/admin/api/aliases/{alias_id}")
+    async def delete_alias(
+        alias_id: str,
+        request: Request,
+        payload: DeleteAliasRequest,
+    ):
+        _require_admin_json(request, session_codec)
+        try:
+            await asyncio.to_thread(
+                gateway.delete_alias,
+                alias_id,
+                confirmation=payload.confirmation,
+            )
+        except ConflictError:
+            return JSONResponse({"status": "conflict"}, status_code=409)
+        except NotFoundError:
+            return JSONResponse({"status": "error"}, status_code=404)
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError, ValueError):
+            return JSONResponse({"status": "error"}, status_code=502)
+        return {"status": "deleted"}
 
     @app.post("/admin/aliases/{alias_id}")
     async def update_alias(alias_id: str, request: Request):

@@ -29,6 +29,7 @@ _HME_PATHS = frozenset(
         "/v1/hme/activate",
         "/v1/hme/deactivate",
         "/v1/hme/delete",
+        "/v1/hme/reactivate",
     }
 )
 _DEFAULT_USER_AGENT = (
@@ -332,10 +333,14 @@ class HmeClient:
         return result
 
     def list_aliases(self) -> list[dict[str, Any]]:
-        aliases = self.list_settings().get("hmeEmails") or []
+        aliases = self.list_settings().get("hmeEmails")
+        if aliases is None:
+            aliases = []
         if not isinstance(aliases, list):
             raise HmeError("iCloud HME alias list is invalid")
-        return [dict(item) for item in aliases if isinstance(item, Mapping)]
+        if any(not isinstance(item, Mapping) for item in aliases):
+            raise HmeError("iCloud HME alias list is incomplete")
+        return [dict(item) for item in aliases]
 
     def generate_alias(self) -> str:
         response = self._request("POST", "/v1/hme/generate", {"langCode": self.session.lang_code})
@@ -363,6 +368,23 @@ class HmeClient:
     def create_alias(self, *, label: str, note: str = "") -> dict[str, Any]:
         candidate = self.generate_alias()
         return self.reserve_alias(candidate, label=label, note=note)
+
+    def deactivate_alias(self, anonymous_id: str) -> dict[str, Any]:
+        return self._change_alias("/v1/hme/deactivate", anonymous_id)
+
+    def reactivate_alias(self, anonymous_id: str) -> dict[str, Any]:
+        return self._change_alias("/v1/hme/reactivate", anonymous_id)
+
+    def delete_alias(self, anonymous_id: str) -> dict[str, Any]:
+        return self._change_alias("/v1/hme/delete", anonymous_id)
+
+    def _change_alias(self, path: str, anonymous_id: str) -> dict[str, Any]:
+        remote_id = str(anonymous_id or "").strip()
+        if not remote_id or len(remote_id) > 256 or "\r" in remote_id or "\n" in remote_id:
+            raise ValueError("iCloud HME anonymous ID is invalid")
+        response = self._request("POST", path, {"anonymousId": remote_id})
+        result = response.get("result")
+        return dict(result) if isinstance(result, Mapping) else {}
 
     def _request(
         self, method: str, path: str, payload: Mapping[str, Any] | None = None

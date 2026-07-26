@@ -9,7 +9,7 @@ from typing import Any
 
 from .browser_capture import CaptureManager
 from .config import Settings
-from .database import Database, IssuedAccessKey
+from .database import ConflictError, Database, IssuedAccessKey
 from .hme import (
     HmeClient,
     HmeError,
@@ -28,6 +28,8 @@ from .security import SecretBox, SecurityError, hash_access_key
 
 HME_SETTING_KEY = "hme_session"
 IMAP_SETTING_KEY = "imap_config"
+HME_CONFIRM_ATTEMPTS = 3
+HME_CONFIRM_DELAY_SECONDS = 0.5
 
 
 class GatewayError(RuntimeError):
@@ -127,8 +129,9 @@ class GatewayService:
     def save_hme_session(self, session: ICloudHmeSession) -> int:
         with self._hme_lock:
             client = self.hme_client_factory(session)
-            aliases = client.list_aliases()
+            aliases = self._validated_remote_aliases(client.list_aliases())
             self.database.set_secret(HME_SETTING_KEY, session.as_secret_dict())
+            self._reconcile_remote_aliases(aliases)
             self.database.record_audit_event("hme_session", "saved")
             return len(aliases)
 
@@ -138,34 +141,140 @@ class GatewayService:
 
     def sync_aliases(self) -> list[dict[str, Any]]:
         with self._hme_lock:
-            session = self.get_hme_session()
-            if session is None:
-                raise GatewayNotConfiguredError("iCloud HME session is not configured")
-            remote_aliases = self.hme_client_factory(session).list_aliases()
-            synced_at = _timestamp()
-            seen: list[str] = []
-            for remote in remote_aliases:
-                email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
-                anonymous_id = str(remote.get("anonymousId") or "").strip()
-                if email.count("@") != 1 or not anonymous_id:
-                    continue
-                self.database.sync_remote_alias(
-                    email=email,
-                    remote_metadata=remote,
-                    synced_at=synced_at,
-                )
-                seen.append(email)
-            if not seen and self.database.count_remote_aliases():
-                # An empty or unparseable alias list would otherwise deactivate
-                # every alias and destroy every access key, which cannot be
-                # undone because keys are only ever displayed once. Apple
-                # returning nothing is far likelier than the operator having
-                # deleted every alias, so refuse instead of reconciling.
-                self.database.record_audit_event("hme_sync", "refused_empty")
-                raise GatewayError("iCloud HME returned no aliases; refusing to deactivate all")
-            self.database.finish_remote_sync(seen, synced_at=synced_at)
+            client = self._hme_client()
+            remote_aliases = self._validated_remote_aliases(client.list_aliases())
+            self._reconcile_remote_aliases(remote_aliases)
             self.database.record_audit_event("hme_sync", "succeeded")
         return self.database.list_aliases()
+
+    def _hme_client(self) -> HmeClient:
+        session = self.get_hme_session()
+        if session is None:
+            raise GatewayNotConfiguredError("iCloud HME session is not configured")
+        return self.hme_client_factory(session)
+
+    def _validated_remote_aliases(
+        self,
+        remote_aliases: list[dict[str, Any]],
+        *,
+        allow_empty: bool = False,
+    ) -> list[dict[str, Any]]:
+        validated: list[dict[str, Any]] = []
+        seen_emails: set[str] = set()
+        seen_remote_ids: set[str] = set()
+        for item in remote_aliases:
+            if not isinstance(item, Mapping):
+                raise GatewayError("iCloud HME returned an invalid alias snapshot")
+            remote = dict(item)
+            email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
+            anonymous_id = str(remote.get("anonymousId") or "").strip()
+            label = str(remote.get("label") or email).strip()
+            note = str(remote.get("note") or "").strip()
+            local_part, separator, domain = email.rpartition("@")
+            if (
+                email.count("@") != 1
+                or not separator
+                or not local_part
+                or not domain
+                or "." not in domain
+                or len(email) > 254
+                or any(character.isspace() for character in email)
+                or not anonymous_id
+                or len(anonymous_id) > 256
+                or "\r" in anonymous_id
+                or "\n" in anonymous_id
+                or not isinstance(remote.get("isActive"), bool)
+                or not label
+                or len(label) > 160
+                or "\r" in label
+                or "\n" in label
+                or len(note) > 500
+                or "\r" in note
+                or "\n" in note
+                or email in seen_emails
+                or anonymous_id in seen_remote_ids
+            ):
+                raise GatewayError("iCloud HME returned an invalid alias snapshot")
+            seen_emails.add(email)
+            seen_remote_ids.add(anonymous_id)
+            validated.append(remote)
+        if not validated and self.database.count_remote_aliases() and not allow_empty:
+            self.database.record_audit_event("hme_sync", "refused_empty")
+            raise GatewayError("iCloud HME returned no aliases; refusing to deactivate all")
+        return validated
+
+    def _reconcile_remote_aliases(self, remote_aliases: list[dict[str, Any]]) -> None:
+        synced_at = _timestamp()
+        seen: list[str] = []
+        for remote in remote_aliases:
+            email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
+            self.database.sync_remote_alias(
+                email=email,
+                remote_metadata=remote,
+                synced_at=synced_at,
+            )
+            seen.append(email)
+        self.database.finish_remote_sync(seen, synced_at=synced_at)
+
+    def _confirmed_remote_aliases(
+        self,
+        client: HmeClient,
+        anonymous_id: str,
+        *,
+        expected_active: bool | None = None,
+        expected_absent: bool = False,
+    ) -> list[dict[str, Any]]:
+        known_remote_ids = {
+            str(remote.get("anonymousId") or "").strip()
+            for alias in self.database.list_aliases()
+            for remote in [alias.get("remote_metadata")]
+            if isinstance(remote, Mapping) and str(remote.get("anonymousId") or "").strip()
+        }
+        required_remote_ids = (
+            known_remote_ids - {anonymous_id} if expected_absent else known_remote_ids
+        )
+        allow_empty = expected_absent and self.database.count_remote_aliases() <= 1
+        for attempt in range(HME_CONFIRM_ATTEMPTS):
+            remote_aliases = self._validated_remote_aliases(
+                client.list_aliases(),
+                allow_empty=allow_empty,
+            )
+            snapshot_remote_ids = {
+                str(remote.get("anonymousId") or "").strip() for remote in remote_aliases
+            }
+            snapshot_is_complete = required_remote_ids.issubset(snapshot_remote_ids)
+            match = next(
+                (
+                    remote
+                    for remote in remote_aliases
+                    if str(remote.get("anonymousId") or "").strip() == anonymous_id
+                ),
+                None,
+            )
+            if expected_absent and match is None and snapshot_is_complete:
+                return remote_aliases
+            if (
+                not expected_absent
+                and match is not None
+                and match.get("isActive") is expected_active
+                and snapshot_is_complete
+            ):
+                return remote_aliases
+            if attempt + 1 < HME_CONFIRM_ATTEMPTS:
+                self.sleeper(HME_CONFIRM_DELAY_SECONDS)
+        raise GatewayError("iCloud HME did not confirm the requested alias state")
+
+    def _remote_alias(self, alias_id: str, *, state: str) -> tuple[dict[str, Any], str]:
+        alias = self.database.get_alias(alias_id)
+        if alias["state"] != state:
+            raise ConflictError(f"alias must be {state}")
+        remote = alias.get("remote_metadata")
+        anonymous_id = (
+            str(remote.get("anonymousId") or "").strip() if isinstance(remote, Mapping) else ""
+        )
+        if not anonymous_id:
+            raise ConflictError("alias is not managed by iCloud HME")
+        return alias, anonymous_id
 
     def create_aliases(
         self,
@@ -253,9 +362,10 @@ class GatewayService:
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
-        issued = self.database.issue_access_key(alias_id)
-        self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
-        return issued
+        with self._hme_lock:
+            issued = self.database.issue_access_key(alias_id)
+            self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
+            return issued
 
     def revoke_access_key(self, alias_id: str) -> None:
         self.database.revoke_access_key(alias_id)
@@ -277,6 +387,54 @@ class GatewayService:
         )
         self.database.record_audit_event("alias_config", "updated", alias_id=str(alias_id))
         return alias
+
+    def deactivate_alias(self, alias_id: str) -> dict[str, Any]:
+        with self._hme_lock:
+            _alias, anonymous_id = self._remote_alias(alias_id, state="active")
+            client = self._hme_client()
+            client.deactivate_alias(anonymous_id)
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_active=False,
+            )
+            self._reconcile_remote_aliases(remote_aliases)
+            self.database.record_audit_event(
+                "alias_deactivate", "succeeded", alias_id=str(alias_id)
+            )
+            return self.database.get_alias(alias_id)
+
+    def reactivate_alias(self, alias_id: str) -> dict[str, Any]:
+        with self._hme_lock:
+            _alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
+            client = self._hme_client()
+            client.reactivate_alias(anonymous_id)
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_active=True,
+            )
+            self._reconcile_remote_aliases(remote_aliases)
+            self.database.record_audit_event(
+                "alias_reactivate", "succeeded", alias_id=str(alias_id)
+            )
+            return self.database.get_alias(alias_id)
+
+    def delete_alias(self, alias_id: str, *, confirmation: str) -> None:
+        with self._hme_lock:
+            alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
+            if str(confirmation or "").strip().casefold() != alias["email"].casefold():
+                raise ConflictError("alias deletion confirmation does not match")
+            client = self._hme_client()
+            client.delete_alias(anonymous_id)
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_absent=True,
+            )
+            self._reconcile_remote_aliases(remote_aliases)
+            self.database.delete_alias(alias_id)
+            self.database.record_audit_event("alias_delete", "succeeded")
 
     def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
         ip_key = str(client_ip or "unknown")

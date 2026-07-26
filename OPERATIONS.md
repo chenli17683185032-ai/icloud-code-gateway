@@ -143,7 +143,15 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy
 3. noVNC 会再次要求 `BROWSER_VNC_PASSWORD`。管理员密码和 VNC 密码必须不同。
 4. 在画面内人工登录 iCloud。Apple ID 密码、2FA 和恢复信息只输入 Apple 页面，不录入本系统。
 5. 回到管理页点击“开始捕获”，在同一浏览器访问 iCloud+ 隐藏邮件页面，直到状态变为“已捕获”。
-6. 执行 HME 同步，只读确认 Session 可用。
+6. 捕获成功会自动读取并导入当前 Apple 账户的完整 Alias 列表；点击“导入 / 刷新”可再次执行只读对账。
+
+### 4.1 Alias 生命周期管理
+
+- 活动 Alias 可以签发/轮换访问密钥，也可以远端停用。Apple 列表确认 `isActive=false` 后，本地才标记失活并撤销该 Alias 的访问密钥。
+- 失活 Alias 可以恢复；Apple 列表确认 `isActive=true` 后，本地才恢复活动状态，恢复后仍需按需重新签发访问密钥。
+- 永久删除只对失活 Alias 开放，并要求输入完整 Alias 邮箱。Apple 列表确认远端 ID 已消失后，本地记录才删除。
+- 远端写请求不会自动重试。页面提示状态未确认时，先使用“导入 / 刷新”读取实际 Apple 状态，不要连续重复点击破坏性动作。
+- 数据库备份只能恢复本地配置和密钥映射，不能撤销已经在 Apple 远端完成的停用、恢复或永久删除。
 
 浏览器容器、app 容器或服务器重启后仍使用同一个 profile。iCloud 显示离线或 HME Session 失效时，重复上述流程；不要删除 browser-data 卷，也不要创建第二个同时占用该卷的 browser 容器。
 
@@ -270,6 +278,7 @@ docker compose ps
 ## 9. 密钥轮换
 
 - Alias 访问密钥：在管理页轮换，旧密钥立即失效。
+- 历史 Alias：HME Session 保存时自动导入；活动项可以直接签发 key，失活项必须先在 Apple 远端恢复。
 - 管理员密码/VNC 密码：修改 `.env` 后重建对应容器；不要复用两者。
 - 回国代理凭据：修改 `.env` 后重建 app 和 browser，并重新验证两个出口。
 - 主密钥：不能只替换环境值。需要先实现/执行数据库密文重加密迁移；直接替换会使已有密文不可读。

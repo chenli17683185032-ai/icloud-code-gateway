@@ -15,6 +15,7 @@
   --accent-text: #ffffff;
   --danger: #b42318;
   --danger-soft: #f8ddd9;
+  --danger-text: #ffffff;
   --warning: #7a5d00;
   --focus: #009f78;
   --shadow: 0 18px 60px rgb(20 42 32 / 0.12);
@@ -41,6 +42,7 @@
     --accent-text: #0c1b15;
     --danger: #ff8d82;
     --danger-soft: #4a211f;
+    --danger-text: #2a0f0c;
     --warning: #e8c85d;
     --focus: #64dfb8;
     --shadow: 0 20px 70px rgb(0 0 0 / 0.34);
@@ -239,6 +241,16 @@ img {
 
 .primary-button:hover:not(:disabled) {
   background: var(--accent-hover);
+}
+
+.danger-command {
+  background: var(--danger);
+  color: var(--danger-text);
+}
+
+.danger-command:hover:not(:disabled) {
+  background: var(--danger);
+  opacity: 0.88;
 }
 
 .secondary-button {
@@ -826,7 +838,7 @@ a:focus-visible {
     minmax(150px, 0.8fr)
     minmax(125px, 0.6fr)
     90px
-    146px;
+    190px;
   gap: 14px;
   align-items: center;
   padding: 13px 16px;
@@ -1145,6 +1157,25 @@ a:focus-visible {
 .modal-footer {
   justify-content: flex-end;
   border-top: 1px solid var(--line);
+}
+
+.delete-modal-dialog {
+  width: min(100%, 540px);
+}
+
+.delete-confirm-body {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.delete-confirm-body .modal-message {
+  padding: 0;
+}
+
+.delete-confirm-body strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
 }
 
 @keyframes loading-sweep {

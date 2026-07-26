@@ -5,7 +5,14 @@
   const modal = document.querySelector("#key-modal");
   const modalMessage = document.querySelector("#key-modal-message");
   const issuedList = document.querySelector("#issued-key-list");
+  const deleteModal = document.querySelector("#delete-alias-modal");
+  const deleteForm = document.querySelector("#delete-alias-form");
+  const deleteEmail = document.querySelector("#delete-alias-email");
+  const deleteConfirmation = document.querySelector("#delete-alias-confirmation");
+  const deleteMessage = document.querySelector("#delete-alias-message");
+  const deleteSubmit = document.querySelector("#delete-alias-submit");
   let modalReturnFocus = null;
+  let deleteTarget = null;
 
   class AuthenticationRequiredError extends Error {}
 
@@ -97,8 +104,42 @@
     button.addEventListener("click", closeModal);
   });
 
+  function openDeleteModal(button) {
+    deleteTarget = {
+      id: button.dataset.aliasId,
+      email: button.dataset.aliasEmail,
+      button,
+    };
+    deleteEmail.textContent = deleteTarget.email;
+    deleteConfirmation.value = "";
+    deleteMessage.textContent = "";
+    deleteSubmit.disabled = false;
+    deleteModal.hidden = false;
+    document.body.classList.add("modal-open");
+    deleteConfirmation.focus();
+  }
+
+  function closeDeleteModal() {
+    if (!deleteModal || deleteModal.hidden) return;
+    deleteModal.hidden = true;
+    document.body.classList.remove("modal-open");
+    deleteConfirmation.value = "";
+    deleteMessage.textContent = "";
+    deleteTarget?.button?.focus();
+    deleteTarget = null;
+  }
+
+  deleteModal?.querySelectorAll("[data-close-delete-modal]").forEach((button) => {
+    button.addEventListener("click", closeDeleteModal);
+  });
+
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && modal && !modal.hidden) closeModal();
+    if (event.key !== "Escape") return;
+    if (deleteModal && !deleteModal.hidden) {
+      closeDeleteModal();
+    } else if (modal && !modal.hidden) {
+      closeModal();
+    }
   });
 
   const createForm = document.querySelector("#create-alias-form");
@@ -171,6 +212,78 @@
         button.disabled = false;
       }
     });
+  });
+
+  document.querySelectorAll(".deactivate-alias-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const email = button.dataset.aliasEmail;
+      if (
+        !window.confirm(
+          `确认在 iCloud 停用 ${email}？Apple 确认后，该 Alias 的访问密钥会立即撤销。`,
+        )
+      ) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        await api(`/admin/api/aliases/${button.dataset.aliasId}/deactivate`, {
+          method: "POST",
+          body: JSON.stringify({ confirmed: true }),
+        });
+        window.location.reload();
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
+        window.alert("Alias 停用失败，本地状态未改变。请刷新后重试。");
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".reactivate-alias-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const email = button.dataset.aliasEmail;
+      if (!window.confirm(`确认在 iCloud 恢复 ${email}？`)) return;
+      button.disabled = true;
+      try {
+        await api(`/admin/api/aliases/${button.dataset.aliasId}/reactivate`, {
+          method: "POST",
+          body: JSON.stringify({ confirmed: true }),
+        });
+        window.location.reload();
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
+        window.alert("Alias 恢复失败，本地状态未改变。请刷新后重试。");
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".delete-alias-button").forEach((button) => {
+    button.addEventListener("click", () => openDeleteModal(button));
+  });
+
+  deleteForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!deleteTarget) return;
+    const confirmation = deleteConfirmation.value.trim();
+    if (confirmation.toLocaleLowerCase() !== deleteTarget.email.toLocaleLowerCase()) {
+      deleteMessage.textContent = "输入的邮箱不匹配。";
+      deleteConfirmation.focus();
+      return;
+    }
+    deleteMessage.textContent = "";
+    deleteSubmit.disabled = true;
+    try {
+      await api(`/admin/api/aliases/${deleteTarget.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation }),
+      });
+      window.location.reload();
+    } catch (error) {
+      if (error instanceof AuthenticationRequiredError) return;
+      deleteMessage.textContent = "永久删除失败，本地记录未删除。请刷新后重试。";
+      deleteSubmit.disabled = false;
+    }
   });
 
   const filter = document.querySelector("#alias-filter");

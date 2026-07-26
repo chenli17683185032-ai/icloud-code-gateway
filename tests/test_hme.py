@@ -161,6 +161,53 @@ def test_client_lists_and_creates_alias_using_generate_then_reserve() -> None:
     }
 
 
+def test_client_rejects_partial_alias_list_and_sends_lifecycle_payloads() -> None:
+    calls = []
+    responses = [
+        FakeResponse(
+            {
+                "success": True,
+                "result": {"hmeEmails": [{"hme": "valid@icloud.com"}, "invalid"]},
+            }
+        ),
+        FakeResponse({"success": True, "result": {}}),
+        FakeResponse({"success": True, "result": {}}),
+        FakeResponse({"success": True, "result": {}}),
+    ]
+
+    def requester(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return responses.pop(0)
+
+    client = HmeClient(session(), requester=requester)
+
+    with pytest.raises(HmeError):
+        client.list_aliases()
+    client.deactivate_alias("remote-id")
+    client.reactivate_alias("remote-id")
+    client.delete_alias("remote-id")
+
+    assert [call[0] for call in calls] == ["GET", "POST", "POST", "POST"]
+    assert [call[1].split("?", 1)[0].rsplit("/v1/hme", 1)[-1] for call in calls[1:]] == [
+        "/deactivate",
+        "/reactivate",
+        "/delete",
+    ]
+    assert all(json.loads(call[2]["data"]) == {"anonymousId": "remote-id"} for call in calls[1:])
+
+
+def test_client_rejects_non_list_alias_collection() -> None:
+    client = HmeClient(
+        session(),
+        requester=lambda *_args, **_kwargs: FakeResponse(
+            {"success": True, "result": {"hmeEmails": {}}}
+        ),
+    )
+
+    with pytest.raises(HmeError):
+        client.list_aliases()
+
+
 def test_client_errors_never_include_cookie_or_upstream_response_text() -> None:
     def requester(*_args, **_kwargs):
         return FakeResponse(
