@@ -365,7 +365,7 @@ Browser runtime
 - [x] 节点 2：逐文件审查实现与测试；确认核心修复通过，发现 Caddy 默认信任模型说明错误、Cloudflare 真实客户端链未建立，以及多项共享行为缺少直接测试。
 - [x] 节点 3：修正 Cloudflare 可信代理边界、覆盖无长度流请求，并补齐数据库、配置、Unicode、前端会话和精确 IMAP 往返测试；运行时注入继续发现并移除无条件 `CF-Connecting-IP` 覆写，同时补上 SQLite 提交失败回滚与 IMAP bytes 能力识别。
 - [x] 节点 4：全量 `104 passed`；Ruff、格式化、Python 编译、Compose 基础/服务器覆盖、Caddy 2.11.4、来源头运行时注入、diff 与秘密扫描通过。
-- [ ] 节点 5（进行中）：提交审查修正，快进合并到 `main`，推送 GitHub，并清理本轮临时镜像。
+- [x] 节点 5：审查修正提交为 `f2f4d3c`，已快进合并并推送 GitHub `main`；本地 `harden-gateway` 分支、Caddy 探针容器/网络和临时 `caddy:2.11.4` 镜像均已清理。
 
 ### 12.5 回滚边界
 
@@ -381,3 +381,4 @@ Browser runtime
 - 来源头运行时闭环：直连请求同时伪造 XFF 与 `CF-Connecting-IP` 时，上游只收到直连 socket IP；Cloudflare 网段对端得到 `CF-Connecting-IP, Cloudflare-peer`，Uvicorn 继续解析首个真实客户端地址。
 - 本地 Caddy 配置、站点片段以及服务器当前完整共享 Caddyfile 加新片段均只读验证通过；未 reload、未部署生产服务。
 - Compose 两种展开配置通过；跟踪文件秘密扫描无 API Key、私钥或长 Apple Session 命中，`.env.example` 保持允许跟踪。
+- 原始功能提交 `82463cf` 与审查修正 `f2f4d3c` 已进入远端 `main`；本节最终状态作为后续纯文档提交推送，完成后再次核对本地 `main == origin/main` 与干净工作树。
