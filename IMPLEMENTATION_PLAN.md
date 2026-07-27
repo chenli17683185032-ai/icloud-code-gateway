@@ -713,9 +713,9 @@ Browser runtime
 - [x] 节点 4：已实现一次 IMAP 会话的全 Alias recent-code 扫描、服务映射、无明文审计和管理员 API；无 key Alias 已由服务/Web 回归测试覆盖，公开 `/api/code` 合同保持不变。
 - [x] 节点 5：已实现管理员显式查看 key、旧 key“轮换后可查看”提示和验证码栏目，具备响应式布局、加载/空/错误/截断状态、复制与会话过期跳转；四个核心模块共 81 项测试通过。
 - [x] 节点 6：README/运维说明已更新；全量 `125 passed`，Ruff/格式、Python/JS 语法、两套 Compose、diff 与秘密扫描通过。1440px、768px、390px 浏览器验收均无横向溢出、按钮重叠或控制台错误；初始 HTML 不含完整 key/验证码，审计不含 OTP。
-- [ ] 节点 7：提交并推送 GitHub `main`；部署前备份 SQLite/源码/旧镜像，隔离候选迁移验证后用 60 秒 watchdog 只替换 app。
-- [ ] 节点 8：生产验证新列、管理员权限、旧 key 不可恢复提示、验证码面板和公网合同；不自动轮换两条既有 key，不制造真实验证码或 Apple 写操作。
-- [ ] 节点 9：更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，推送最终记录提交并清理本地/服务器临时件；服务器部署标记保持实际功能提交。
+- [x] 节点 7：功能提交 `312e8ba809d5cf9799fb54780ebe6dc2902fa20f` 已推送 GitHub `main`。部署前完成 SQLite/源码/旧镜像备份；隔离候选迁移与 key 加密闭环通过后，60 秒 watchdog 只替换 app，约 22.4 秒恢复 healthy，公网最长连续非 200 为 16.243 秒，未触发回滚。
+- [x] 节点 8：生产新增 `access_key_blob` 后 `quick_check=ok`，115 个 Alias、4 条旧 key 哈希指纹和 17 条公开查询记录均保持；旧 key reveal 返回 409 且未自动轮换。管理员验证码接口实际扫描 44 封候选、返回 0 条、未截断；未制造验证码、未执行 Apple/HME 写操作，browser/cn-proxy/Caddy 未重启。
+- [x] 节点 9：`OPERATIONS.md`、本计划和云贝唯一连接手册已更新，最终记录提交已纳入 GitHub `main`。服务器候选容器/卷、release、候选标签和部署锁均已清理，部署标记保持实际功能提交 `312e8ba809d5cf9799fb54780ebe6dc2902fa20f`。
 
 ### 17.7 测试矩阵
 
