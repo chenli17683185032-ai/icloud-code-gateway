@@ -560,8 +560,8 @@ Browser runtime
 - [x] 节点 3：已实现 `audit_events` 加密快照列、幂等索引/回填、查询列表和 dashboard 数据；4 个定向测试通过，公开查询响应与限流代码未改变。
 - [x] 节点 4：已增加管理导航和“查询记录”栏目，提供邮箱/结果/来源指纹/北京时间及空状态；1440×900、820×900、390×844 均无横向溢出或内容重叠，导航定位不会被粘性顶栏遮挡。
 - [x] 节点 5：README/运维说明已更新；`116 passed`，Ruff、格式、Python/JS 语法、两套 Compose、`git diff --check` 和秘密扫描全部通过。三视口 UI 无溢出/重叠，控制台错误为 0，固定 UTC 样本正确显示为北京时间且 HTML 不含验证码、Key 或原始 IP。
-- [ ] 节点 6：提交并推送 GitHub `main`；服务器完成 SQLite/源码备份后，用独立 60 秒 watchdog 只替换 app，失败自动恢复旧镜像。
-- [ ] 节点 7：生产只读核对迁移列、索引、17 条既有查询记录及管理页展示；不制造真实验证码查询。更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，推送最终记录提交并清理临时件。
+- [x] 节点 6：功能提交 `bd1b4fe` 已推送 GitHub `main`；服务器完成 SQLite/源码备份后，用独立 60 秒 watchdog 只替换 app，新容器约 10 秒恢复健康且未回滚。
+- [x] 节点 7：生产只读核对迁移列、索引、17 条既有查询记录及管理页展示；补充修正三份空证据，更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，并清理本地/服务器临时件。本节随最终纯文档提交推送 GitHub `main`。
 
 ### 15.6 测试矩阵
 
@@ -579,3 +579,68 @@ Browser runtime
 - 新列和索引均为向后兼容的加法，普通功能回滚只恢复部署前 app 镜像；旧代码继续使用原六列，不删除新列、不恢复数据库。
 - 只有启动迁移导致 SQLite `quick_check` 失败或事件计数异常时，才停止写入并使用部署前在线备份恢复数据库；不得把备份恢复作为普通 UI 回滚步骤。
 - 查询专栏异常不能影响公开验证码接口；若上线后仅模板或列表读取失败，watchdog/人工回滚只替换 app，browser、cn-proxy、Caddy、CDP 网络和 Apple 会话均保持不变。
+
+### 15.8 生产结果
+
+- 2026-07-27：功能提交 `bd1b4fe97897b47492263c9d1509e0aa3d35ea9a` 已部署，新 app 镜像为 `sha256:4944e85e1a65172c93454567516063867c44c3f2f0743a761bcf4e9ed82fa003`。回滚与审计目录为 `/opt/new-api/icloud-code-gateway/backups/query-history-20260727T045045Z-bd1b4fe`。
+- 60 秒 watchdog 只替换 app，新容器约 10 秒恢复健康；browser、cn-proxy 和共享 Caddy 未重启。生产迁移保持 `schema_version=1`，新增 `alias_email_blob` 与 `audit_events_type_id_idx`，原 17 条 `code_lookup` 全部回填加密邮箱快照且计数守恒。
+- 管理页生产验收显示 17 行查询记录；数据库和隔离候选均为 `quick_check=ok`。补充验收已把先前因 `docker exec` 缺少 `-i` 而为空的 `candidate-database.txt`、`candidate-page.txt`、`production-page.txt` 重建为非空证据，最终清单 SHA-256 为 `38a2f2bc832681d8a4f6c54fc112e61c22aa0e797aa280666a258cf24ae22119`。
+- 生产部署标记继续保持功能提交 `bd1b4fe`；候选容器、候选卷和远程补充脚本均已清理，不制造真实验证码查询，也未修改 browser、cn-proxy、Caddy、CDP 网络或 Apple Alias。
+
+## 16. 创建失败现场恢复
+
+### 16.1 目标与验收指标
+
+目标是在不重复调用 Apple 创建接口的前提下，查清管理页“创建失败，未完成的 Alias 可通过对账恢复”的真实状态，恢复有效 HME Session，并证明远端 Alias 与本地数据库重新收敛。
+
+- 生产日志和审计只读取时间、HTTP 状态、结果与数量，不输出 Alias 邮箱、Cookie、访问 key、验证码或上游响应正文。
+- 对两次失败请求建立因果链：请求是否到达 app、服务层是否记录失败、本地是否新增 Alias、Apple 列表能否读取。
+- 若 Apple 列表可读且远端多于本地，只执行一次幂等 `sync_aliases()`；若列表不可读，禁止盲目对账和再次创建。
+- 优先复用唯一持久 Chromium profile 捕获新 Session；捕获的新 Session 必须先通过 HME list 验证，验证成功后才能原子保存并对账。
+- 恢复后远端有效 ID 集与本地远端 ID 集差异均为 0，SQLite `quick_check=ok`，app/browser/cn-proxy/Caddy 保持 `healthy / restart=0`。
+- 不以真实创建请求作为恢复验收探针，避免用户已经点击两次后再产生第三个 Alias；以只读 list、幂等 sync 和管理页状态作为闭环证据。
+- 补齐查询记录部署证据文件，更新 `OPERATIONS.md` 和云贝唯一连接手册，最终推送 GitHub `main` 并清理本轮临时件。
+
+### 16.2 控制结构与扰动
+
+| 控制元素 | 本轮对象 |
+| --- | --- |
+| 目标 | 恢复 Alias 创建控制链，同时避免重复创建或错误对账 |
+| 被控对象 | 已保存 HME Session、持久 Chromium 登录态、Apple Alias 集、本地 SQLite 映射 |
+| 测量 | 创建 HTTP 状态、`alias_create` 审计、HME list、远端/本地 ID 集、容器健康与数据库完整性 |
+| 控制器 | 失败关闭、捕获前置验证、幂等对账、只读集合比较、单次状态机执行 |
+| 执行器 | 持久浏览器 Session 捕获、`save_hme_session()`、必要时 `sync_aliases()` |
+| 扰动 | Apple Session 过期、浏览器 Cookie 与 API Session 生命周期不同、部署切换时延、用户重复点击、Apple 私有接口错误 |
+| 稳定性策略 | 不确定时不写远端；先恢复测量通道，再收敛本地状态；不使用创建动作做健康探针 |
+
+### 16.3 GitHub 经验与生产基线
+
+- 前述 `Yimikami/icloud-hme-manager`、`fewhnhouse/hide-my-email` 与 `banana2556/hme-manager` 均依赖短期 Apple Web Session 调用 HME 私有接口；浏览器仍登录不代表先前捕获的请求头与令牌仍可用，因此 Session 过期应通过浏览器重新捕获，而不是重试写请求。
+- 同类实现继续以 `/v2/hme/list` 作为当前 Alias 集的事实来源。本项目沿用“写操作不自动重试、失败后先 list 对账”的边界，避免 reserve 已成功但客户端超时造成重复 Alias。
+- 2026-07-27 现场测量：两次 `POST /admin/api/aliases` 均到达 app 并返回 502，对应两条 `alias_create=failed`；本地仍为 107 条（97 活动、10 失活），SQLite 完整。
+- 同时直接读取 HME list 返回 `HmeSessionError`；持久 Chromium 仍位于 iCloud+ 页面，认证 Cookie 名集合完整。当前最小充分解释是已保存 HME Session 失效，而不是查询记录功能修改了创建路径。
+
+### 16.4 实施节点
+
+- [x] 节点 1：只读核对生产请求、审计、本地 Alias 计数、数据库完整性和 HME list；确认两次 502 均由失效 Session 导致，未发现本地新增 Alias。
+- [x] 节点 2：通过生产 app 的既有捕获状态机复用持久 Chromium，状态依次为 `idle -> starting -> waiting_login -> verifying -> captured`；新 HME Session 已通过 list 验证并保存，未要求人工重新登录。
+- [x] 节点 3：捕获保存时已执行一次幂等对账；随后只读复核 Apple 为 108 条（98 活动、10 失活），本地同为 108 条，双向 ID 集差异、重复 ID/邮箱和畸形项均为 0。相较故障前基线新增 1 条，证明两次 502 中一次已在 Apple 侧完成创建并由本次对账恢复；未再调用显式同步或创建接口。
+- [x] 节点 4：管理页已显示 108 条 Alias 和 17 条查询记录，HME 为已配置；SQLite、内部/公网健康和 CDP 均正常，app/browser/cn-proxy/Caddy 全部 `healthy / restart=0 / OOM=false`，未再次创建真实 Alias。
+- [x] 节点 5：查询记录部署补充验收通过；生产与隔离候选的数据库/页面证据均非空且断言通过，最终 SHA-256 清单复验成功，候选容器、卷和远程脚本已清理。
+- [x] 节点 6：实施计划、`OPERATIONS.md` 和云贝唯一连接手册已更新；本节随最终纯文档提交推送 GitHub `main`，服务器部署标记继续指向功能提交 `bd1b4fe`。
+- [x] 节点 7：服务器候选容器/卷和一次性脚本已删除；本机 5 个任务临时路径已移入独立废纸篓目录。最终提交推送后复核工作树干净且 `main == origin/main`。
+
+### 16.5 回滚与停止条件
+
+- 捕获器只有在新 Session 的 HME list 验证成功后才调用 `set_secret`，因此捕获、解析或验证失败时不需要数据库回滚；保留现有 Alias、key 和浏览器 profile 现场。
+- 远端 list 为空、字段畸形、ID 重复或本地已知集合不完整时拒绝对账，不把 107 条本地记录批量失活。
+- 远端/本地集合一致时不执行额外同步；集合不一致时只执行一次 `sync_aliases()`，同步后仍不一致则停止，不调用 create/deactivate/reactivate/delete。
+- 浏览器需要 Apple 人工登录时，捕获状态停留在 `waiting_login` 是明确的人机边界；不得通过保存密码、自动输入 2FA 或删除 profile 绕过。
+
+### 16.6 现场结果
+
+- 2026-07-27 12:52（Asia/Shanghai）两次创建请求均到达生产 app 并返回 502，对应两条未关联 Alias 的 `alias_create=failed`；故障前本地仍为 107 条，数据库完整。旧 Session 的 HME list 同时返回 `HmeSessionError`。
+- 持久 Chromium 仍在 iCloud+ 页面且认证 Cookie 名集合完整。13:01 通过生产 app 的捕获状态机无人工登录完成新 Session 捕获；`save_hme_session()` 先验证 Apple list，再保存 Session 并执行幂等对账。
+- 恢复后 Apple 与本地均为 108 条（98 活动、10 失活），双向远端 ID 差异、重复 ID/邮箱和畸形项均为 0。相较故障前新增 1 条，说明两次 502 中一次在 Apple 侧实际完成创建；该恢复项没有自动签发 key，应在管理页刷新后对该活动项手工签发，不能通过再次点击“创建”来补 key。
+- 本轮没有调用第三次 create，也没有调用 deactivate/reactivate/delete；公网健康为 200，部署标记仍为 `bd1b4fe`，四个正式容器保持 `healthy / restart=0 / OOM=false`。
+- 最终本地门禁为 `116 passed`；Ruff、格式、Python 编译、JS 语法、两套 Compose、`git diff --check` 和新增文档秘密扫描全部通过。
