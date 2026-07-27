@@ -11,7 +11,13 @@ from fastapi.testclient import TestClient
 
 from icloud_gateway.config import Settings
 from icloud_gateway.hme import HmeError, ICloudHmeSession
-from icloud_gateway.imap_otp import ImapConfig, ImapCredentialsError, OtpResult
+from icloud_gateway.imap_otp import (
+    ImapConfig,
+    ImapCredentialsError,
+    OtpResult,
+    RecentOtpBatch,
+    RecentOtpResult,
+)
 from icloud_gateway.security import AdminSessionCodec, hash_access_key
 from icloud_gateway.service import (
     GatewayNotConfiguredError,
@@ -73,6 +79,7 @@ class FakeHmeClient:
 
 class FakeImapReader:
     result: OtpResult | None = None
+    recent_batch = RecentOtpBatch(items=(), scanned=0, truncated=False)
     check_error: Exception | None = None
 
     def __init__(self, config):
@@ -85,6 +92,9 @@ class FakeImapReader:
     def find_latest_code(self, alias, **kwargs):
         return self.result
 
+    def find_recent_codes(self, aliases, **kwargs):
+        return self.recent_batch
+
 
 @pytest.fixture(autouse=True)
 def reset_fakes():
@@ -93,6 +103,7 @@ def reset_fakes():
     FakeHmeClient.list_error = None
     FakeHmeClient.lifecycle_calls = []
     FakeImapReader.result = None
+    FakeImapReader.recent_batch = RecentOtpBatch(items=(), scanned=0, truncated=False)
     FakeImapReader.check_error = None
 
 
@@ -399,7 +410,7 @@ def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, 
     assert "data-local-time" not in response.text
 
 
-def test_key_rotation_and_revocation_only_return_current_plaintext_once(
+def test_admin_can_reveal_current_key_but_dashboard_never_embeds_it(
     client, settings, service
 ) -> None:
     csrf = _login(client, settings)
@@ -416,6 +427,17 @@ def test_key_rotation_and_revocation_only_return_current_plaintext_once(
     dashboard = client.get("/admin")
     assert first not in dashboard.text
     assert first[-4:] in dashboard.text
+    assert "查看完整密钥" in dashboard.text
+
+    missing_csrf = client.post(f"/admin/api/aliases/{alias['id']}/key/reveal")
+    assert missing_csrf.status_code == 403
+    revealed = client.post(
+        f"/admin/api/aliases/{alias['id']}/key/reveal",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.json()["access_key"] == first
+    assert revealed.headers["cache-control"] == "no-store"
 
     second_response = client.post(
         f"/admin/api/aliases/{alias['id']}/key",
@@ -425,6 +447,11 @@ def test_key_rotation_and_revocation_only_return_current_plaintext_once(
     assert first not in second_response.text
     assert service.database.find_alias_by_access_key_hash(hash_access_key(first)) is None
     assert service.database.find_alias_by_access_key_hash(hash_access_key(second)) is not None
+    revealed_second = client.post(
+        f"/admin/api/aliases/{alias['id']}/key/reveal",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert revealed_second.json()["access_key"] == second
 
     revoked = client.delete(
         f"/admin/api/aliases/{alias['id']}/key",
@@ -432,6 +459,90 @@ def test_key_rotation_and_revocation_only_return_current_plaintext_once(
     )
     assert revoked.status_code == 200
     assert service.database.find_alias_by_access_key_hash(hash_access_key(second)) is None
+
+
+def test_legacy_hash_only_key_requires_explicit_rotation_before_admin_reveal(
+    client, settings, service
+) -> None:
+    alias = service.database.upsert_alias(
+        email="legacy@icloud.com",
+        remote_metadata={"anonymousId": "legacy"},
+        label="Legacy",
+    )
+    service.database.issue_access_key(alias["id"])
+    with service.database.transaction() as connection:
+        connection.execute(
+            "UPDATE aliases SET access_key_blob = NULL WHERE id = ?",
+            (alias["id"],),
+        )
+    csrf = _login(client, settings)
+
+    dashboard = client.get("/admin")
+    response = client.post(
+        f"/admin/api/aliases/{alias['id']}/key/reveal",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert "轮换后可查看" in dashboard.text
+    assert response.status_code == 409
+    assert response.json() == {"status": "conflict"}
+
+
+def test_admin_recent_codes_do_not_require_alias_access_keys(client, settings, service) -> None:
+    _configure_imap(service)
+    alias = service.database.upsert_alias(
+        email="unkeyed@icloud.com",
+        remote_metadata={"anonymousId": "unkeyed", "isActive": True},
+        label="No public key",
+    )
+    FakeImapReader.recent_batch = RecentOtpBatch(
+        items=(
+            RecentOtpResult(
+                alias="unkeyed@icloud.com",
+                code="246810",
+                uid="44",
+                received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
+            ),
+        ),
+        scanned=8,
+        truncated=False,
+    )
+
+    unauthenticated = client.post(
+        "/admin/api/codes/recent",
+        headers={"X-CSRF-Token": "missing-session"},
+    )
+    assert unauthenticated.status_code == 401
+    csrf = _login(client, settings)
+    missing_csrf = client.post("/admin/api/codes/recent")
+    assert missing_csrf.status_code == 403
+
+    response = client.post(
+        "/admin/api/codes/recent",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "status": "ok",
+        "codes": [
+            {
+                "alias_id": alias["id"],
+                "email": "unkeyed@icloud.com",
+                "label": "No public key",
+                "code": "246810",
+                "received_at": "2027-01-15T07:59:58Z",
+                "received_at_display": "2027-01-15 15:59:58",
+            }
+        ],
+        "scanned": 8,
+        "truncated": False,
+    }
+    dashboard = client.get("/admin")
+    assert "246810" not in dashboard.text
+    assert 'id="admin-codes"' in dashboard.text
+    assert "刷新验证码" in dashboard.text
 
 
 def test_admin_can_manage_imported_alias_lifecycle_with_csrf_and_confirmation(
@@ -705,8 +816,11 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     ).read_text()
 
     assert "class AuthenticationRequiredError extends Error" in script
-    assert script.count("instanceof AuthenticationRequiredError") == 6
+    assert script.count("instanceof AuthenticationRequiredError") == 8
     assert "window.prompt" not in script
+    assert "localStorage" not in script
+    assert "sessionStorage" not in script
+    assert "code.textContent = item.code" in script
     assert 'querySelector("#delete-alias-form")' in script
     assert "response.status === 401 || response.status === 403" in script
     assert 'window.location.assign("/admin/login")' in script

@@ -11,6 +11,11 @@
   const deleteConfirmation = document.querySelector("#delete-alias-confirmation");
   const deleteMessage = document.querySelector("#delete-alias-message");
   const deleteSubmit = document.querySelector("#delete-alias-submit");
+  const refreshCodesButton = document.querySelector("#refresh-admin-codes");
+  const adminCodesMessage = document.querySelector("#admin-codes-message");
+  const adminCodesTable = document.querySelector("#admin-codes-table");
+  const adminCodesList = document.querySelector("#admin-codes-list");
+  const adminCodesEmpty = document.querySelector("#admin-codes-empty");
   let modalReturnFocus = null;
   let deleteTarget = null;
 
@@ -44,6 +49,31 @@
     return data;
   }
 
+  function createCopyButton(value) {
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "secondary-button small-button";
+    const icon = document.createElement("img");
+    icon.src = "/static/icons/copy.svg";
+    icon.alt = "";
+    icon.setAttribute("aria-hidden", "true");
+    const copyText = document.createElement("span");
+    copyText.textContent = "复制";
+    copy.append(icon, copyText);
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        copyText.textContent = "已复制";
+      } catch (_error) {
+        copyText.textContent = "复制失败";
+      }
+      window.setTimeout(() => {
+        copyText.textContent = "复制";
+      }, 1600);
+    });
+    return copy;
+  }
+
   function openModal(items, message) {
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
@@ -63,23 +93,7 @@
       const key = document.createElement("code");
       key.textContent = item.access_key;
 
-      const copy = document.createElement("button");
-      copy.type = "button";
-      copy.className = "secondary-button small-button";
-      const icon = document.createElement("img");
-      icon.src = "/static/icons/copy.svg";
-      icon.alt = "";
-      icon.setAttribute("aria-hidden", "true");
-      const copyText = document.createElement("span");
-      copyText.textContent = "复制";
-      copy.append(icon, copyText);
-      copy.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(item.access_key);
-        copyText.textContent = "已复制";
-        window.setTimeout(() => {
-          copyText.textContent = "复制";
-        }, 1600);
-      });
+      const copy = createCopyButton(item.access_key);
 
       row.append(identity, key, copy);
       issuedList.append(row);
@@ -170,7 +184,7 @@
         data.created,
         data.status === "partial"
           ? `已创建 ${data.created.length} 个，批次已停止。`
-          : `已创建 ${data.created.length} 个。密钥关闭后不再显示。`,
+          : `已创建 ${data.created.length} 个。密钥可在 Alias 列表再次查看。`,
       );
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
@@ -188,10 +202,31 @@
         const data = await api(`/admin/api/aliases/${button.dataset.aliasId}/key`, {
           method: "POST",
         });
-        openModal([data], "密钥已签发。关闭后不再显示。");
+        openModal([data], "密钥已签发，可在 Alias 列表再次查看。");
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
         window.alert("密钥签发失败。");
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll(".reveal-key-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const data = await api(
+          `/admin/api/aliases/${button.dataset.aliasId}/key/reveal`,
+          { method: "POST" },
+        );
+        openModal([data], "当前有效密钥。");
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
+        window.alert(
+          error.message === "conflict"
+            ? "该密钥由旧版本签发，轮换后即可查看。"
+            : "密钥读取失败。",
+        );
         button.disabled = false;
       }
     });
@@ -298,6 +333,79 @@
     });
     if (empty) empty.hidden = visible !== 0;
   });
+
+  function clearAdminCodes() {
+    adminCodesList?.replaceChildren();
+    if (adminCodesTable) adminCodesTable.hidden = true;
+    if (adminCodesEmpty) adminCodesEmpty.hidden = true;
+  }
+
+  function renderAdminCodes(items) {
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "admin-codes-row";
+      row.setAttribute("role", "row");
+
+      const identity = document.createElement("div");
+      identity.className = "admin-code-alias";
+      identity.setAttribute("role", "cell");
+      const label = document.createElement("strong");
+      label.textContent = item.label;
+      const email = document.createElement("span");
+      email.textContent = item.email;
+      identity.append(label, email);
+
+      const code = document.createElement("code");
+      code.className = "admin-code-value";
+      code.setAttribute("role", "cell");
+      code.textContent = item.code;
+
+      const receivedAt = document.createElement("time");
+      receivedAt.className = "admin-code-time";
+      receivedAt.setAttribute("role", "cell");
+      receivedAt.dateTime = item.received_at;
+      receivedAt.textContent = item.received_at_display;
+
+      const action = document.createElement("div");
+      action.className = "admin-code-action";
+      action.setAttribute("role", "cell");
+      action.append(createCopyButton(item.code));
+
+      row.append(identity, code, receivedAt, action);
+      adminCodesList.append(row);
+    });
+  }
+
+  refreshCodesButton?.addEventListener("click", async () => {
+    clearAdminCodes();
+    adminCodesMessage.textContent = "正在读取最近验证码…";
+    refreshCodesButton.disabled = true;
+    refreshCodesButton.classList.add("is-busy");
+    try {
+      const data = await api("/admin/api/codes/recent", { method: "POST" });
+      if (data.codes.length) {
+        renderAdminCodes(data.codes);
+        adminCodesTable.hidden = false;
+      } else {
+        adminCodesEmpty.hidden = false;
+      }
+      const suffix = data.truncated ? "，结果已达到扫描上限" : "";
+      adminCodesMessage.textContent = `扫描 ${data.scanned} 封，找到 ${data.codes.length} 条${suffix}。`;
+    } catch (error) {
+      if (error instanceof AuthenticationRequiredError) return;
+      adminCodesMessage.textContent =
+        error.message === "not_configured"
+          ? "IMAP 尚未配置。"
+          : error.message === "busy"
+            ? "IMAP 正忙，请稍后重试。"
+            : "验证码读取失败，请稍后重试。";
+    } finally {
+      refreshCodesButton.disabled = false;
+      refreshCodesButton.classList.remove("is-busy");
+    }
+  });
+
+  window.addEventListener("pagehide", clearAdminCodes);
 
   const capture = document.querySelector("#capture-status");
   async function refreshCapture() {

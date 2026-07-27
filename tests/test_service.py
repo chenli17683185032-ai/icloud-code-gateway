@@ -9,11 +9,18 @@ import pytest
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, NotFoundError
 from icloud_gateway.hme import HmeError, ICloudHmeSession
-from icloud_gateway.imap_otp import ImapConfig, OtpResult
+from icloud_gateway.imap_otp import (
+    ImapConfig,
+    ImapCredentialsError,
+    OtpResult,
+    RecentOtpBatch,
+    RecentOtpResult,
+)
 from icloud_gateway.rate_limit import SlidingWindowRateLimiter
 from icloud_gateway.security import hash_access_key
 from icloud_gateway.service import (
     GatewayError,
+    GatewayNotConfiguredError,
     GatewayRateLimitedError,
     GatewayService,
 )
@@ -98,7 +105,10 @@ class FakeHmeClient:
 
 class FakeReader:
     result = None
+    recent_batch = RecentOtpBatch(items=(), scanned=0, truncated=False)
+    recent_error = None
     checked = []
+    recent_calls = []
 
     def __init__(self, config):
         self.config = config
@@ -111,6 +121,12 @@ class FakeReader:
         self.last_kwargs = kwargs
         return self.result
 
+    def find_recent_codes(self, aliases, **kwargs):
+        self.recent_calls.append((tuple(aliases), kwargs))
+        if self.recent_error is not None:
+            raise self.recent_error
+        return self.recent_batch
+
 
 @pytest.fixture(autouse=True)
 def reset_fakes():
@@ -120,7 +136,10 @@ def reset_fakes():
     FakeHmeClient.confirm_lifecycle = True
     FakeHmeClient.lifecycle_calls = []
     FakeReader.result = None
+    FakeReader.recent_batch = RecentOtpBatch(items=(), scanned=0, truncated=False)
+    FakeReader.recent_error = None
     FakeReader.checked = []
+    FakeReader.recent_calls = []
 
 
 def service(tmp_path, *, limiter=None, sleeper=lambda _seconds: None) -> GatewayService:
@@ -326,6 +345,78 @@ def test_code_lookup_returns_only_code_and_timestamps(tmp_path) -> None:
     assert result.received_at == "2027-01-15T07:59:58Z"
     assert result.expires_at == "2027-01-15T08:04:58Z"
     assert not hasattr(result, "email")
+
+
+def test_admin_recent_codes_include_aliases_without_access_keys(tmp_path) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    unkeyed = value.database.upsert_alias(
+        email="unkeyed@icloud.com",
+        remote_metadata={"anonymousId": "unkeyed"},
+        label="Unkeyed",
+    )
+    keyed = value.database.upsert_alias(
+        email="keyed@icloud.com",
+        remote_metadata={"anonymousId": "keyed"},
+        label="Keyed",
+    )
+    value.database.issue_access_key(keyed["id"])
+    FakeReader.recent_batch = RecentOtpBatch(
+        items=(
+            RecentOtpResult(
+                alias="unkeyed@icloud.com",
+                code="123456",
+                uid="10",
+                received_at=datetime.fromtimestamp(NOW - 1, tz=UTC),
+            ),
+            RecentOtpResult(
+                alias="keyed@icloud.com",
+                code="654321",
+                uid="9",
+                received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
+            ),
+        ),
+        scanned=12,
+        truncated=False,
+    )
+
+    result = value.admin_recent_codes()
+
+    assert [item["alias_id"] for item in result["codes"]] == [unkeyed["id"], keyed["id"]]
+    assert [item["code"] for item in result["codes"]] == ["123456", "654321"]
+    assert result["codes"][0]["received_at_display"] == "2027-01-15 15:59:59"
+    assert result["scanned"] == 12
+    assert result["truncated"] is False
+    aliases, kwargs = FakeReader.recent_calls[-1]
+    assert set(aliases) == {"unkeyed@icloud.com", "keyed@icloud.com"}
+    assert kwargs["max_age_seconds"] == 300
+    event = value.database.list_audit_events(limit=1)[0]
+    assert event["event_type"] == "admin_code_scan"
+    assert event["outcome"] == "found"
+    assert "123456" not in str(event)
+
+
+def test_admin_recent_codes_fail_closed_and_release_the_imap_slot(tmp_path) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    value.database.upsert_alias(
+        email="target@icloud.com",
+        remote_metadata={"anonymousId": "target"},
+    )
+    FakeReader.recent_error = ImapCredentialsError("expired")
+
+    with pytest.raises(GatewayNotConfiguredError):
+        value.admin_recent_codes()
+
+    event = value.database.list_audit_events(limit=1)[0]
+    assert event["event_type"] == "admin_code_scan"
+    assert event["outcome"] == "imap_invalid"
+    FakeReader.recent_error = None
+    assert value.admin_recent_codes() == {
+        "codes": [],
+        "scanned": 0,
+        "truncated": False,
+    }
 
 
 def test_invalid_key_and_no_code_have_distinct_safe_states(tmp_path) -> None:

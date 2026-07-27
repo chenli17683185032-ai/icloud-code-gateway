@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import sqlite3
 import threading
@@ -11,7 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .security import SecretBox, SecurityError, generate_access_key, hash_access_key
+from .security import (
+    SecretBox,
+    SecurityError,
+    generate_access_key,
+    hash_access_key,
+    validate_access_key,
+)
 
 SCHEMA_VERSION = 1
 AUDIT_RETENTION_DAYS = 7
@@ -105,6 +112,7 @@ class Database:
                     state TEXT NOT NULL CHECK (state IN ('active', 'inactive')),
                     access_key_hash BLOB UNIQUE,
                     access_key_hint TEXT,
+                    access_key_blob BLOB,
                     key_issued_at TEXT,
                     key_revoked_at TEXT,
                     created_at TEXT NOT NULL,
@@ -141,6 +149,11 @@ class Database:
                 )
             elif int(current["value"]) != SCHEMA_VERSION:
                 raise DatabaseError("database schema version is unsupported")
+            alias_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(aliases)")
+            }
+            if "access_key_blob" not in alias_columns:
+                connection.execute("ALTER TABLE aliases ADD COLUMN access_key_blob BLOB")
             audit_columns = {
                 str(row["name"]) for row in connection.execute("PRAGMA table_info(audit_events)")
             }
@@ -283,6 +296,14 @@ class Database:
                     SET email_blob = ?,
                         remote_blob = COALESCE(?, remote_blob),
                         label = ?, note = ?, sender_filter = ?, state = ?,
+                        access_key_hash = CASE
+                            WHEN ? = 'inactive' THEN NULL ELSE access_key_hash END,
+                        access_key_hint = CASE
+                            WHEN ? = 'inactive' THEN NULL ELSE access_key_hint END,
+                        access_key_blob = CASE
+                            WHEN ? = 'inactive' THEN NULL ELSE access_key_blob END,
+                        key_revoked_at = CASE
+                            WHEN ? = 'inactive' THEN ? ELSE key_revoked_at END,
                         updated_at = ?, last_synced_at = COALESCE(?, last_synced_at)
                     WHERE id = ?
                     """,
@@ -293,6 +314,11 @@ class Database:
                         clean_note,
                         clean_sender,
                         clean_state,
+                        clean_state,
+                        clean_state,
+                        clean_state,
+                        clean_state,
+                        timestamp,
                         timestamp,
                         synced_at,
                         alias_id,
@@ -361,6 +387,8 @@ class Database:
                             WHEN ? = 'inactive' THEN NULL ELSE access_key_hash END,
                         access_key_hint = CASE
                             WHEN ? = 'inactive' THEN NULL ELSE access_key_hint END,
+                        access_key_blob = CASE
+                            WHEN ? = 'inactive' THEN NULL ELSE access_key_blob END,
                         key_revoked_at = CASE
                             WHEN ? = 'inactive' THEN ? ELSE key_revoked_at END,
                         updated_at = ?, last_synced_at = ?
@@ -369,6 +397,7 @@ class Database:
                     (
                         sqlite3.Binary(email_blob),
                         sqlite3.Binary(remote_blob),
+                        state,
                         state,
                         state,
                         state,
@@ -401,7 +430,7 @@ class Database:
                 query = f"""
                     UPDATE aliases
                     SET state = 'inactive', access_key_hash = NULL,
-                        access_key_hint = NULL, key_revoked_at = ?,
+                        access_key_hint = NULL, access_key_blob = NULL, key_revoked_at = ?,
                         updated_at = ?, last_synced_at = ?
                     WHERE remote_blob IS NOT NULL
                       AND email_hash NOT IN ({placeholders})
@@ -416,7 +445,7 @@ class Database:
                 query = """
                     UPDATE aliases
                     SET state = 'inactive', access_key_hash = NULL,
-                        access_key_hint = NULL, key_revoked_at = ?,
+                        access_key_hint = NULL, access_key_blob = NULL, key_revoked_at = ?,
                         updated_at = ?, last_synced_at = ?
                     WHERE remote_blob IS NOT NULL
                 """
@@ -464,13 +493,18 @@ class Database:
         return None if row is None else self._alias_from_row(row)
 
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
+        clean_alias_id = str(alias_id)
         access_key = generate_access_key()
         digest = hash_access_key(access_key)
         hint = access_key[-4:]
+        encrypted = self.secret_box.encrypt(
+            access_key.encode("ascii"),
+            f"alias-access-key:{clean_alias_id}",
+        )
         timestamp = _now()
         with self.transaction() as connection:
             row = connection.execute(
-                "SELECT state FROM aliases WHERE id = ?", (str(alias_id),)
+                "SELECT state FROM aliases WHERE id = ?", (clean_alias_id,)
             ).fetchone()
             if row is None:
                 raise NotFoundError("alias not found")
@@ -479,19 +513,59 @@ class Database:
             connection.execute(
                 """
                 UPDATE aliases
-                SET access_key_hash = ?, access_key_hint = ?,
+                SET access_key_hash = ?, access_key_hint = ?, access_key_blob = ?,
                     key_issued_at = ?, key_revoked_at = NULL, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     sqlite3.Binary(digest),
                     hint,
+                    sqlite3.Binary(encrypted),
                     timestamp,
                     timestamp,
-                    str(alias_id),
+                    clean_alias_id,
                 ),
             )
-        return IssuedAccessKey(alias_id=str(alias_id), access_key=access_key, hint=hint)
+        return IssuedAccessKey(alias_id=clean_alias_id, access_key=access_key, hint=hint)
+
+    def reveal_access_key(self, alias_id: str) -> str:
+        clean_alias_id = str(alias_id)
+        row = (
+            self._connect()
+            .execute(
+                """
+                SELECT state, access_key_hash, access_key_blob, key_revoked_at
+                FROM aliases
+                WHERE id = ?
+                """,
+                (clean_alias_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise NotFoundError("alias not found")
+        if (
+            str(row["state"]) != "active"
+            or row["access_key_hash"] is None
+            or row["key_revoked_at"] is not None
+        ):
+            raise ConflictError("access key is not active")
+        if row["access_key_blob"] is None:
+            raise ConflictError("access key cannot be recovered; rotate it")
+        try:
+            plaintext = self.secret_box.decrypt(
+                bytes(row["access_key_blob"]),
+                f"alias-access-key:{clean_alias_id}",
+            )
+            access_key = validate_access_key(plaintext.decode("ascii"))
+        except (SecurityError, UnicodeDecodeError) as exc:
+            raise DatabaseError("encrypted access key is invalid") from exc
+        if not hmac.compare_digest(
+            hash_access_key(access_key),
+            bytes(row["access_key_hash"]),
+        ):
+            raise DatabaseError("encrypted access key does not match its hash")
+        return access_key
 
     def revoke_access_key(self, alias_id: str) -> None:
         timestamp = _now()
@@ -499,7 +573,7 @@ class Database:
             cursor = connection.execute(
                 """
                 UPDATE aliases
-                SET access_key_hash = NULL, access_key_hint = NULL,
+                SET access_key_hash = NULL, access_key_hint = NULL, access_key_blob = NULL,
                     key_revoked_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -546,11 +620,13 @@ class Database:
                 SET state = ?,
                     access_key_hash = CASE WHEN ? = 'inactive' THEN NULL ELSE access_key_hash END,
                     access_key_hint = CASE WHEN ? = 'inactive' THEN NULL ELSE access_key_hint END,
+                    access_key_blob = CASE WHEN ? = 'inactive' THEN NULL ELSE access_key_blob END,
                     key_revoked_at = CASE WHEN ? = 'inactive' THEN ? ELSE key_revoked_at END,
                     updated_at = ?
                 WHERE id = ?
                 """,
                 (
+                    clean_state,
                     clean_state,
                     clean_state,
                     clean_state,
@@ -692,6 +768,9 @@ class Database:
             "sender_filter": str(row["sender_filter"]),
             "state": str(row["state"]),
             "has_access_key": row["access_key_hash"] is not None,
+            "access_key_recoverable": (
+                row["access_key_hash"] is not None and row["access_key_blob"] is not None
+            ),
             "access_key_hint": (
                 None if row["access_key_hint"] is None else str(row["access_key_hint"])
             ),

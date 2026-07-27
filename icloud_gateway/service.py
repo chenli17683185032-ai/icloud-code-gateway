@@ -389,9 +389,16 @@ class GatewayService:
             self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
             return issued
 
+    def reveal_access_key(self, alias_id: str) -> str:
+        with self._hme_lock:
+            access_key = self.database.reveal_access_key(alias_id)
+            self.database.record_audit_event("access_key", "revealed", alias_id=str(alias_id))
+            return access_key
+
     def revoke_access_key(self, alias_id: str) -> None:
-        self.database.revoke_access_key(alias_id)
-        self.database.record_audit_event("access_key", "revoked", alias_id=str(alias_id))
+        with self._hme_lock:
+            self.database.revoke_access_key(alias_id)
+            self.database.record_audit_event("access_key", "revoked", alias_id=str(alias_id))
 
     def update_alias(
         self,
@@ -517,6 +524,61 @@ class GatewayService:
             received_at=result.received_at.isoformat().replace("+00:00", "Z"),
             expires_at=expires_at.isoformat().replace("+00:00", "Z"),
         )
+
+    def admin_recent_codes(self) -> dict[str, Any]:
+        config = self.get_imap_config()
+        if config is None:
+            self.database.record_audit_event("admin_code_scan", "not_configured")
+            raise GatewayNotConfiguredError("IMAP is not configured")
+        aliases = self.database.list_aliases()
+        aliases_by_email = {item["email"].casefold(): item for item in aliases}
+        if not self._imap_slots.acquire(timeout=0.1):
+            self.database.record_audit_event("admin_code_scan", "busy")
+            raise GatewayBusyError("IMAP reader is busy")
+        try:
+            batch = self.imap_reader_factory(config).find_recent_codes(
+                tuple(aliases_by_email),
+                now_ts=float(self.clock()),
+                max_age_seconds=self.settings.otp_max_age_seconds,
+                future_skew_seconds=self.settings.otp_future_skew_seconds,
+                timeout=self.settings.otp_request_timeout_seconds,
+            )
+        except ImapCredentialsError:
+            self.database.record_audit_event("admin_code_scan", "imap_invalid")
+            raise GatewayNotConfiguredError("IMAP is unavailable") from None
+        except ImapError:
+            self.database.record_audit_event("admin_code_scan", "imap_error")
+            raise GatewayError("IMAP lookup failed") from None
+        finally:
+            self._imap_slots.release()
+
+        codes: list[dict[str, Any]] = []
+        for item in batch.items:
+            alias = aliases_by_email.get(item.alias.casefold())
+            if alias is None:
+                continue
+            received_at = item.received_at
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=UTC)
+            codes.append(
+                {
+                    "alias_id": alias["id"],
+                    "email": alias["email"],
+                    "label": alias["label"],
+                    "code": item.code,
+                    "received_at": received_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    "received_at_display": received_at.astimezone(_BEIJING_TIMEZONE).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                }
+            )
+        outcome = "truncated" if batch.truncated else ("found" if codes else "empty")
+        self.database.record_audit_event("admin_code_scan", outcome)
+        return {
+            "codes": codes,
+            "scanned": batch.scanned,
+            "truncated": batch.truncated,
+        }
 
     def dashboard(self) -> dict[str, Any]:
         hme_session: ICloudHmeSession | None

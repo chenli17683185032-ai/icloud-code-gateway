@@ -129,6 +129,21 @@ class OtpResult:
     received_at: datetime
 
 
+@dataclass(frozen=True)
+class RecentOtpResult:
+    alias: str
+    code: str
+    uid: str
+    received_at: datetime
+
+
+@dataclass(frozen=True)
+class RecentOtpBatch:
+    items: tuple[RecentOtpResult, ...]
+    scanned: int
+    truncated: bool
+
+
 ConnectionFactory = Callable[[ImapConfig, float], Any]
 
 
@@ -213,6 +228,81 @@ class ImapOtpReader:
             if not candidates:
                 return None
             return max(candidates, key=lambda item: (item.received_at, _uid_sort_key(item.uid)))
+        finally:
+            _logout(connection)
+
+    def find_recent_codes(
+        self,
+        aliases: Sequence[str],
+        *,
+        now_ts: float,
+        max_age_seconds: int = 300,
+        future_skew_seconds: int = 60,
+        timeout: float = 20.0,
+        scan_limit: int = 500,
+        result_limit: int = 500,
+    ) -> RecentOtpBatch:
+        targets = tuple(dict.fromkeys(_normalize_email(alias) for alias in aliases))
+        if not targets:
+            return RecentOtpBatch(items=(), scanned=0, truncated=False)
+        oldest = float(now_ts) - max(1, int(max_age_seconds))
+        newest = float(now_ts) + max(0, int(future_skew_seconds))
+        bounded_timeout = max(1.0, min(float(timeout), 30.0))
+        bounded_scan = max(1, min(int(scan_limit), 500))
+        bounded_results = max(1, min(int(result_limit), 500))
+        deadline = self.monotonic() + bounded_timeout
+        connection = self._login(bounded_timeout)
+        candidates: list[RecentOtpResult] = []
+        try:
+            self._set_operation_timeout(connection, deadline)
+            try:
+                status, _ = connection.select(self.config.folder, readonly=True)
+            except Exception as exc:
+                raise ImapError("IMAP folder is unavailable") from exc
+            if str(status).upper() != "OK":
+                raise ImapError("IMAP folder is unavailable")
+            window = list(self._window_terms(connection, oldest, float(now_ts) - oldest))
+            self._set_operation_timeout(connection, deadline)
+            status, data = self._search(connection, window)
+            if status is None or str(status).upper() != "OK":
+                raise ImapError("IMAP search failed")
+            matched = sorted(_uids_from_search(data), key=_uid_sort_key, reverse=True)
+            uids = matched[:bounded_scan]
+            truncated = len(matched) > len(uids)
+            for uid, message, internal_timestamp in self._fetch_messages(
+                connection, uids, deadline
+            ):
+                timestamp = internal_timestamp
+                if timestamp is None:
+                    timestamp = _message_timestamp(message)
+                if timestamp is None or timestamp < oldest or timestamp > newest:
+                    continue
+                code = _extract_message_code(message)
+                if not code:
+                    continue
+                received_at = datetime.fromtimestamp(timestamp, tz=UTC)
+                for alias in targets:
+                    if _message_matches_alias(message, alias):
+                        candidates.append(
+                            RecentOtpResult(
+                                alias=alias,
+                                code=code,
+                                uid=uid,
+                                received_at=received_at,
+                            )
+                        )
+            candidates.sort(
+                key=lambda item: (item.received_at, _uid_sort_key(item.uid)),
+                reverse=True,
+            )
+            if len(candidates) > bounded_results:
+                truncated = True
+                candidates = candidates[:bounded_results]
+            return RecentOtpBatch(
+                items=tuple(candidates),
+                scanned=len(uids),
+                truncated=truncated,
+            )
         finally:
             _logout(connection)
 
@@ -584,4 +674,6 @@ __all__ = [
     "ImapOtpReader",
     "OtpResult",
     "RECIPIENT_HEADERS",
+    "RecentOtpBatch",
+    "RecentOtpResult",
 ]

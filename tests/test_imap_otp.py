@@ -237,6 +237,76 @@ def test_reader_returns_the_latest_received_message_not_the_largest_uid() -> Non
     assert result.uid == "90"
 
 
+def test_recent_codes_scan_all_managed_aliases_in_one_search() -> None:
+    connection = FakeImap(
+        {
+            "10": (raw_message(recipient="one@icloud.com", code="101010"), NOW - 3),
+            "11": (raw_message(recipient="two@icloud.com", code="111111"), NOW - 2),
+            "12": (raw_message(recipient="other@icloud.com", code="121212"), NOW - 1),
+            "13": (raw_message(recipient="one@icloud.com", code="131313"), NOW),
+        }
+    )
+
+    batch = reader(connection).find_recent_codes(
+        ["one@icloud.com", "two@icloud.com"],
+        now_ts=NOW,
+    )
+
+    assert [(item.alias, item.code, item.uid) for item in batch.items] == [
+        ("one@icloud.com", "131313", "13"),
+        ("two@icloud.com", "111111", "11"),
+        ("one@icloud.com", "101010", "10"),
+    ]
+    assert batch.scanned == 4
+    assert batch.truncated is False
+    assert len(connection.searches) == 1
+    assert "HEADER" not in connection.searches[0]
+    assert "OR" not in connection.searches[0]
+    assert connection.fetches == [["13", "12", "11", "10"]]
+
+
+def test_recent_codes_report_a_bounded_scan() -> None:
+    connection = FakeImap(
+        {
+            "1": (raw_message(recipient="target@icloud.com", code="111111"), NOW - 2),
+            "2": (raw_message(recipient="target@icloud.com", code="222222"), NOW - 1),
+            "3": (raw_message(recipient="target@icloud.com", code="333333"), NOW),
+        }
+    )
+
+    batch = reader(connection).find_recent_codes(
+        ["target@icloud.com"],
+        now_ts=NOW,
+        scan_limit=2,
+        result_limit=2,
+    )
+
+    assert [item.uid for item in batch.items] == ["3", "2"]
+    assert batch.scanned == 2
+    assert batch.truncated is True
+
+
+def test_recent_codes_enforce_past_and_future_time_boundaries() -> None:
+    connection = FakeImap(
+        {
+            "1": (raw_message(recipient="target@icloud.com", code="111111"), NOW - 301),
+            "2": (raw_message(recipient="target@icloud.com", code="222222"), NOW - 300),
+            "3": (raw_message(recipient="target@icloud.com", code="333333"), NOW + 60),
+            "4": (raw_message(recipient="target@icloud.com", code="444444"), NOW + 61),
+        }
+    )
+
+    batch = reader(connection).find_recent_codes(
+        ["target@icloud.com"],
+        now_ts=NOW,
+    )
+
+    assert [(item.uid, item.code) for item in batch.items] == [
+        ("3", "333333"),
+        ("2", "222222"),
+    ]
+
+
 def test_reader_extracts_html_and_honors_sender_domain_filter() -> None:
     connection = FakeImap(
         {

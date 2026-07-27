@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import icloud_gateway.database as database_module
-from icloud_gateway.database import ConflictError, Database
+from icloud_gateway.database import ConflictError, Database, DatabaseError
 from icloud_gateway.security import SecretBox, hash_access_key
 
 MASTER_KEY = bytes(reversed(range(32)))
@@ -63,6 +63,9 @@ def test_issuing_a_new_key_atomically_revokes_the_previous_key(database) -> None
         label="Target",
     )
     first = database.issue_access_key(alias["id"])
+    assert database.reveal_access_key(alias["id"]) == first.access_key
+    assert database.get_alias(alias["id"])["access_key_recoverable"] is True
+    assert first.access_key.encode("ascii") not in database.path.read_bytes()
     assert (
         database.find_alias_by_access_key_hash(hash_access_key(first.access_key))["id"]
         == alias["id"]
@@ -71,6 +74,7 @@ def test_issuing_a_new_key_atomically_revokes_the_previous_key(database) -> None
     second = database.issue_access_key(alias["id"])
 
     assert database.find_alias_by_access_key_hash(hash_access_key(first.access_key)) is None
+    assert database.reveal_access_key(alias["id"]) == second.access_key
     assert (
         database.find_alias_by_access_key_hash(hash_access_key(second.access_key))["id"]
         == alias["id"]
@@ -88,10 +92,13 @@ def test_revoked_or_inactive_alias_cannot_be_resolved(database) -> None:
 
     database.revoke_access_key(alias["id"])
     assert database.find_alias_by_access_key_hash(digest) is None
+    with pytest.raises(ConflictError, match="access key"):
+        database.reveal_access_key(alias["id"])
 
     database.issue_access_key(alias["id"])
     database.set_alias_state(alias["id"], "inactive")
     assert database.get_alias(alias["id"])["has_access_key"] is False
+    assert database.get_alias(alias["id"])["access_key_recoverable"] is False
     with pytest.raises(ConflictError):
         database.issue_access_key(alias["id"])
 
@@ -236,12 +243,62 @@ def test_initialize_migrates_and_backfills_legacy_lookup_history(tmp_path) -> No
         event = database.list_code_lookup_events(limit=1)[0]
 
         assert "alias_email_blob" in columns
+        alias_columns = {
+            str(row["name"]) for row in database._connect().execute("PRAGMA table_info(aliases)")
+        }
+        assert "access_key_blob" in alias_columns
         assert "audit_events_type_id_idx" in indexes
         assert event["alias_email"] == email
         assert event["outcome"] == "found"
         assert database.quick_check() == "ok"
     finally:
         database.close()
+
+
+def test_legacy_hash_only_key_requires_rotation_before_reveal(database) -> None:
+    alias = database.upsert_alias(
+        email="legacy-key@icloud.com",
+        remote_metadata={"anonymousId": "legacy-key"},
+    )
+    issued = database.issue_access_key(alias["id"])
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE aliases SET access_key_blob = NULL WHERE id = ?",
+            (alias["id"],),
+        )
+
+    stored = database.get_alias(alias["id"])
+
+    assert stored["has_access_key"] is True
+    assert stored["access_key_recoverable"] is False
+    assert database.find_alias_by_access_key_hash(hash_access_key(issued.access_key)) is not None
+    with pytest.raises(ConflictError, match="cannot be recovered"):
+        database.reveal_access_key(alias["id"])
+
+
+def test_access_key_ciphertext_is_bound_to_its_alias(database) -> None:
+    first = database.upsert_alias(email="first@icloud.com", remote_metadata=None)
+    second = database.upsert_alias(email="second@icloud.com", remote_metadata=None)
+    database.issue_access_key(first["id"])
+    database.issue_access_key(second["id"])
+    with database.transaction() as connection:
+        first_blob = connection.execute(
+            "SELECT access_key_blob FROM aliases WHERE id = ?", (first["id"],)
+        ).fetchone()[0]
+        second_blob = connection.execute(
+            "SELECT access_key_blob FROM aliases WHERE id = ?", (second["id"],)
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE aliases SET access_key_blob = ? WHERE id = ?",
+            (second_blob, first["id"]),
+        )
+        connection.execute(
+            "UPDATE aliases SET access_key_blob = ? WHERE id = ?",
+            (first_blob, second["id"]),
+        )
+
+    with pytest.raises(DatabaseError, match="access key"):
+        database.reveal_access_key(first["id"])
 
 
 def test_connection_is_reused_per_thread_and_reopened_after_close(database) -> None:

@@ -644,3 +644,94 @@ Browser runtime
 - 恢复后 Apple 与本地均为 108 条（98 活动、10 失活），双向远端 ID 差异、重复 ID/邮箱和畸形项均为 0。相较故障前新增 1 条，说明两次 502 中一次在 Apple 侧实际完成创建；该恢复项没有自动签发 key，应在管理页刷新后对该活动项手工签发，不能通过再次点击“创建”来补 key。
 - 本轮没有调用第三次 create，也没有调用 deactivate/reactivate/delete；公网健康为 200，部署标记仍为 `bd1b4fe`，四个正式容器保持 `healthy / restart=0 / OOM=false`。
 - 最终本地门禁为 `116 passed`；Ruff、格式、Python 编译、JS 语法、两套 Compose、`git diff --check` 和新增文档秘密扫描全部通过。
+
+## 17. 管理员密钥查看与全 Alias 验证码面板
+
+### 17.1 目标与验收指标
+
+目标是把管理员工作台补全为可直接运维的 iCloud 管理面：管理员可以随时查看和复制当前有效访问 key，也可以不依赖 key 查看所有已导入 Alias 最近 5 分钟收到的验证码。
+
+- 新签发或轮换的访问 key 使用现有 32 字节主密钥进行 AES-GCM 加密保存，同时继续保存 SHA-256 哈希供公开查询校验；公开 API 不改为解密校验。
+- 管理员通过显式“查看密钥”动作取得完整 key；接口必须同时验证管理员会话与 CSRF，响应禁止缓存，管理页初始 HTML 不包含完整 key。
+- 旧数据库中只有哈希的既有 key 无法反解，页面明确显示“轮换后可查看”；不得自动轮换现有 key，避免用户侧凭据突然失效。
+- 撤销、Alias 失活、远端列表移除或永久删除时，同一事务边界内清除 key 哈希、提示和密文；失效 key 不得继续查看或用于公开查询。
+- 管理员验证码面板覆盖全部本地 Alias，包括没有 key 的 Alias；只读取最近 300 秒至未来 60 秒内、收件人精确匹配受管 Alias 且包含 6 位验证码的邮件。
+- 一次管理员刷新只建立一个 IMAP 会话，执行一次时间窗 SEARCH 和批量 FETCH；最多扫描最近 500 封候选邮件并返回最多 500 条结果，按收件时间倒序。
+- 验证码不写入 SQLite、审计日志、服务器日志或 URL；只在管理员专用 JSON 响应和当前页面 DOM 中短暂存在，关闭/刷新页面即消失。
+- 管理员验证码读取与公开 key 查询共用既有有界 IMAP 并发槽和 20 秒总超时；繁忙、凭据失效、网络错误均失败关闭，不无限等待。
+- 桌面、平板和手机视口均可查看/复制 key 与验证码，无横向溢出、操作按钮重叠或长邮箱/密钥裁切。
+- 全量测试、Ruff、格式、Python/JS 语法、两套 Compose、diff 与秘密扫描通过；部署只替换 app，60 秒内失败自动恢复旧镜像，browser/cn-proxy/Caddy 不重启。
+
+### 17.2 工程控制结构
+
+| 控制元素 | 本轮对象 |
+| --- | --- |
+| 目标 | 管理员可观测当前 key 与全 Alias 验证码，同时保持公开访问隔离 |
+| 被控对象 | 访问 key 生命周期、SQLite 密文、IMAP 最近邮件、管理员页面临时状态 |
+| 测量 | key 哈希/密文一致性、管理员会话/CSRF、IMAP INTERNALDATE、精确收件人、容器健康 |
+| 控制器 | AES-GCM 用途绑定、显式 reveal、一次 SEARCH + 批量 FETCH、500 条上界、并发槽与总超时 |
+| 执行器 | key 签发/轮换/撤销、管理员 reveal API、管理员 recent-codes API、DOM 渲染/复制 |
+| 扰动 | 旧 key 明文已丢失、邮件量突增、IMAP 时延/凭据失效、重复刷新、长邮箱和移动端窄屏 |
+| 稳定性策略 | 不自动轮换；不持久化 OTP；秘密按需读取；扫描和响应有界；部署失败只回滚 app |
+
+### 17.3 GitHub 经验与采用结论
+
+- `bitwarden/clients` 的 Web 客户端把敏感值“切换可见”和“复制到剪贴板”作为显式用户动作，不把秘密默认展开；本项目对应在 Alias 操作区提供眼睛图标，并复用既有密钥模态框和复制按钮。
+- `hashicorp/vault` 的 KV 界面明确提示 reveal 会暴露 secret values，并为 reveal 行为保留直接测试；本项目同样让完整 key 只经管理员专用 reveal 接口返回，初始 dashboard 仍只含末 4 位和可恢复状态。
+- `axllent/mailpit` 的消息 API 使用 `limit/start` 有界读取最近消息；本项目不引入邮件持久化，而是在一次 IMAP 时间窗扫描中设置 500 封/500 条硬上限。
+- `pwnapplehat/icloud-hide-my-email` 使用 `BODY.PEEK[]` 避免把验证码邮件标为已读；本项目继续沿用只读 SELECT、`BODY.PEEK[]` 和 `INTERNALDATE`，并复用现有批量 FETCH 回退路径。
+- `Yimikami/icloud-hme-manager` 与 `fewhnhouse/hide-my-email` 继续以 `/v2/hme/list` 管理完整 Alias 集；管理员验证码扫描以本地已对账的完整 Alias 集为允许列表，不从邮件头动态扩张管理范围。
+
+### 17.4 最小充分模型
+
+#### 访问 key
+
+- `aliases` 增加可空 `access_key_blob BLOB`，保持 `schema_version=1`。旧镜像显式读取既有列，可忽略新增列；功能回滚不删除该列。
+- 签发时一次生成 key，并在同一事务中写入 `SHA-256 hash + hint + AES-GCM blob`。密文 AAD 使用 `alias-access-key:{alias_id}`，防止跨 Alias 交换密文。
+- 读取时解密、校验 key 格式并重新计算哈希；密文与哈希不一致按数据库损坏失败，不返回可疑值。
+- Alias 字典只新增 `access_key_recoverable: bool`，不携带明文。完整 key 仅由 `reveal_access_key(alias_id)` 返回。
+
+#### 管理员验证码
+
+- IMAP 层新增 `find_recent_codes(aliases, ...)`：一次 window SEARCH，取 UID 倒序最多 500 条，按既有 25 条批次 FETCH，逐封校验 INTERNALDATE/Date、受管 Alias 精确收件人和 6 位码。
+- 返回值包含匹配 Alias、验证码、UID、UTC 收件时间和是否因 500 条上界截断；不返回邮件正文、主题或完整发件人。
+- 服务层把 Alias 邮箱映射回本地 ID/标签并转换北京时间；管理员扫描写一条不含验证码的 `admin_code_scan` 审计事件。
+- `POST /admin/api/codes/recent` 要求管理员会话与 CSRF；`POST /admin/api/aliases/{id}/key/reveal` 同样要求管理员会话与 CSRF。两者均继承 `Cache-Control: no-store`。
+
+### 17.5 前端交互
+
+- 管理导航增加“验证码”锚点；Alias 列表中可恢复 key 显示眼睛图标，旧哈希-only key 显示“轮换后可查看”。
+- 点击眼睛图标后调用 reveal API，并在现有密钥模态框中显示完整 key、Alias 和复制按钮；关闭后清空 DOM。
+- 新增独立“验证码”全宽栏目，只有管理员点击刷新按钮才读取 IMAP。结果表显示 Alias、6 位码、北京时间和复制按钮；空、繁忙、未配置与错误状态在同一固定区域反馈。
+- 结果使用 `textContent` 构建，不拼接 HTML；刷新前清空上一批验证码，页面卸载后不保留到 localStorage/sessionStorage/cookie。
+
+### 17.6 实施节点
+
+- [x] 节点 1：核对当前 Git/main、数据库 key 生命周期、IMAP 批量读取、管理 API/模板与 GitHub 同类经验；确认旧 key 不可逆，且一次 window SEARCH + 批量 FETCH 可覆盖全 Alias。
+- [x] 节点 2：数据库、IMAP、服务与 Web 回归测试已增加；旧实现产生 7 个定向失败，service/web 另因缺少 `RecentOtpBatch` 在收集阶段失败，证明密文迁移、reveal、全 Alias 单次扫描和管理员接口均尚不存在。
+- [x] 节点 3：已实现 `access_key_blob` 兼容迁移、签发/撤销/失活清理和校验式 reveal；数据库与 IMAP 定向测试共 43 项通过，旧 key 保持 hash-only 且不自动轮换。
+- [x] 节点 4：已实现一次 IMAP 会话的全 Alias recent-code 扫描、服务映射、无明文审计和管理员 API；无 key Alias 已由服务/Web 回归测试覆盖，公开 `/api/code` 合同保持不变。
+- [x] 节点 5：已实现管理员显式查看 key、旧 key“轮换后可查看”提示和验证码栏目，具备响应式布局、加载/空/错误/截断状态、复制与会话过期跳转；四个核心模块共 81 项测试通过。
+- [x] 节点 6：README/运维说明已更新；全量 `125 passed`，Ruff/格式、Python/JS 语法、两套 Compose、diff 与秘密扫描通过。1440px、768px、390px 浏览器验收均无横向溢出、按钮重叠或控制台错误；初始 HTML 不含完整 key/验证码，审计不含 OTP。
+- [ ] 节点 7：提交并推送 GitHub `main`；部署前备份 SQLite/源码/旧镜像，隔离候选迁移验证后用 60 秒 watchdog 只替换 app。
+- [ ] 节点 8：生产验证新列、管理员权限、旧 key 不可恢复提示、验证码面板和公网合同；不自动轮换两条既有 key，不制造真实验证码或 Apple 写操作。
+- [ ] 节点 9：更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，推送最终记录提交并清理本地/服务器临时件；服务器部署标记保持实际功能提交。
+
+### 17.7 测试矩阵
+
+| 层级 | 必测闭环 |
+| --- | --- |
+| 数据库 | v1 旧库增加可空密文列；新 key 可解密且 hash 一致；轮换替换；撤销/失活清除；旧 key 返回不可恢复；密文交换/损坏失败 |
+| IMAP | 多 Alias/无 key Alias；一条 Alias 多封验证码；精确收件人；299/300/301 秒；未来 60/61 秒；一次 SEARCH；批量 FETCH；500 条截断；超时/登录失败 |
+| 服务 | 管理员扫描不要求 key；映射 ID/标签和北京时间；IMAP 错误映射；并发槽释放；审计不含 OTP；公开 lookup 行为不变 |
+| Web | reveal/recent-codes 未登录 401、无/错 CSRF 403；旧 key 409；成功 JSON no-store；dashboard 不含 key；公开 API 不新增字段 |
+| 前端 | 眼睛/复制、旧 key 提示、验证码刷新/空/错误/截断、重复刷新清空旧值、会话过期跳登录、键盘/移动端可达 |
+| 部署 | SQLite `quick_check=ok`；旧两条 key hash/hint 保留且 blob 为空；新列迁移兼容回滚；四容器健康且只替换 app |
+
+### 17.8 回滚与停止条件
+
+- 功能回滚只恢复旧 app 镜像；新增可空列由旧代码忽略，不恢复 SQLite 备份，也不删除已经写入的 key 密文。
+- 只有迁移后 `quick_check` 失败、现有 key hash/hint 计数变化或密文一致性断言失败时才回滚数据库备份。
+- 生产不自动轮换旧 key；管理员需要查看旧 key 时必须明确点击轮换，并接受旧 key 立即失效的既有语义。
+- 管理员验证码扫描超时、截断或 IMAP 异常时停止当前读取，不增加扫描上界、不启动逐 Alias 连接、不把验证码落库重试。
+- 部署只替换 app；browser、cn-proxy、Caddy、CDP 网络、Apple Session 和 Alias 远端状态不在本轮变更范围。

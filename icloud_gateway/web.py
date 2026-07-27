@@ -496,6 +496,48 @@ def create_app(
             "access_key": issued.access_key,
         }
 
+    @app.post("/admin/api/aliases/{alias_id}/key/reveal")
+    async def reveal_alias_key(alias_id: str, request: Request):
+        _require_admin_json(request, session_codec)
+        try:
+            access_key = await asyncio.to_thread(gateway.reveal_access_key, alias_id)
+            alias = gateway.database.get_alias(alias_id)
+        except ConflictError:
+            return JSONResponse({"status": "conflict"}, status_code=409)
+        except NotFoundError:
+            return JSONResponse({"status": "error"}, status_code=404)
+        except DatabaseError:
+            return JSONResponse({"status": "error"}, status_code=500)
+        return {
+            "status": "revealed",
+            "id": alias_id,
+            "email": alias["email"],
+            "label": alias["label"],
+            "access_key": access_key,
+        }
+
+    @app.post("/admin/api/codes/recent")
+    async def recent_admin_codes(request: Request):
+        _require_admin_json(request, session_codec)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(gateway.admin_recent_codes),
+                timeout=max(1, settings.otp_request_timeout_seconds) + 1,
+            )
+        except TimeoutError:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        except GatewayBusyError:
+            return JSONResponse(
+                {"status": "busy", "retry_after": 3},
+                status_code=503,
+                headers={"Retry-After": "3"},
+            )
+        except GatewayNotConfiguredError:
+            return JSONResponse({"status": "not_configured"}, status_code=503)
+        except (GatewayError, DatabaseError):
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return {"status": "ok", **result}
+
     @app.delete("/admin/api/aliases/{alias_id}/key")
     async def revoke_alias_key(alias_id: str, request: Request):
         _require_admin_json(request, session_codec)

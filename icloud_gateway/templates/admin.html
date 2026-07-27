@@ -12,6 +12,7 @@
     </a>
     <nav class="admin-nav" aria-label="管理导航">
       <a href="#aliases">Alias</a>
+      <a href="#admin-codes">验证码</a>
       <a href="#query-history">查询记录</a>
       <a href="#connections">连接</a>
       <form method="post" action="/admin/logout">
@@ -138,12 +139,22 @@
         </div>
         <div class="alias-label" role="cell">{{ alias.label }}</div>
         <div class="alias-key" role="cell">
-          {% if alias.has_access_key %}<span>末 4 位 {{ alias.access_key_hint }}</span>{% else %}<span class="muted-text">未签发</span>{% endif %}
+          {% if alias.has_access_key %}
+          <span>末 4 位 {{ alias.access_key_hint }}</span>
+            {% if not alias.access_key_recoverable %}<span class="legacy-key-note">轮换后可查看</span>{% endif %}
+          {% else %}
+          <span class="muted-text">未签发</span>
+          {% endif %}
         </div>
         <div class="alias-state" role="cell">
           <span class="state-label state-{{ alias.state }}">{% if alias.state == 'active' %}活动{% else %}失活{% endif %}</span>
         </div>
         <div class="alias-actions" role="cell">
+          {% if alias.has_access_key and alias.access_key_recoverable %}
+          <button class="icon-button reveal-key-button" type="button" data-alias-id="{{ alias.id }}" aria-label="查看完整密钥" title="查看完整密钥">
+            <img src="/static/icons/eye.svg" alt="" aria-hidden="true">
+          </button>
+          {% endif %}
           <button
             class="icon-button issue-key-button"
             type="button"
@@ -205,6 +216,32 @@
     {% else %}
     <div class="empty-state">尚未同步或创建 Alias。</div>
     {% endif %}
+  </section>
+
+  <section class="workspace-section" id="admin-codes" aria-labelledby="admin-codes-title">
+    <div class="section-toolbar admin-codes-toolbar">
+      <div class="section-heading">
+        <h2 id="admin-codes-title">验证码</h2>
+        <p>最近 5 分钟，覆盖全部已导入 Alias。</p>
+      </div>
+      <button class="secondary-button" id="refresh-admin-codes" type="button" {% if not imap.configured %}disabled{% endif %}>
+        <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
+        <span>刷新验证码</span>
+      </button>
+    </div>
+    <p class="admin-codes-message" id="admin-codes-message" aria-live="polite">
+      {% if imap.configured %}尚未刷新。{% else %}请先配置 IMAP。{% endif %}
+    </p>
+    <div class="admin-codes-table" id="admin-codes-table" role="table" aria-label="最近验证码" hidden>
+      <div class="admin-codes-header" role="row">
+        <span role="columnheader">Alias</span>
+        <span role="columnheader">验证码</span>
+        <span role="columnheader">接收时间（北京时间）</span>
+        <span role="columnheader">操作</span>
+      </div>
+      <div id="admin-codes-list"></div>
+    </div>
+    <div class="empty-state" id="admin-codes-empty" hidden>最近 5 分钟暂无验证码。</div>
   </section>
 
   <section class="workspace-section" id="query-history" aria-labelledby="query-history-title">

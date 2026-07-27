@@ -12,7 +12,7 @@
 - iCloud browser 与 HME API：共用 `CN_PROXY_*`；`CN_PROXY_REQUIRED=1` 时配置缺失或代理故障均失败关闭。
 - IMAP：在管理页单独配置；是否走代理按邮箱可达性决定，不自动继承 HME 代理。
 
-数据库中的密文依赖 `ICLOUD_GATEWAY_MASTER_KEY`。丢失该主密钥时，数据库备份无法恢复 Apple Session、IMAP 密码和 Alias 远端 ID。
+数据库中的密文依赖 `ICLOUD_GATEWAY_MASTER_KEY`。丢失该主密钥时，数据库备份无法恢复 Apple Session、IMAP 密码、Alias 远端 ID 和新版本签发的访问密钥明文。
 
 ## 2. 首次部署
 
@@ -147,7 +147,9 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy
 
 ### 4.1 Alias 生命周期管理
 
-- 活动 Alias 可以签发/轮换访问密钥，也可以远端停用。Apple 列表确认 `isActive=false` 后，本地才标记失活并撤销该 Alias 的访问密钥。
+- 活动 Alias 可以签发/轮换访问密钥，也可以远端停用。新签发或轮换的密钥同时保存 SHA-256 哈希与 AES-GCM 密文，管理员可点击眼睛图标显式查看；管理页初始 HTML 只包含末 4 位提示。
+- 升级前已经存在的访问密钥只有不可逆哈希，页面显示“轮换后可查看”。系统不会自动轮换；管理员明确轮换后旧密钥立即失效。
+- Apple 列表确认 `isActive=false` 后，本地才标记失活并清除该 Alias 的密钥哈希、提示和密文。
 - 失活 Alias 可以恢复；Apple 列表确认 `isActive=true` 后，本地才恢复活动状态，恢复后仍需按需重新签发访问密钥。
 - 永久删除只对失活 Alias 开放，并要求输入完整 Alias 邮箱。Apple 列表确认远端 ID 已消失后，本地记录才删除。
 - 远端写请求不会自动重试。页面提示状态未确认时，先使用“导入 / 刷新”读取实际 Apple 状态，不要连续重复点击破坏性动作。
@@ -160,6 +162,14 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy
 - 查询事件复制 Alias 的加密邮箱快照，因此 Alias 后续永久删除后，既有记录仍可辨识；旧事件会在兼容迁移时从仍存在的 Alias 幂等回填。
 - 审计数据不保存验证码、访问 Key、邮件正文或原始客户端 IP，也不新增公开查询历史接口。
 - 公开页等待验证码时可能每 5 秒轮询一次，因此同一 Alias 连续出现多条“暂无验证码”是正常反馈，不代表重复邮件或重复签发。
+
+### 4.3 管理员验证码面板
+
+- 管理页“验证码”栏目由管理员手动刷新，读取本地全部 Alias 最近 300 秒至未来 60 秒内的 6 位验证码，包括没有访问密钥和当前失活的 Alias。
+- 一次刷新只使用一个 IMAP 会话、一次时间窗搜索和批量读取，最多扫描 500 封候选邮件并返回 500 条；达到上限时页面明确提示截断。
+- 验证码只存在于管理员专用 `no-store` JSON 响应和当前页面 DOM，不写入 SQLite、审计日志、服务器日志、Cookie 或浏览器存储。刷新前会清空上一批结果，离开页面后清除 DOM。
+- `admin_code_scan` 审计只记录 `found`、`empty`、`truncated`、`busy` 或 IMAP 错误结果，不包含验证码、UID、主题、正文或发件人。
+- 读取超时、IMAP 正忙或凭据失效时失败关闭。不要通过提高 500 条上限、为每个 Alias 单独连接或持久化验证码来规避上游故障。
 
 浏览器容器、app 容器或服务器重启后仍使用同一个 profile。iCloud 显示离线或 HME Session 失效时，重复上述流程；不要删除 browser-data 卷，也不要创建第二个同时占用该卷的 browser 容器。
 
@@ -285,7 +295,7 @@ docker compose ps
 
 ## 9. 密钥轮换
 
-- Alias 访问密钥：在管理页轮换，旧密钥立即失效。
+- Alias 访问密钥：在管理页轮换，旧密钥立即失效；轮换后新密钥可由管理员显式查看。升级前 hash-only 密钥必须轮换后才能查看，无法反解恢复原值。
 - 历史 Alias：HME Session 保存时自动导入；活动项可以直接签发 key，失活项必须先在 Apple 远端恢复。
 - 管理员密码/VNC 密码：修改 `.env` 后重建对应容器；不要复用两者。
 - 回国代理凭据：修改 `.env` 后重建 app 和 browser，并重新验证两个出口。
