@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -341,6 +342,40 @@ def test_invalid_key_and_no_code_have_distinct_safe_states(tmp_path) -> None:
     assert invalid.status == "invalid_key"
     assert waiting.status == "waiting"
     assert waiting.retry_after == 5
+
+
+def test_dashboard_summarizes_bounded_lookup_history_without_sensitive_values(tmp_path) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    alias = value.database.upsert_alias(
+        email="target@icloud.com", remote_metadata={"anonymousId": "target"}
+    )
+    issued = value.database.issue_access_key(alias["id"])
+
+    value.lookup_code("not-a-key", client_ip="203.0.113.8")
+    value.lookup_code(issued.access_key, client_ip="203.0.113.9")
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    timestamp_iso = timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    with value.database.transaction() as connection:
+        connection.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_type = 'code_lookup'",
+            (timestamp_iso,),
+        )
+    dashboard = value.dashboard()
+
+    assert dashboard["query_counts"] == {"shown": 2, "aliases": 1}
+    assert [event["outcome"] for event in dashboard["query_history"]] == [
+        "no_code",
+        "invalid_key",
+    ]
+    assert dashboard["query_history"][0]["alias_email"] == "target@icloud.com"
+    assert dashboard["query_history"][1]["alias_email"] is None
+    assert {event["created_at_display"] for event in dashboard["query_history"]} == {
+        timestamp.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    }
+    serialized = str(dashboard["query_history"])
+    assert issued.access_key not in serialized
+    assert "203.0.113.9" not in serialized
 
 
 def test_empty_remote_list_does_not_deactivate_every_alias(tmp_path) -> None:

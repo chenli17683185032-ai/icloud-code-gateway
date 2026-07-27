@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -355,6 +356,47 @@ def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
         assert dashboard.status_code == 200
         assert "/admin/browser/vnc.html?" in dashboard.text
         assert "打开 iCloud 浏览器" in dashboard.text
+
+
+def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, service) -> None:
+    alias = service.database.upsert_alias(
+        email="queried@icloud.com",
+        remote_metadata={"anonymousId": "queried", "isActive": True},
+    )
+    service.database.record_audit_event(
+        "code_lookup",
+        "found",
+        alias_id=alias["id"],
+        ip_digest="4f8a1c2d3e4f5a6b",
+    )
+    timestamp = datetime.now(UTC).replace(microsecond=0)
+    timestamp_iso = timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    timestamp_display = timestamp.astimezone(ZoneInfo("Asia/Shanghai")).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    with service.database.transaction() as connection:
+        connection.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_type = 'code_lookup'",
+            (timestamp_iso,),
+        )
+    _login(client, settings)
+
+    response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert 'href="#query-history"' in response.text
+    assert 'id="query-history"' in response.text
+    assert "查询记录" in response.text
+    assert "隐藏邮箱" in response.text
+    assert "查询结果" in response.text
+    assert "来源指纹" in response.text
+    assert "查询时间（北京时间）" in response.text
+    assert "queried@icloud.com" in response.text
+    assert "已返回验证码" in response.text
+    assert "4f8a1c2d3e4f5a6b" in response.text
+    assert f'datetime="{timestamp_iso}"' in response.text
+    assert timestamp_display in response.text
+    assert "data-local-time" not in response.text
 
 
 def test_key_rotation_and_revocation_only_return_current_plaintext_once(

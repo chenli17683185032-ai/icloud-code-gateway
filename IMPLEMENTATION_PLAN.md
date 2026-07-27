@@ -509,3 +509,73 @@ Browser runtime
 - 管理页已显示全部 107 条记录；活动 Alias 可以签发或轮换 key，失活 Alias 需要先恢复。生产只验证动作前置条件和只读收敛，没有选择真实 Alias 执行停用、恢复或永久删除。
 - 60 秒 watchdog 只替换 app，10 秒恢复健康；browser、cn-proxy、共享 Caddy 均未重启。四个生产容器最终为 `healthy / restart=0 / OOM=false`，部署标记已写入完整功能提交，项目候选容器、卷和镜像均为 0。
 - 回滚与审计目录为 `/opt/new-api/icloud-code-gateway/backups/history-management-20260726T184755Z-20f17f5`，最终清单文件 SHA-256 为 `391758c46cfb520a26434463ce3395528eb004667892810d009694570b0ff5b4`，清单内全部文件复验通过。CDP 9222 网络边界、共享 Caddy 配置和正式数据卷均未改变。
+
+## 15. 验证码查询记录专栏
+
+### 15.1 目标、边界与验收指标
+
+目标是在现有管理员平台增加独立的“查询记录”专栏，让管理员确认哪些隐藏邮箱曾被用户查询、查询结果和时间，同时不扩大公开接口返回面，也不保存验证码、访问 key、邮件正文或原始客户端 IP。
+
+- 管理页导航增加“查询记录”锚点；独立全宽栏目展示最近 100 条 `code_lookup` 事件，继续沿用现有 7 天自动保留期。
+- 每条记录展示 Alias 邮箱、结果、脱敏来源指纹和查询时间；结果至少区分“已返回验证码”“暂无验证码”“IMAP 未配置/失效/错误”和“无效 Key”。
+- 已匹配 Alias 的事件保存加密邮箱快照；Alias 后续永久删除时，既有查询记录仍能显示当时邮箱。旧事件在上线迁移时从仍存在的 Alias 回填快照。
+- 无效 Key 没有可归属 Alias，显示“未匹配邮箱”，不能记录或回显用户输入的 key。
+- 只允许管理员已认证页面读取查询记录，不新增公开查询历史 API，不把邮箱、来源指纹或审计数据发送给普通访客。
+- 列表查询有明确上限并使用 `(event_type, id)` 索引；移动端不横向溢出，长邮箱、结果和时间不重叠。
+- 生产迁移前完成 SQLite 在线备份；构建期间旧 app 持续服务，只替换 app，60 秒 watchdog 失败自动恢复旧镜像。
+- 全量测试、Ruff、格式、Python/JS 语法、两套 Compose 展开、`git diff --check`、秘密扫描和桌面/移动 UI 验收全部通过。
+- 上线验收只读取现有审计事件，不发起真实公开验证码查询，也不调用 Apple Alias 写接口。
+
+### 15.2 控制结构与稳定性约束
+
+| 控制元素 | 本轮对象 |
+| --- | --- |
+| 目标 | 管理员可可靠识别哪些 Alias 被查询过，同时维持敏感信息最小化 |
+| 被控对象 | 公开验证码查询、SQLite `audit_events`、管理员查询记录列表 |
+| 测量 | `code_lookup` 事件数、可归属 Alias 数、outcome、创建时间、数据库完整性、页面布局 |
+| 控制器 | 既有 `_audit_lookup`、加密 Alias 快照、保留期清理、限量倒序查询、管理员会话边界 |
+| 执行器 | 审计事件写入、兼容性列迁移/回填、管理模板渲染 |
+| 扰动 | 5 秒轮询造成重复 `no_code`、Alias 被永久删除、无效 key、长邮箱、日志量突增、部署回滚 |
+| 稳定性策略 | 不复制验证码/key；列表有界；迁移为可空加法；旧镜像忽略新列；部署失败只回滚 app |
+
+### 15.3 GitHub 经验与生产基线
+
+- `goauthentik/authentik` 的 `Event` 模型把 `action`、清洗后的 `context`、`client_ip` 和 `created` 分开保存，并为动作、时间和来源建立索引；本项目沿用“结构化事件 + 有界保留”，但继续只保存不可逆 IP 摘要。
+- `django/django` 的管理员 `LogEntry` 同时保存对象 ID 与 `object_repr` 快照，使对象删除后审计记录仍可辨识；本项目对应保存加密的 Alias 邮箱快照，不保存访问 key 或验证码。
+- 2026-07-27 生产只读测量：schema version 为 1，`audit_events` 现有列为 `id/event_type/alias_id/outcome/ip_digest/created_at`；已有 17 条 `code_lookup`，涉及 2 个 Alias，其中 `found=2`、`no_code=15`。
+- 当前公开查询路径已对有效、无效、未配置、IMAP 失败和未找到验证码写入 `code_lookup`；本轮复用该闭环，不增加第二套日志表，也不改变公开响应契约和限流语义。
+
+### 15.4 最小充分模型
+
+- `audit_events` 增加可空 `alias_email_blob BLOB`。写入有 `alias_id` 的事件时，在同一事务中复制 Alias 已有的 AES-GCM 邮箱密文；读取时继续使用 `alias-email` purpose 解密。
+- 启动时通过 `PRAGMA table_info(audit_events)` 检测列，缺失才执行 `ALTER TABLE`；随后为旧事件按 `alias_id` 回填现存 Alias 的 `email_blob`，并幂等创建 `audit_events_type_id_idx(event_type, id DESC)`。
+- 该变更保持 `schema_version=1`：新增列可空且旧代码只显式读取既有列，部署前镜像可直接回滚并忽略新列，不需要为了普通应用回滚恢复 SQLite。
+- 数据库提供单一 `list_code_lookup_events(limit=100)` 读取方法，只返回 `id/alias_id/alias_email/outcome/ip_digest/created_at`；解密失败按数据库错误处理，避免静默显示错误归属。
+- `GatewayService.dashboard()` 同时返回查询列表与当前显示条数、可归属 Alias 数；不把原始审计密文暴露给模板。
+
+### 15.5 实施节点
+
+- [x] 节点 1：核对本地 `main`、现有审计闭环、GitHub 成熟实现和生产只读基线，确定使用现有表的兼容性加法迁移。
+- [x] 节点 2：数据库、服务和 Web 回归测试已补齐，覆盖 v1 迁移/回填、新事件快照、Alias 删除后记录仍可辨识、无效 key 无邮箱、dashboard 统计和独立管理栏目；新增测试先在旧实现上 4/4 失败。
+- [x] 节点 3：已实现 `audit_events` 加密快照列、幂等索引/回填、查询列表和 dashboard 数据；4 个定向测试通过，公开查询响应与限流代码未改变。
+- [x] 节点 4：已增加管理导航和“查询记录”栏目，提供邮箱/结果/来源指纹/北京时间及空状态；1440×900、820×900、390×844 均无横向溢出或内容重叠，导航定位不会被粘性顶栏遮挡。
+- [x] 节点 5：README/运维说明已更新；`116 passed`，Ruff、格式、Python/JS 语法、两套 Compose、`git diff --check` 和秘密扫描全部通过。三视口 UI 无溢出/重叠，控制台错误为 0，固定 UTC 样本正确显示为北京时间且 HTML 不含验证码、Key 或原始 IP。
+- [ ] 节点 6：提交并推送 GitHub `main`；服务器完成 SQLite/源码备份后，用独立 60 秒 watchdog 只替换 app，失败自动恢复旧镜像。
+- [ ] 节点 7：生产只读核对迁移列、索引、17 条既有查询记录及管理页展示；不制造真实验证码查询。更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，推送最终记录提交并清理临时件。
+
+### 15.6 测试矩阵
+
+| 层级 | 必测闭环 |
+| --- | --- |
+| 数据库 | 旧 v1 库在线增加列与索引；旧事件回填；新事件保存快照；Alias 删除后快照保留；无效 key 事件为空邮箱；limit 夹在 1–500 |
+| 服务 | `found/no_code/not_configured/imap_invalid/imap_error/invalid_key` 映射不变；dashboard 查询条数和 Alias 去重计数正确 |
+| Web | 未登录仍 303；管理员页面包含查询记录导航、列标题、结果文案、邮箱和脱敏指纹；公开 API 不增加字段 |
+| 安全 | HTML/日志/数据库审计字段不含验证码、访问 key、原始 IP；现有 7 天清理仍覆盖新增列 |
+| UI | 0 条、17 条和 100 条记录；长邮箱；桌面/平板/手机无横向溢出、裁切、重叠或控制台错误 |
+| 部署 | SQLite `quick_check=ok`；迁移前后事件计数守恒；四容器健康且 `restart=0`；只替换 app；公网健康正常 |
+
+### 15.7 回滚边界
+
+- 新列和索引均为向后兼容的加法，普通功能回滚只恢复部署前 app 镜像；旧代码继续使用原六列，不删除新列、不恢复数据库。
+- 只有启动迁移导致 SQLite `quick_check` 失败或事件计数异常时，才停止写入并使用部署前在线备份恢复数据库；不得把备份恢复作为普通 UI 回滚步骤。
+- 查询专栏异常不能影响公开验证码接口；若上线后仅模板或列表读取失败，watchdog/人工回滚只替换 app，browser、cn-proxy、Caddy、CDP 网络和 Apple 会话均保持不变。

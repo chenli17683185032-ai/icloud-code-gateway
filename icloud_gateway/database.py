@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .security import SecretBox, generate_access_key, hash_access_key
+from .security import SecretBox, SecurityError, generate_access_key, hash_access_key
 
 SCHEMA_VERSION = 1
 AUDIT_RETENTION_DAYS = 7
@@ -34,6 +34,14 @@ class ConflictError(DatabaseError):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _retention_cutoff(days: int) -> str:
+    return (
+        (datetime.now(UTC) - timedelta(days=max(1, int(days))))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _normalize_email(value: str) -> str:
@@ -108,6 +116,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     alias_id TEXT REFERENCES aliases(id) ON DELETE SET NULL,
+                    alias_email_blob BLOB,
                     outcome TEXT NOT NULL,
                     ip_digest TEXT,
                     created_at TEXT NOT NULL
@@ -117,6 +126,8 @@ class Database:
                     ON audit_events(created_at);
                 CREATE INDEX IF NOT EXISTS audit_events_alias_id_idx
                     ON audit_events(alias_id, created_at);
+                CREATE INDEX IF NOT EXISTS audit_events_type_id_idx
+                    ON audit_events(event_type, id DESC);
                 """
         )
         with self.transaction() as connection:
@@ -130,6 +141,22 @@ class Database:
                 )
             elif int(current["value"]) != SCHEMA_VERSION:
                 raise DatabaseError("database schema version is unsupported")
+            audit_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(audit_events)")
+            }
+            if "alias_email_blob" not in audit_columns:
+                connection.execute("ALTER TABLE audit_events ADD COLUMN alias_email_blob BLOB")
+            connection.execute(
+                """
+                UPDATE audit_events
+                SET alias_email_blob = (
+                    SELECT aliases.email_blob
+                    FROM aliases
+                    WHERE aliases.id = audit_events.alias_id
+                )
+                WHERE alias_email_blob IS NULL AND alias_id IS NOT NULL
+                """
+            )
         with suppress(OSError):
             self.path.chmod(0o600)
 
@@ -559,10 +586,14 @@ class Database:
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO audit_events(event_type, alias_id, outcome, ip_digest, created_at)
-                VALUES(?, ?, ?, ?, ?)
+                INSERT INTO audit_events(
+                    event_type, alias_id, alias_email_blob, outcome, ip_digest, created_at
+                )
+                VALUES(
+                    ?, ?, (SELECT email_blob FROM aliases WHERE id = ?), ?, ?, ?
+                )
                 """,
-                (clean_type, alias_id, clean_outcome, clean_ip, _now()),
+                (clean_type, alias_id, alias_id, clean_outcome, clean_ip, _now()),
             )
         if self._audit_purge_is_due():
             self.purge_old_audit_events(days=AUDIT_RETENTION_DAYS)
@@ -592,12 +623,47 @@ class Database:
         )
         return [dict(row) for row in rows]
 
-    def purge_old_audit_events(self, *, days: int = 7) -> int:
-        cutoff = (
-            (datetime.now(UTC) - timedelta(days=max(1, int(days))))
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
+    def list_code_lookup_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 500))
+        cutoff = _retention_cutoff(AUDIT_RETENTION_DAYS)
+        rows = (
+            self._connect()
+            .execute(
+                """
+                SELECT id, alias_id, alias_email_blob, outcome, ip_digest, created_at
+                FROM audit_events
+                WHERE event_type = 'code_lookup' AND created_at >= ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (cutoff, bounded),
+            )
+            .fetchall()
         )
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            alias_email = None
+            if row["alias_email_blob"] is not None:
+                try:
+                    alias_email = self.secret_box.decrypt(
+                        bytes(row["alias_email_blob"]), "alias-email"
+                    ).decode("utf-8")
+                except (SecurityError, UnicodeDecodeError) as exc:
+                    raise DatabaseError("audit alias email is invalid") from exc
+            events.append(
+                {
+                    "id": int(row["id"]),
+                    "alias_id": None if row["alias_id"] is None else str(row["alias_id"]),
+                    "alias_email": alias_email,
+                    "outcome": str(row["outcome"]),
+                    "ip_digest": None if row["ip_digest"] is None else str(row["ip_digest"]),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return events
+
+    def purge_old_audit_events(self, *, days: int = 7) -> int:
+        cutoff = _retention_cutoff(days)
         with self.transaction() as connection:
             cursor = connection.execute("DELETE FROM audit_events WHERE created_at < ?", (cutoff,))
             return int(cursor.rowcount)

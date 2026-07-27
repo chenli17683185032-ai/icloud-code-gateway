@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .browser_capture import CaptureManager
 from .config import Settings
@@ -25,6 +26,17 @@ from .imap_otp import (
 )
 from .rate_limit import SlidingWindowRateLimiter
 from .security import SecretBox, SecurityError, hash_access_key
+
+_LOOKUP_OUTCOME_VIEW = {
+    "found": ("已返回验证码", "success"),
+    "no_code": ("暂无验证码", "waiting"),
+    "not_found": ("暂无验证码", "waiting"),
+    "not_configured": ("IMAP 未配置", "error"),
+    "imap_invalid": ("IMAP 凭据失效", "error"),
+    "imap_error": ("IMAP 查询失败", "error"),
+    "invalid_key": ("无效 Key", "muted"),
+}
+_BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 HME_SETTING_KEY = "hme_session"
 IMAP_SETTING_KEY = "imap_config"
@@ -84,6 +96,16 @@ def _utc_now() -> datetime:
 
 def _timestamp() -> str:
     return _utc_now().isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _beijing_timestamp(value: str) -> str:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(_BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class GatewayService:
@@ -512,6 +534,12 @@ class GatewayService:
             imap_config = None
             imap_error = "saved IMAP configuration cannot be loaded"
         aliases = self.database.list_aliases()
+        query_history = self.database.list_code_lookup_events(limit=100)
+        for event in query_history:
+            label, tone = _LOOKUP_OUTCOME_VIEW.get(event["outcome"], ("查询失败", "error"))
+            event["outcome_label"] = label
+            event["outcome_tone"] = tone
+            event["created_at_display"] = _beijing_timestamp(event["created_at"])
         return {
             "hme": {
                 "configured": hme_session is not None,
@@ -530,6 +558,17 @@ class GatewayService:
                 "total": len(aliases),
                 "active": sum(item["state"] == "active" for item in aliases),
                 "keyed": sum(item["has_access_key"] for item in aliases),
+            },
+            "query_history": query_history,
+            "query_counts": {
+                "shown": len(query_history),
+                "aliases": len(
+                    {
+                        event["alias_email"]
+                        for event in query_history
+                        if event["alias_email"] is not None
+                    }
+                ),
             },
             "audit": self.database.list_audit_events(limit=40),
         }

@@ -12,6 +12,7 @@
     </a>
     <nav class="admin-nav" aria-label="管理导航">
       <a href="#aliases">Alias</a>
+      <a href="#query-history">查询记录</a>
       <a href="#connections">连接</a>
       <form method="post" action="/admin/logout">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -203,6 +204,54 @@
     <div class="empty-state" id="alias-filter-empty" hidden>没有匹配的 Alias。</div>
     {% else %}
     <div class="empty-state">尚未同步或创建 Alias。</div>
+    {% endif %}
+  </section>
+
+  <section class="workspace-section" id="query-history" aria-labelledby="query-history-title">
+    <div class="section-heading">
+      <h2 id="query-history-title">查询记录</h2>
+      <p>最近 7 天，当前显示 {{ query_counts.shown }} 条，涉及 {{ query_counts.aliases }} 个 Alias。</p>
+    </div>
+
+    {% if query_history %}
+    <div class="lookup-history-table" role="table" aria-label="验证码查询记录">
+      <div class="lookup-history-header" role="row">
+        <span role="columnheader">隐藏邮箱</span>
+        <span role="columnheader">查询结果</span>
+        <span role="columnheader">来源指纹</span>
+        <span role="columnheader">查询时间（北京时间）</span>
+      </div>
+      {% for event in query_history %}
+      <article class="lookup-history-row" role="row">
+        <div class="lookup-history-alias" role="cell">
+          <span class="lookup-cell-label">隐藏邮箱</span>
+          <div>
+            {% if event.alias_email %}
+            <strong>{{ event.alias_email }}</strong>
+            {% if not event.alias_id %}<span>Alias 已删除</span>{% endif %}
+            {% else %}
+            <strong class="muted-text">未匹配邮箱</strong>
+            <span>无效 Key</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="lookup-history-result" role="cell">
+          <span class="lookup-cell-label">查询结果</span>
+          <span class="lookup-outcome lookup-outcome-{{ event.outcome_tone }}">{{ event.outcome_label }}</span>
+        </div>
+        <div class="lookup-history-source" role="cell">
+          <span class="lookup-cell-label">来源指纹</span>
+          <code>{{ event.ip_digest or '—' }}</code>
+        </div>
+        <div class="lookup-history-time" role="cell">
+          <span class="lookup-cell-label">查询时间（北京时间）</span>
+          <time datetime="{{ event.created_at }}" title="UTC：{{ event.created_at }}">{{ event.created_at_display }}</time>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">最近 7 天暂无验证码查询记录。</div>
     {% endif %}
   </section>
 

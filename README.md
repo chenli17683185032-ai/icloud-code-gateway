@@ -25,6 +25,7 @@
 - Apple Session、IMAP 密码和 Alias 远端 ID 使用环境主密钥进行 AES-GCM 加密。
 - HME Session 保存后自动导入完整远端 Alias 快照；重复刷新按邮箱幂等对账并保留本地标签、过滤条件和有效密钥。
 - 停用、恢复和永久删除均在 Apple 写入后再次读取 HME 列表确认；确认前不改变本地状态，永久删除只允许失活 Alias 且需要输入完整邮箱。
+- 管理页“查询记录”展示最近 7 天内最新 100 次验证码查询；Alias 邮箱快照加密保存，来源只保留不可逆指纹，不保存验证码、访问密钥或原始 IP。
 - 管理端采用 HttpOnly/Secure/Strict Cookie 和 CSRF；noVNC 页面、静态资源与 WebSocket 均经过管理员会话认证。
 - CDP 仅在 Docker 内网可达；原始 noVNC 只绑定服务器 `127.0.0.1`。
 - 浏览器或 Apple/IMAP 上游异常均有界失败，不让公网请求无限等待。
@@ -73,6 +74,7 @@ docker compose ps
 3. 点击“开始捕获”，在 iCloud+ 隐藏邮件页面触发一次真实 HME list 请求。
 4. 配置转发邮箱 IMAP 和 App 专用密码并执行只读测试。
 5. Session 捕获成功后会自动导入已有 Alias；也可点击“导入 / 刷新”重新对账，随后为需要使用的活动 Alias 签发一次性展示的访问密钥。
+6. 在“查询记录”查看哪些 Alias 被查询、查询结果、脱敏来源指纹和北京时间；已删除 Alias 的既有记录仍保留当时邮箱快照。
 
 公开查询页位于 `https://<GATEWAY_DOMAIN>/`。
 
