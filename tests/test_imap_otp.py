@@ -26,6 +26,8 @@ def raw_message(
     html: bool = False,
     recipient_header: str = "Delivered-To",
     include_date: bool = True,
+    subject: str = "Verify your email",
+    body: str | None = None,
 ) -> bytes:
     date_header = (
         f"Date: {email.utils.formatdate(date_timestamp, usegmt=True)}\r\n"
@@ -33,19 +35,21 @@ def raw_message(
         else ""
     )
     content_type = "text/html; charset=utf-8" if html else "text/plain; charset=utf-8"
-    body = (
-        f"<p>Your verification code is <b>{code}</b></p>"
-        if html
-        else f"Your verification code is {code}"
-    )
+    message_body = body
+    if message_body is None:
+        message_body = (
+            f"<p>Your verification code is <b>{code}</b></p>"
+            if html
+            else f"Your verification code is {code}"
+        )
     return (
         f"From: Service <{sender}>\r\n"
         "To: forwarding@example.com\r\n"
         f"{recipient_header}: {recipient}\r\n"
-        "Subject: Verify your email\r\n"
+        f"Subject: {subject}\r\n"
         f"{date_header}"
         f"Content-Type: {content_type}\r\n\r\n"
-        f"{body}\r\n"
+        f"{message_body}\r\n"
     ).encode()
 
 
@@ -64,26 +68,43 @@ class FakeImap:
         capabilities=(),
         reject_uid_sets=False,
         reject_combined_search=False,
+        folders=None,
+        unavailable_folders=(),
     ):
-        self.messages = dict(messages or {})
+        self.folders = (
+            {str(name): dict(items) for name, items in folders.items()}
+            if folders is not None
+            else {"INBOX": dict(messages or {})}
+        )
+        self.unavailable_folders = {str(name) for name in unavailable_folders}
         self.login_error = login_error
+        self.login_calls = 0
+        self.logged_out = False
+        self.selected_folder = None
+        self.select_calls = []
         self.capabilities = tuple(capabilities)
         self.reject_uid_sets = reject_uid_sets
         self.reject_combined_search = reject_combined_search
-        self.logged_out = False
         self.searches: list[tuple] = []
         self.fetches: list[list[str]] = []
 
     def login(self, _username, _password):
+        self.login_calls += 1
         if self.login_error:
             raise imaplib.IMAP4.error("authentication failed with secret detail")
         return "OK", []
 
-    def select(self, _folder, readonly=False):
-        return ("OK", [b"1"]) if readonly else ("NO", [])
+    def select(self, folder, readonly=False):
+        name = str(folder)
+        self.select_calls.append((name, readonly))
+        if not readonly or name in self.unavailable_folders or name not in self.folders:
+            self.selected_folder = None
+            return "NO", []
+        self.selected_folder = name
+        return "OK", [str(len(self.folders[name])).encode("ascii")]
 
     def _fetch_one(self, uid):
-        item = self.messages.get(uid)
+        item = self.folders[self.selected_folder].get(uid)
         if item is None:
             return None
         raw, received_at = item
@@ -92,12 +113,13 @@ class FakeImap:
         return (metadata.encode("ascii"), raw)
 
     def uid(self, command, *args):
+        messages = self.folders[self.selected_folder]
         if command == "search":
             terms = tuple(str(item) for item in args if item is not None)
             self.searches.append(terms)
             if self.reject_combined_search and "OR" in terms:
                 return "NO", []
-            return "OK", [" ".join(self.messages).encode("ascii")]
+            return "OK", [" ".join(messages).encode("ascii")]
         if command == "fetch":
             uids = [part for part in str(args[0]).split(",") if part]
             self.fetches.append(uids)
@@ -336,6 +358,260 @@ def test_reader_extracts_html_and_honors_sender_domain_filter() -> None:
     )
 
     assert result.code == "222222"
+
+
+def test_reader_rejects_six_digit_number_without_verification_context() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="123456",
+                    subject="Account notification",
+                    body="Account 123456 signed in successfully.",
+                ),
+                NOW,
+            )
+        }
+    )
+
+    assert reader(connection).find_latest_code("target@icloud.com", now_ts=NOW) is None
+
+
+def test_reader_prefers_the_candidate_nearest_to_verification_context() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="222222",
+                    subject="Sign-in details",
+                    body="Verification details: order 111111; your code is 222222.",
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == "222222"
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    (
+        ("您的认证码为 333333，请勿泄露。", "333333"),
+        ("444444 是您的确认码，请在五分钟内使用。", "444444"),
+        ("<p>一次性密码：<strong>555555</strong></p>", "555555"),
+    ),
+)
+def test_reader_accepts_chinese_and_html_verification_context(body: str, code: str) -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code=code,
+                    subject="账户通知",
+                    body=body,
+                    html=body.startswith("<"),
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == code
+
+
+def test_old_imap_configuration_defaults_to_one_folder() -> None:
+    values = config().as_secret_dict()
+    values.pop("junk_folder")
+
+    value = ImapConfig.from_mapping(values)
+
+    assert value.folder == "INBOX"
+    assert value.junk_folder == ""
+
+
+def test_imap_configuration_rejects_invalid_junk_folder() -> None:
+    values = config().as_secret_dict()
+    values["junk_folder"] = "Junk\r\nINBOX"
+
+    with pytest.raises(ImapCredentialsError):
+        ImapConfig.from_mapping(values)
+
+
+def test_reader_returns_latest_code_across_primary_and_junk_folders() -> None:
+    connection = FakeImap(
+        folders={
+            "INBOX": {
+                "10": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 20)
+            },
+            "Junk": {
+                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 2)
+            },
+        }
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    result = value.find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == "202020"
+    assert connection.login_calls == 1
+    assert connection.select_calls == [
+        ("INBOX", True),
+        ("Junk", True),
+        ("INBOX", True),
+        ("Junk", True),
+    ]
+
+
+def test_recent_codes_share_one_login_and_one_total_limit_across_folders() -> None:
+    connection = FakeImap(
+        folders={
+            "INBOX": {
+                "1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 4),
+                "3": (raw_message(recipient="target@icloud.com", code="303030"), NOW - 2),
+            },
+            "Junk": {
+                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 3),
+                "4": (raw_message(recipient="target@icloud.com", code="404040"), NOW - 1),
+            },
+        }
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    batch = value.find_recent_codes(
+        ["target@icloud.com"],
+        now_ts=NOW,
+        scan_limit=3,
+    )
+
+    assert [item.uid for item in batch.items] == ["4", "3", "1"]
+    assert batch.scanned == 3
+    assert batch.truncated is True
+    assert connection.login_calls == 1
+    assert len(connection.searches) == 2
+    assert sum(len(items) for items in connection.fetches) == 3
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "expected"),
+    (({"INBOX"}, "202020"), ({"Junk"}, "101010")),
+)
+def test_recent_codes_degrade_when_one_folder_is_unavailable(
+    unavailable: set[str], expected: str
+) -> None:
+    connection = FakeImap(
+        folders={
+            "INBOX": {
+                "1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)
+            },
+            "Junk": {
+                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)
+            },
+        },
+        unavailable_folders=unavailable,
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    batch = value.find_recent_codes(["target@icloud.com"], now_ts=NOW)
+
+    assert [item.code for item in batch.items] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "expected"),
+    (({"INBOX"}, "202020"), ({"Junk"}, "101010")),
+)
+def test_reader_degrades_when_one_configured_folder_is_unavailable(
+    unavailable: set[str], expected: str
+) -> None:
+    connection = FakeImap(
+        folders={
+            "INBOX": {
+                "1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)
+            },
+            "Junk": {
+                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)
+            },
+        },
+        unavailable_folders=unavailable,
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    result = value.find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == expected
+
+
+def test_reader_fails_closed_when_all_configured_folders_are_unavailable() -> None:
+    connection = FakeImap(
+        folders={"INBOX": {}, "Junk": {}},
+        unavailable_folders={"INBOX", "Junk"},
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    with pytest.raises(ImapError, match="folder is unavailable"):
+        value.find_latest_code("target@icloud.com", now_ts=NOW)
+
+
+def test_connection_check_requires_every_configured_folder() -> None:
+    connection = FakeImap(
+        folders={"INBOX": {}, "Junk": {}},
+        unavailable_folders={"Junk"},
+    )
+    value = ImapOtpReader(
+        ImapConfig(**{**config().as_secret_dict(), "junk_folder": "Junk"}),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    with pytest.raises(ImapError, match="folder is unavailable"):
+        value.check()
+
+    assert connection.select_calls == [("INBOX", True), ("Junk", True)]
+
+
+@pytest.mark.parametrize(
+    ("folder", "argument"),
+    (
+        ("Deleted Messages", '"Deleted Messages"'),
+        ('Folder "One"', '"Folder \\"One\\""'),
+        ("R&D", '"R&-D"'),
+        ("\u5df2\u5220\u9664", '"&XfJSIJZk-"'),
+    ),
+)
+def test_connection_check_encodes_configured_mailbox_name(folder: str, argument: str) -> None:
+    connection = FakeImap(folders={argument: {}})
+    values = config().as_secret_dict()
+    values["folder"] = folder
+    value = ImapOtpReader(
+        ImapConfig(**values),
+        connection_factory=lambda _config, _timeout: connection,
+    )
+
+    value.check()
+
+    assert connection.select_calls == [(argument, True)]
 
 
 def test_imap_auth_error_is_sanitized() -> None:

@@ -378,8 +378,12 @@
               {% if imap.configured %}<p class="field-help">留空保留已保存值。</p>{% endif %}
             </div>
             <div class="field">
-              <label for="imap-folder">文件夹</label>
-              <input id="imap-folder" name="folder" value="INBOX" required>
+              <label for="imap-folder">主文件夹</label>
+              <input id="imap-folder" name="folder" value="{{ imap.folder or 'INBOX' }}" required>
+            </div>
+            <div class="field">
+              <label for="imap-junk-folder">垃圾邮件文件夹（可选）</label>
+              <input id="imap-junk-folder" name="junk_folder" value="{{ imap.junk_folder or '' }}">
             </div>
             <div class="field field-wide">
               <label for="imap-proxy">可选代理</label>

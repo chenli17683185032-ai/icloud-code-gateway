@@ -10,7 +10,8 @@
 - 原始 noVNC：只监听宿主 `127.0.0.1:${BROWSER_NOVNC_PORT}`。
 - CDP：只 `expose` 给 Docker 网络，不发布宿主端口。
 - iCloud browser 与 HME API：共用 `CN_PROXY_*`；`CN_PROXY_REQUIRED=1` 时配置缺失或代理故障均失败关闭。
-- IMAP：在管理页单独配置；是否走代理按邮箱可达性决定，不自动继承 HME 代理。
+- IMAP：在管理页单独配置；是否走代理按邮箱可达性决定，不自动继承 HME 代理。可选
+  填写一个垃圾邮件文件夹，保存时会与主文件夹一并执行只读验证。
 
 数据库中的密文依赖 `ICLOUD_GATEWAY_MASTER_KEY`。丢失该主密钥时，数据库备份无法恢复 Apple Session、IMAP 密码、Alias 远端 ID 和新版本签发的访问密钥明文。
 
@@ -23,6 +24,11 @@
 3. 保持系统 NTP 正常。验证码窗口依赖准确时间。
 4. 安装 Docker Engine 与 Compose v2。
 5. 从私有 GitHub 仓库拉取项目，不把 `.env` 提交到 Git。
+
+IMAP 文件夹名称必须使用服务端实际名称。应用会处理空格、引号、`&` 和 modified
+UTF-7 编码，但不会猜测 `Junk`、`Spam` 或本地化名称。查询时两个文件夹共享一次登录
+和同一总截止时间；任一文件夹暂时不可用时可由另一文件夹维持查询，全部不可用时失败
+关闭。
 
 ### 2.2 Secret 文件
 
@@ -166,7 +172,9 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy
 ### 4.3 管理员验证码面板
 
 - 管理页“验证码”栏目由管理员手动刷新，读取本地全部 Alias 最近 300 秒至未来 60 秒内的 6 位验证码，包括没有访问密钥和当前失活的 Alias。
-- 一次刷新只使用一个 IMAP 会话、一次时间窗搜索和批量读取，最多扫描 500 封候选邮件并返回 500 条；达到上限时页面明确提示截断。
+- 一次刷新只使用一个 IMAP 会话；每个已配置文件夹各执行一次时间窗搜索，再在文件夹间
+  公平分配同一个 500 封扫描预算并批量读取，最多返回 500 条；达到上限时页面明确提示
+  截断。
 - 验证码只存在于管理员专用 `no-store` JSON 响应和当前页面 DOM，不写入 SQLite、审计日志、服务器日志、Cookie 或浏览器存储。刷新前会清空上一批结果，离开页面后清除 DOM。
 - `admin_code_scan` 审计只记录 `found`、`empty`、`truncated`、`busy` 或 IMAP 错误结果，不包含验证码、UID、主题、正文或发件人。
 - 读取超时、IMAP 正忙或凭据失效时失败关闭。不要通过提高 500 条上限、为每个 Alias 单独连接或持久化验证码来规避上游故障。

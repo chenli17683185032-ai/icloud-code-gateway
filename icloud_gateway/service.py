@@ -612,6 +612,8 @@ class GatewayService:
                 "configured": imap_config is not None,
                 "host": None if imap_config is None else imap_config.host,
                 "forwarding_email": (None if imap_config is None else imap_config.forwarding_email),
+                "folder": None if imap_config is None else imap_config.folder,
+                "junk_folder": None if imap_config is None else imap_config.junk_folder,
                 "error": imap_error,
             },
             "capture": self.capture_manager.status(),

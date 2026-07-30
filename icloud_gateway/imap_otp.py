@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import email
 import html
 import imaplib
@@ -29,18 +30,17 @@ RECIPIENT_HEADERS = (
     "X-Apple-Original-Recipient",
 )
 _OTP_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
-_CONTEXT_WORDS = (
-    r"verification|verify|security|one[- ]time|otp|code|"
-    r"\u9a8c\u8bc1\u7801|\u5b89\u5168\u4ee3\u7801|\u52a8\u6001\u7801|\u4e00\u6b21\u6027"
-)
-_CONTEXT_OTP_RE = re.compile(
-    rf"(?:{_CONTEXT_WORDS})[^0-9]{{0,48}}(\d{{6}})",
+_CODE_CONTEXT_RE = re.compile(
+    r"\b(?:verification|verify|one[- ]time(?:[- ](?:password|code))?|otp|code|"
+    r"passcode|security[- ]code|confirmation(?:[- ]code)?|"
+    r"authentication[- ]code|auth[- ]code|pin)\b|"
+    r"\u9a8c\u8bc1\u7801|\u6821\u9a8c\u7801|\u52a8\u6001\u7801|"
+    r"\u5b89\u5168(?:\u7801|\u4ee3\u7801)|\u8ba4\u8bc1\u7801|"
+    r"\u786e\u8ba4\u7801|\u4e34\u65f6\u7801|"
+    r"\u4e00\u6b21\u6027(?:\u5bc6\u7801|\u4ee3\u7801|\u9a8c\u8bc1\u7801)?",
     re.IGNORECASE,
 )
-_REVERSE_CONTEXT_OTP_RE = re.compile(
-    rf"(\d{{6}})[^0-9]{{0,48}}(?:is your|{_CONTEXT_WORDS})",
-    re.IGNORECASE,
-)
+_CODE_CONTEXT_WINDOW = 80
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"', re.IGNORECASE)
 _UID_RE = re.compile(rb"\bUID (\d+)", re.IGNORECASE)
 _FETCH_SPECS = ("(UID INTERNALDATE BODY.PEEK[])", "(UID INTERNALDATE RFC822)")
@@ -69,6 +69,7 @@ class ImapConfig:
     username: str
     password: str
     folder: str = "INBOX"
+    junk_folder: str = ""
     proxy: str = ""
 
     def validate(self) -> None:
@@ -79,8 +80,10 @@ class ImapConfig:
             ("password", self.password),
             ("folder", self.folder),
         ):
-            if not value or "\r" in value or "\n" in value:
+            if not value or any(character in value for character in "\r\n\x00"):
                 raise ValueError(f"{name} is invalid")
+        if any(character in self.junk_folder for character in "\r\n\x00"):
+            raise ValueError("junk_folder is invalid")
         if self.forwarding_email.count("@") != 1:
             raise ValueError("forwarding_email is invalid")
         if not 1 <= int(self.port) <= 65535:
@@ -98,8 +101,15 @@ class ImapConfig:
             "username": self.username,
             "password": self.password,
             "folder": self.folder,
+            "junk_folder": self.junk_folder,
             "proxy": self.proxy,
         }
+
+    @property
+    def folders(self) -> tuple[str, ...]:
+        if self.junk_folder and self.junk_folder != self.folder:
+            return (self.folder, self.junk_folder)
+        return (self.folder,)
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ImapConfig:
@@ -111,6 +121,7 @@ class ImapConfig:
                 username=str(value["username"]).strip(),
                 password=str(value["password"]),
                 folder=str(value.get("folder") or "INBOX").strip(),
+                junk_folder=str(value.get("junk_folder") or "").strip(),
                 proxy=str(value.get("proxy") or "").strip(),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -167,13 +178,8 @@ class ImapOtpReader:
         deadline = self.monotonic() + bounded_timeout
         connection = self._login(bounded_timeout)
         try:
-            self._set_operation_timeout(connection, deadline)
-            try:
-                status, _ = connection.select(self.config.folder, readonly=True)
-            except Exception as exc:
-                raise ImapError("IMAP folder is unavailable") from exc
-            if str(status).upper() != "OK":
-                raise ImapError("IMAP folder is unavailable")
+            for folder in self.config.folders:
+                self._select_folder(connection, folder, deadline)
         finally:
             _logout(connection)
 
@@ -194,37 +200,53 @@ class ImapOtpReader:
         deadline = self.monotonic() + bounded_timeout
         connection = self._login(bounded_timeout)
         candidates: list[OtpResult] = []
+        last_folder_error: ImapError | None = None
         try:
-            self._set_operation_timeout(connection, deadline)
-            try:
-                status, _ = connection.select(self.config.folder, readonly=True)
-            except Exception as exc:
-                raise ImapError("IMAP folder is unavailable") from exc
-            if str(status).upper() != "OK":
-                raise ImapError("IMAP folder is unavailable")
-            uids = self._candidate_uids(connection, target, oldest, float(now_ts), deadline)
-            for uid, message, internal_timestamp in self._fetch_messages(
-                connection, uids, deadline
-            ):
-                if not _message_matches_alias(message, target):
-                    continue
-                if sender_filter and not _message_matches_sender(message, sender_filter):
-                    continue
-                timestamp = internal_timestamp
-                if timestamp is None:
-                    timestamp = _message_timestamp(message)
-                if timestamp is None or timestamp < oldest or timestamp > newest:
-                    continue
-                code = _extract_message_code(message)
-                if not code:
-                    continue
-                candidates.append(
-                    OtpResult(
-                        code=code,
-                        uid=uid,
-                        received_at=datetime.fromtimestamp(timestamp, tz=UTC),
+            folder_uids: list[tuple[str, list[str]]] = []
+            for folder in self.config.folders:
+                try:
+                    self._select_folder(connection, folder, deadline)
+                    uids = self._candidate_uids(
+                        connection,
+                        target,
+                        oldest,
+                        float(now_ts),
+                        deadline,
                     )
-                )
+                except ImapError as exc:
+                    last_folder_error = exc
+                    continue
+                folder_uids.append((folder, uids))
+            if not folder_uids:
+                raise last_folder_error or ImapError("IMAP folder is unavailable")
+
+            selected_folders, _truncated = _allocate_folder_uids(
+                folder_uids,
+                self.scan_limit,
+            )
+            completed_folders = 0
+            for folder, uids in selected_folders:
+                if not uids:
+                    completed_folders += 1
+                    continue
+                try:
+                    self._select_folder(connection, folder, deadline)
+                    folder_candidates = self._latest_results_from_uids(
+                        connection,
+                        uids=uids,
+                        target=target,
+                        oldest=oldest,
+                        newest=newest,
+                        sender_filter=sender_filter,
+                        deadline=deadline,
+                    )
+                except ImapError as exc:
+                    last_folder_error = exc
+                    continue
+                candidates.extend(folder_candidates)
+                completed_folders += 1
+            if completed_folders == 0:
+                raise last_folder_error or ImapError("IMAP folder is unavailable")
             if not candidates:
                 return None
             return max(candidates, key=lambda item: (item.received_at, _uid_sort_key(item.uid)))
@@ -253,44 +275,74 @@ class ImapOtpReader:
         deadline = self.monotonic() + bounded_timeout
         connection = self._login(bounded_timeout)
         candidates: list[RecentOtpResult] = []
+        last_folder_error: ImapError | None = None
         try:
-            self._set_operation_timeout(connection, deadline)
-            try:
-                status, _ = connection.select(self.config.folder, readonly=True)
-            except Exception as exc:
-                raise ImapError("IMAP folder is unavailable") from exc
-            if str(status).upper() != "OK":
-                raise ImapError("IMAP folder is unavailable")
-            window = list(self._window_terms(connection, oldest, float(now_ts) - oldest))
-            self._set_operation_timeout(connection, deadline)
-            status, data = self._search(connection, window)
-            if status is None or str(status).upper() != "OK":
-                raise ImapError("IMAP search failed")
-            matched = sorted(_uids_from_search(data), key=_uid_sort_key, reverse=True)
-            uids = matched[:bounded_scan]
-            truncated = len(matched) > len(uids)
-            for uid, message, internal_timestamp in self._fetch_messages(
-                connection, uids, deadline
-            ):
-                timestamp = internal_timestamp
-                if timestamp is None:
-                    timestamp = _message_timestamp(message)
-                if timestamp is None or timestamp < oldest or timestamp > newest:
+            folder_uids: list[tuple[str, list[str]]] = []
+            for folder in self.config.folders:
+                try:
+                    self._select_folder(connection, folder, deadline)
+                    window = list(
+                        self._window_terms(connection, oldest, float(now_ts) - oldest)
+                    )
+                    self._set_operation_timeout(connection, deadline)
+                    status, data = self._search(connection, window)
+                    if status is None or str(status).upper() != "OK":
+                        raise ImapError("IMAP search failed")
+                    uids = sorted(
+                        _uids_from_search(data),
+                        key=_uid_sort_key,
+                        reverse=True,
+                    )
+                except ImapError as exc:
+                    last_folder_error = exc
                     continue
-                code = _extract_message_code(message)
-                if not code:
+                folder_uids.append((folder, uids))
+            if not folder_uids:
+                raise last_folder_error or ImapError("IMAP folder is unavailable")
+
+            selected_folders, truncated = _allocate_folder_uids(folder_uids, bounded_scan)
+            scanned = 0
+            completed_folders = 0
+            for folder, uids in selected_folders:
+                if not uids:
+                    completed_folders += 1
                     continue
-                received_at = datetime.fromtimestamp(timestamp, tz=UTC)
-                for alias in targets:
-                    if _message_matches_alias(message, alias):
-                        candidates.append(
-                            RecentOtpResult(
-                                alias=alias,
-                                code=code,
-                                uid=uid,
-                                received_at=received_at,
-                            )
-                        )
+                folder_candidates: list[RecentOtpResult] = []
+                try:
+                    self._select_folder(connection, folder, deadline)
+                    for uid, message, internal_timestamp in self._fetch_messages(
+                        connection,
+                        uids,
+                        deadline,
+                    ):
+                        timestamp = internal_timestamp
+                        if timestamp is None:
+                            timestamp = _message_timestamp(message)
+                        if timestamp is None or timestamp < oldest or timestamp > newest:
+                            continue
+                        code = _extract_message_code(message)
+                        if not code:
+                            continue
+                        received_at = datetime.fromtimestamp(timestamp, tz=UTC)
+                        for alias in targets:
+                            if _message_matches_alias(message, alias):
+                                folder_candidates.append(
+                                    RecentOtpResult(
+                                        alias=alias,
+                                        code=code,
+                                        uid=uid,
+                                        received_at=received_at,
+                                    )
+                                )
+                except ImapError as exc:
+                    last_folder_error = exc
+                    continue
+                candidates.extend(folder_candidates)
+                scanned += len(uids)
+                completed_folders += 1
+            if completed_folders == 0:
+                raise last_folder_error or ImapError("IMAP folder is unavailable")
+
             candidates.sort(
                 key=lambda item: (item.received_at, _uid_sort_key(item.uid)),
                 reverse=True,
@@ -300,11 +352,58 @@ class ImapOtpReader:
                 candidates = candidates[:bounded_results]
             return RecentOtpBatch(
                 items=tuple(candidates),
-                scanned=len(uids),
+                scanned=scanned,
                 truncated=truncated,
             )
         finally:
             _logout(connection)
+
+    def _latest_results_from_uids(
+        self,
+        connection: Any,
+        *,
+        uids: Sequence[str],
+        target: str,
+        oldest: float,
+        newest: float,
+        sender_filter: str,
+        deadline: float,
+    ) -> list[OtpResult]:
+        candidates: list[OtpResult] = []
+        for uid, message, internal_timestamp in self._fetch_messages(
+            connection,
+            uids,
+            deadline,
+        ):
+            if not _message_matches_alias(message, target):
+                continue
+            if sender_filter and not _message_matches_sender(message, sender_filter):
+                continue
+            timestamp = internal_timestamp
+            if timestamp is None:
+                timestamp = _message_timestamp(message)
+            if timestamp is None or timestamp < oldest or timestamp > newest:
+                continue
+            code = _extract_message_code(message)
+            if not code:
+                continue
+            candidates.append(
+                OtpResult(
+                    code=code,
+                    uid=uid,
+                    received_at=datetime.fromtimestamp(timestamp, tz=UTC),
+                )
+            )
+        return candidates
+
+    def _select_folder(self, connection: Any, folder: str, deadline: float) -> None:
+        self._set_operation_timeout(connection, deadline)
+        try:
+            status, _ = connection.select(_mailbox_argument(folder), readonly=True)
+        except Exception as exc:
+            raise ImapError("IMAP folder is unavailable") from exc
+        if str(status).upper() != "OK":
+            raise ImapError("IMAP folder is unavailable")
 
     def _login(self, timeout: float) -> Any:
         try:
@@ -359,7 +458,7 @@ class ImapOtpReader:
                 raise ImapError("IMAP search failed")
             if str(status).upper() == "OK":
                 matched.update(_uids_from_search(data))
-        return sorted(matched, key=_uid_sort_key, reverse=True)[: self.scan_limit]
+        return sorted(matched, key=_uid_sort_key, reverse=True)
 
     @staticmethod
     def _window_terms(connection: Any, oldest: float, window_seconds: float) -> tuple[str, ...]:
@@ -436,6 +535,68 @@ def _normalize_email(value: str) -> str:
     return address
 
 
+def _encode_imap_mailbox(value: str) -> str:
+    encoded: list[str] = []
+    unicode_run: list[str] = []
+
+    def flush_unicode() -> None:
+        if not unicode_run:
+            return
+        raw = "".join(unicode_run).encode("utf-16be")
+        token = base64.b64encode(raw).decode("ascii").rstrip("=").replace("/", ",")
+        encoded.append(f"&{token}-")
+        unicode_run.clear()
+
+    for character in value:
+        if " " <= character <= "~":
+            flush_unicode()
+            encoded.append("&-" if character == "&" else character)
+        else:
+            unicode_run.append(character)
+    flush_unicode()
+    return "".join(encoded)
+
+
+def _mailbox_argument(value: str) -> str:
+    if not value or any(character in value for character in "\r\n\x00"):
+        raise ValueError("IMAP folder is invalid")
+    encoded = _encode_imap_mailbox(value)
+    if re.fullmatch(r"[A-Za-z0-9._/-]+", encoded):
+        return encoded
+    escaped = encoded.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _allocate_folder_uids(
+    folder_uids: Sequence[tuple[str, Sequence[str]]],
+    limit: int,
+) -> tuple[list[tuple[str, list[str]]], bool]:
+    selected = [[] for _folder, _uids in folder_uids]
+    positions = [0 for _folder, _uids in folder_uids]
+    remaining = max(0, int(limit))
+    while remaining:
+        progressed = False
+        for index, (_folder, uids) in enumerate(folder_uids):
+            if positions[index] >= len(uids):
+                continue
+            selected[index].append(str(uids[positions[index]]))
+            positions[index] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    truncated = any(
+        position < len(uids)
+        for position, (_folder, uids) in zip(positions, folder_uids, strict=True)
+    )
+    return [
+        (folder, selected[index])
+        for index, (folder, _uids) in enumerate(folder_uids)
+    ], truncated
+
+
 def _message_matches_alias(message: Message, alias: str) -> bool:
     target = _normalize_email(alias)
     values: list[str] = []
@@ -475,11 +636,24 @@ def _extract_message_code(message: Message) -> str:
     subject = str(message.get("Subject") or "")
     body = _message_body(message)
     text = f"{subject}\n{body}"
-    for pattern in (_CONTEXT_OTP_RE, _REVERSE_CONTEXT_OTP_RE, _OTP_RE):
-        match = pattern.search(text)
-        if match:
-            return match.group(1)
-    return ""
+    contexts = tuple(_CODE_CONTEXT_RE.finditer(text))
+    candidates: list[tuple[int, int, int, str]] = []
+    for match in _OTP_RE.finditer(text):
+        for context in contexts:
+            if context.end() <= match.start():
+                distance = match.start() - context.end()
+                direction = 0
+            elif match.end() <= context.start():
+                distance = context.start() - match.end()
+                direction = 1
+            else:
+                distance = 0
+                direction = 0
+            if distance <= _CODE_CONTEXT_WINDOW:
+                candidates.append((distance, direction, match.start(), match.group(1)))
+    if not candidates:
+        return ""
+    return min(candidates)[-1]
 
 
 def _message_body(message: Message) -> str:

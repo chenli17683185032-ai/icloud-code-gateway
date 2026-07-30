@@ -146,6 +146,7 @@ def _configure_imap(service: GatewayService, *, host: str = "imap.example.com") 
             "username": "forwarding@example.com",
             "password": "app-password",
             "folder": "INBOX",
+            "junk_folder": "Junk",
             "proxy": "",
         }
     )
@@ -408,6 +409,35 @@ def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, 
     assert f'datetime="{timestamp_iso}"' in response.text
     assert timestamp_display in response.text
     assert "data-local-time" not in response.text
+
+
+def test_admin_dashboard_round_trips_optional_junk_folder(client, settings, service) -> None:
+    csrf = _login(client, settings)
+
+    saved = client.post(
+        "/admin/imap",
+        data={
+            "csrf_token": csrf,
+            "forwarding_email": "forwarding@example.com",
+            "host": "imap.example.com",
+            "port": "993",
+            "username": "forwarding@example.com",
+            "password": "app-password",
+            "folder": "INBOX",
+            "junk_folder": "Junk",
+            "proxy": "",
+        },
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    assert saved.headers["location"] == "/admin?notice=imap_saved"
+
+    dashboard = client.get("/admin")
+
+    assert dashboard.status_code == 200
+    assert 'name="junk_folder"' in dashboard.text
+    assert 'value="Junk"' in dashboard.text
+    assert service.get_imap_config().junk_folder == "Junk"
 
 
 def test_admin_can_reveal_current_key_but_dashboard_never_embeds_it(
@@ -687,6 +717,7 @@ def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, 
             "username": "new@example.com",
             "password": "new-password",
             "folder": "INBOX",
+            "junk_folder": "Spam",
             "proxy": "",
         },
         follow_redirects=False,

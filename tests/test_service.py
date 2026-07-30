@@ -162,6 +162,7 @@ def configure_imap(value: GatewayService) -> ImapConfig:
             "username": "forwarding@example.com",
             "password": "app-password",
             "folder": "INBOX",
+            "junk_folder": "Junk",
             "proxy": "",
         }
     )
@@ -306,6 +307,7 @@ def test_imap_configuration_is_tested_before_it_replaces_the_saved_value(tmp_pat
     first = configure_imap(value)
 
     assert first.password == "app-password"
+    assert first.junk_folder == "Junk"
     assert len(FakeReader.checked) == 1
     preserved = value.configure_imap(
         {
@@ -315,12 +317,14 @@ def test_imap_configuration_is_tested_before_it_replaces_the_saved_value(tmp_pat
             "username": "forwarding@example.com",
             "password": "",
             "folder": "Archive",
+            "junk_folder": "Spam",
             "proxy": "",
         },
         test=False,
     )
     assert preserved.password == "app-password"
     assert preserved.folder == "Archive"
+    assert preserved.junk_folder == "Spam"
 
 
 def test_code_lookup_returns_only_code_and_timestamps(tmp_path) -> None:

@@ -20,7 +20,10 @@
 
 - 密钥与 Alias 一对一绑定；轮换后旧密钥立即失效。
 - 邮件收件人精确匹配 Alias，默认只接受当前时间前 300 秒至未来 60 秒的邮件。
+- 只返回验证码语境附近的独立 6 位数字；同一邮件有多个候选时选择语境距离最近者。
 - 以 IMAP `INTERNALDATE` 为主要时间依据，读取使用 `BODY.PEEK[]`，不把邮件标为已读。
+- 可选只读扫描一个垃圾邮件文件夹；主文件夹与垃圾邮件文件夹共用一次登录和总超时，
+  跨文件夹返回收件时间最新的验证码，管理员批量扫描仍保持 500 封总上限。
 - OTP 和邮件正文不持久化；新签发的完整访问密钥使用环境主密钥进行 AES-GCM 加密保存，并继续以 SHA-256 哈希校验公开查询。
 - Apple Session、IMAP 密码、Alias 远端 ID 和可恢复访问密钥密文均绑定用途加密；管理页初始 HTML 不包含完整密钥，只有显式查看动作才解密返回。
 - HME Session 保存后自动导入完整远端 Alias 快照；重复刷新按邮箱幂等对账并保留本地标签、过滤条件和有效密钥。
@@ -73,7 +76,8 @@ docker compose ps
 1. 使用管理员密码登录。
 2. 点击“打开 iCloud 浏览器”，输入独立的 VNC 密码，在同一个长期 Chromium 中人工登录 iCloud。
 3. 点击“开始捕获”，在 iCloud+ 隐藏邮件页面触发一次真实 HME list 请求。
-4. 配置转发邮箱 IMAP 和 App 专用密码并执行只读测试。
+4. 配置转发邮箱 IMAP 和 App 专用密码；如需覆盖垃圾邮件，填写服务端显示的准确文件夹
+   名称。保存动作会只读测试所有已配置文件夹。
 5. Session 捕获成功后会自动导入已有 Alias；也可点击“导入 / 刷新”重新对账，随后为需要使用的活动 Alias 签发访问密钥。新签发/轮换的密钥可由管理员随时显式查看和复制；升级前只有哈希的旧密钥需先轮换。
 6. 在“验证码”栏目手动读取全部 Alias 最近 5 分钟的验证码；该操作不要求 Alias 已配置访问密钥，也不会保存验证码。
 7. 在“查询记录”查看哪些 Alias 被公开查询、查询结果、脱敏来源指纹和北京时间；已删除 Alias 的既有记录仍保留当时邮箱快照。
@@ -84,7 +88,7 @@ docker compose ps
 
 ```bash
 uv sync --extra dev
-uv run pytest
+PYTHONPATH=. uv run pytest
 uv run ruff check .
 uv run python -m compileall -q icloud_gateway tests
 ```
@@ -92,6 +96,10 @@ uv run python -m compileall -q icloud_gateway tests
 完整部署、在线维护、代理验证、备份、恢复和回滚流程见 [OPERATIONS.md](OPERATIONS.md)。工程目标、控制闭环和逐节点验收记录见 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
 德国云贝服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app/browser 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用联动小铺的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
+
+本次 IMAP 文件夹编码实现参考了 MIT 许可的
+[IC-VeilMail](https://github.com/Redmig110/ic-veilmail)。完整归属与许可文本见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 明确不做
 

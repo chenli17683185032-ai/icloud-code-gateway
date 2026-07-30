@@ -384,6 +384,7 @@ def create_app(
                     "username": form.get("username"),
                     "password": form.get("password"),
                     "folder": form.get("folder"),
+                    "junk_folder": form.get("junk_folder"),
                     "proxy": form.get("proxy"),
                     "clear_proxy": form.get("clear_proxy") == "on",
                 },
