@@ -950,7 +950,7 @@ Browser runtime
 - [x] 确认本地 `main`、GitHub `main` 和功能提交存在，工作树在计划编辑前干净。
 - [x] 定位云贝唯一 SSH 密钥和连接手册，不读取或回显私钥内容。
 - [x] 本节部署计划已由提交 `dbda19c` 推送到 GitHub `main`。
-- [ ] 只读采集生产部署标记、源码/镜像、容器健康/restart/OOM、磁盘、时间同步、
+- [x] 只读采集生产部署标记、源码/镜像、容器健康/restart/OOM、磁盘、时间同步、
   `.env` 权限、SQLite 完整性与脱敏计数、内外 health 基线。
 
 停止条件：SSH 主机身份不匹配、`.env` 权限不是 `0600`、SQLite 非 `ok`、磁盘不足、
@@ -958,12 +958,13 @@ Browser runtime
 
 #### 节点 Q：备份与隔离候选
 
-- [ ] 创建权限 `0700` 的时间戳审计目录，在线备份 SQLite 并验证 `quick_check=ok`。
-- [ ] 保存部署前源码、Compose/部署标记、容器/镜像/数据计数元数据及 SHA-256 清单；
+- [x] 创建权限 `0700` 的时间戳审计目录，在线备份 SQLite 并验证 `quick_check=ok`。
+- [x] 保存部署前源码、Compose/部署标记、容器/镜像/数据计数元数据及 SHA-256 清单；
   `.env` 不复制、不输出，正式卷不删除。
-- [ ] 给当前 app 镜像增加唯一 `rollback-pre-46c8bbb-<timestamp>` 标签。
-- [ ] 从 Git 功能提交清单同步精确源码，不覆盖 `.env`、备份或持久数据；旧 app 保持在线。
-- [ ] 构建唯一候选镜像，在独立临时卷/容器中验证启动、Host-aware `/healthz`、SQLite
+- [x] 给当前 app 镜像增加唯一 `rollback-pre-46c8bbb-<timestamp>` 标签。
+- [x] 从 Git 功能提交清单上传精确源码归档，不覆盖 `.env`、备份或持久数据；旧 app
+  保持在线，正式源码在切换成功后才同步。
+- [x] 构建唯一候选镜像，在独立临时卷/容器中验证启动、Host-aware `/healthz`、SQLite
   `quick_check`、旧 IMAP 配置兼容、管理页 Junk 字段及秘密不外泄。
 
 停止条件：备份或清单失败、候选镜像无法唯一标识、候选启动/兼容断言失败、日志或页面
@@ -971,24 +972,24 @@ Browser runtime
 
 #### 节点 R：有界切换与自动回滚
 
-- [ ] 启动不依赖当前 SSH 会话的 60 秒 watchdog；其失败路径把 Compose app 镜像恢复为
+- [x] 启动不依赖当前 SSH 会话的 60 秒 watchdog；其失败路径把 Compose app 镜像恢复为
   rollback 标签并只 force-recreate app。
-- [ ] 将候选固定到 Compose app 镜像标签，只执行
+- [x] 将候选固定到 Compose app 镜像标签，只执行
   `docker compose up -d --no-deps --force-recreate app`，记录切换起止和 250ms 公网采样。
-- [ ] 在 60 秒内确认 app healthy、内部 Host-aware `/healthz` 和公网 `/healthz` 为 200，
+- [x] 在 60 秒内确认 app healthy、内部 Host-aware `/healthz` 和公网 `/healthz` 为 200，
   随后写成功信号终止 watchdog；任何一项失败都不得等待人工操作。
-- [ ] 若触发回滚，确认旧镜像、数据库和公网健康恢复，并停止本轮上线，不继续扩大变更。
+- [x] 未触发回滚；watchdog 接受成功信号并退出，旧镜像继续由唯一 rollback 标签保留。
 
 #### 节点 S：生产验收、记录与清理
 
-- [ ] 确认公网健康、首页、管理员登录页、响应安全头、部署标记和运行镜像。
-- [ ] 复验 SQLite `quick_check=ok`、数据计数/脱敏指纹守恒；确认旧 IMAP 配置仍可加载，
+- [x] 确认公网健康、首页、管理员登录页、响应安全头、部署标记和运行镜像。
+- [x] 复验 SQLite `quick_check=ok`、数据计数/脱敏指纹守恒；确认旧 IMAP 配置仍可加载，
   管理页面出现 Junk 字段且没有秘密出现在 HTML 或 app 日志。
-- [ ] 对比 browser、cn-proxy、Caddy 的容器 ID/restart/OOM，证明只有 app 被替换。
-- [ ] 固定 `release-46c8bbb` 与回滚标签，生成并复验最终 SHA-256 清单。
-- [ ] 清理候选容器/卷/标签、一次性脚本和部署锁；保留正式 release、唯一 rollback 和审计
+- [x] 对比 browser、cn-proxy、Caddy 的容器 ID/restart/OOM，证明只有 app 被替换。
+- [x] 固定 `release-46c8bbb` 与回滚标签，生成并复验最终 SHA-256 清单。
+- [x] 清理候选容器/卷/标签、一次性脚本和部署锁；保留正式 release、唯一 rollback 和审计
   目录，复验正式服务不受清理影响。
-- [ ] 把实际镜像、停机时长、健康/数据结果和回滚位置写回本节、`OPERATIONS.md` 与云贝
+- [x] 把实际镜像、停机时长、健康/数据结果和回滚位置写回本节、`OPERATIONS.md` 与云贝
   唯一连接手册；提交并推送 GitHub `main`，本地工作树恢复干净。
 
 ### 19.4 回滚与不确定性
@@ -1008,3 +1009,38 @@ Browser runtime
 
 - 2026-07-31：用户已明确授权直接部署生产。部署计划建立时，本地和 GitHub `main` 均为
   `e1c84b8`，目标功能提交为 `46c8bbb`，服务器尚未连接或修改；当前进入节点 P。
+- 2026-07-31：节点 P 通过。计划提交 `dbda19c` 和 SHA 校正提交 `fcb77a8` 已推送
+  `main`；生产标记为 `312e8ba`，69 个跟踪文件聚合 SHA-256 与该 Git 对象完全一致。
+  `.env=0600`，NTP 已同步，根卷可用 45GB；app/browser/cn-proxy/Caddy 均为
+  `healthy / restart=0 / OOM=false`，内部及服务器/本机公网探针均为 200，近 30 分钟 app
+  错误日志为 0。SQLite `quick_check=ok`，基线为 159 个 Alias（148 活动、11 失活）、
+  41 个 key hash、37 个可查看 key 密文、262 条审计和 2 条设置；当前进入节点 Q。
+- 2026-07-31：节点 Q 通过。审计目录为
+  `/opt/new-api/icloud-code-gateway/backups/imap-junk-20260730T161519Z-46c8bbb`，SQLite
+  在线备份为 `quick_check=ok`；旧镜像固定为
+  `rollback-pre-46c8bbb-20260730T161519Z`。目标 Git 归档 SHA-256 为
+  `679ded7d570c2636cf2dc7fd6da2bf94f615307ebae1738715208986e93bc5f4`，70 个文件构建
+  的候选镜像为 `sha256:eb34a40827f3a046f430a4e150b7ef43be165135da41fc68cccd3ab50b14daa3`。
+  隔离候选 7 秒 healthy，旧 IMAP 配置成功加载且 Junk 默认为空；SQLite、Alias/key
+  计数和聚合指纹保持，管理页 Junk 字段存在，HTML/日志秘密命中为 0。生产 app 全程仍
+  为原容器和原镜像且 healthy，当前进入节点 R。
+- 2026-07-31：节点 R 通过。独立 watchdog 在切换前启动；只对 app 执行 force-recreate，
+  新容器 `783385aad7d3dc0c62fa1694b57c222d71c98fedb068677369cc251cb1d05767`
+  使用候选镜像，`19.121` 秒内完成 healthy、内部 Host-aware health、公网 health、源码清单
+  和部署标记闭环，watchdog 返回 `accepted` 且未回滚。250ms 本机采样器因其持久 TLS
+  连接被 Cloudflare 全程 reset 而无效，不作为停机证据；切换控制窗口 `19.121` 秒作为
+  公网不可用的保守上界，后续独立本机 10 次探针及服务器复验均为 200。
+- 2026-07-31：节点 S 生产验收通过。镜像 revision、服务器标记和 70 文件源码均为真实
+  Git 对象 `46c8bbb1515936119314cf899eaca6ad0b016255`；SQLite `quick_check=ok`，159 个
+  Alias（148 活动、11 失活）、41 个 key hash、37 个 key 密文、262 条审计和设置形状
+  全部守恒。旧 IMAP 配置加载且 Junk 默认为空，安装模板包含 Junk 字段，日志秘密/严重
+  错误命中为 0；browser、cn-proxy、Caddy 的 ID、restart 和 OOM 状态均未改变。当前只待
+  候选清理、最终清单和三处运维记录收口。
+- 2026-07-31：节点 S 收口完成。新镜像固定为 `latest/prod/release-46c8bbb`，旧镜像
+  `sha256:d2963e4f4330deab82d004927d88d13eb68581b645d4341bb8f535dc21ec1461`
+  只保留 `rollback-pre-46c8bbb-20260730T161519Z`。候选容器、卷、候选/旧 release 标签、
+  解压源码、一次性 watchdog 和部署锁均已清理；清理后内外 health、SQLite 和四容器状态
+  复验通过，根卷可用 45GB。审计目录保留 34 个权限受限文件，最终清单 SHA-256 为
+  `6f160aaf1d89d69257153b1c485ebcb6f27e18bee4c4ae8a387bba8d42bcda57`，清单内文件全部
+  复验通过。本计划、`OPERATIONS.md` 和云贝唯一连接手册已同步，最终记录提交推送
+  GitHub `main` 后本轮闭环完成。
