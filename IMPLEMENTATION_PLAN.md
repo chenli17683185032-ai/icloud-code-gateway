@@ -887,7 +887,7 @@ Browser runtime
   TestClient/httpx 弃用提示。管理页在 `1440x900`、`390x844` 和 `360x800` 复验，新增
   Junk 字段可见且与提交按钮无重叠，无横向溢出、文字裁切、控件重叠或浏览器告警；
   当前只待提交并推送 GitHub `main`。
-- 2026-07-30：功能提交 `46c8bbb3bdcae3693a0a0eb90ed7780a66d951cc` 已直接推送
+- 2026-07-30：功能提交 `46c8bbb1515936119314cf899eaca6ad0b016255` 已直接推送
   GitHub `main`；本次未访问生产服务器、真实 Apple/IMAP 或任何远程写接口，节点 M
   完成。本记录随独立收口提交推送，不改变功能提交内容。
 
@@ -896,7 +896,7 @@ Browser runtime
 ### 19.1 目标与性能指标
 
 把已经通过本地门禁的功能提交
-`46c8bbb3bdcae3693a0a0eb90ed7780a66d951cc` 部署到
+`46c8bbb1515936119314cf899eaca6ad0b016255` 部署到
 `icloud.yunbay.xyz`，使生产 IMAP 读取具备严格验证码语境判定和可选 Junk 文件夹支持。
 本轮只替换 `app`，不改变 browser、cn-proxy、共享 Caddy、网络、正式数据卷或 Apple
 远端状态。
@@ -949,7 +949,7 @@ Browser runtime
 
 - [x] 确认本地 `main`、GitHub `main` 和功能提交存在，工作树在计划编辑前干净。
 - [x] 定位云贝唯一 SSH 密钥和连接手册，不读取或回显私钥内容。
-- [ ] 推送本节部署计划到 GitHub `main`。
+- [x] 本节部署计划已由提交 `dbda19c` 推送到 GitHub `main`。
 - [ ] 只读采集生产部署标记、源码/镜像、容器健康/restart/OOM、磁盘、时间同步、
   `.env` 权限、SQLite 完整性与脱敏计数、内外 health 基线。
 
