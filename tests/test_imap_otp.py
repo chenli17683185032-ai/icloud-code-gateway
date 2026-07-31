@@ -427,6 +427,32 @@ def test_reader_accepts_chinese_and_html_verification_context(body: str, code: s
     assert result.code == code
 
 
+def test_reader_ignores_html_layout_whitespace_when_scoring_context() -> None:
+    layout_gap = "\n" + ((" " * 40) + "\n") * 5
+    body = (
+        "<table><tr><td>Your verification code</td></tr>"
+        f"{layout_gap}<tr><td>666666</td></tr></table>"
+    )
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="666666",
+                    subject="Sign-in notice",
+                    body=body,
+                    html=True,
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == "666666"
+
+
 def test_old_imap_configuration_defaults_to_one_folder() -> None:
     values = config().as_secret_dict()
     values.pop("junk_folder")
@@ -448,12 +474,8 @@ def test_imap_configuration_rejects_invalid_junk_folder() -> None:
 def test_reader_returns_latest_code_across_primary_and_junk_folders() -> None:
     connection = FakeImap(
         folders={
-            "INBOX": {
-                "10": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 20)
-            },
-            "Junk": {
-                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 2)
-            },
+            "INBOX": {"10": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 20)},
+            "Junk": {"2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 2)},
         }
     )
     value = ImapOtpReader(
@@ -514,12 +536,8 @@ def test_recent_codes_degrade_when_one_folder_is_unavailable(
 ) -> None:
     connection = FakeImap(
         folders={
-            "INBOX": {
-                "1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)
-            },
-            "Junk": {
-                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)
-            },
+            "INBOX": {"1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)},
+            "Junk": {"2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)},
         },
         unavailable_folders=unavailable,
     )
@@ -542,12 +560,8 @@ def test_reader_degrades_when_one_configured_folder_is_unavailable(
 ) -> None:
     connection = FakeImap(
         folders={
-            "INBOX": {
-                "1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)
-            },
-            "Junk": {
-                "2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)
-            },
+            "INBOX": {"1": (raw_message(recipient="target@icloud.com", code="101010"), NOW - 2)},
+            "Junk": {"2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 1)},
         },
         unavailable_folders=unavailable,
     )

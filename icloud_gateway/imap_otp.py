@@ -281,9 +281,7 @@ class ImapOtpReader:
             for folder in self.config.folders:
                 try:
                     self._select_folder(connection, folder, deadline)
-                    window = list(
-                        self._window_terms(connection, oldest, float(now_ts) - oldest)
-                    )
+                    window = list(self._window_terms(connection, oldest, float(now_ts) - oldest))
                     self._set_operation_timeout(connection, deadline)
                     status, data = self._search(connection, window)
                     if status is None or str(status).upper() != "OK":
@@ -592,8 +590,7 @@ def _allocate_folder_uids(
         for position, (_folder, uids) in zip(positions, folder_uids, strict=True)
     )
     return [
-        (folder, selected[index])
-        for index, (folder, _uids) in enumerate(folder_uids)
+        (folder, selected[index]) for index, (folder, _uids) in enumerate(folder_uids)
     ], truncated
 
 
@@ -635,7 +632,7 @@ def _message_matches_sender(message: Message, sender_filter: str) -> bool:
 def _extract_message_code(message: Message) -> str:
     subject = str(message.get("Subject") or "")
     body = _message_body(message)
-    text = f"{subject}\n{body}"
+    text = re.sub(r"\s+", " ", f"{subject}\n{body}")
     contexts = tuple(_CODE_CONTEXT_RE.finditer(text))
     candidates: list[tuple[int, int, int, str]] = []
     for match in _OTP_RE.finditer(text):
