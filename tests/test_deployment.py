@@ -51,6 +51,23 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "header_up X-Forwarded-For" not in caddy_site
 
 
+def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
+    root = Path(__file__).resolve().parents[1]
+    base = (root / "docker-compose.yml").read_text()
+    server = (root / "docker-compose.server.yml").read_text()
+    expected = {
+        "ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS": "21600",
+        "ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS": "3600",
+        "ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS": "3600",
+        "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT": "50",
+    }
+
+    for name, default in expected.items():
+        interpolation = f"{name}: ${{{name}:-{default}}}"
+        assert interpolation in base
+        assert interpolation in server
+
+
 def test_proxy_defaults_fail_closed_and_build_context_excludes_secrets() -> None:
     root = Path(__file__).resolve().parents[1]
     compose = (root / "docker-compose.yml").read_text()

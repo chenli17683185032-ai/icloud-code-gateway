@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -667,11 +670,28 @@ def test_partial_alias_batch_returns_already_created_keys(client, settings, serv
         headers={"X-CSRF-Token": csrf},
     )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "partial"
-    assert len(response.json()["created"]) == 1
-    assert response.json()["created"][0]["email"] == "one@icloud.com"
-    assert response.json()["created"][0]["access_key"].startswith("icg_")
+    assert response.status_code == 202
+    assert response.headers["cache-control"] == "no-store"
+    job_id = response.json()["job_id"]
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        status = client.get(f"/admin/api/jobs/{job_id}")
+        if status.json()["status"] in {"partial", "failed", "needs_reconcile"}:
+            break
+        time.sleep(0.01)
+    assert status.json()["status"] == "needs_reconcile"
+    assert status.json()["succeeded"] == 1
+    assert status.json()["results"][0]["email"] == "one@icloud.com"
+    assert "access_key" not in status.text
+    missing_csrf = client.post(f"/admin/api/jobs/{job_id}/results")
+    assert missing_csrf.status_code == 403
+    revealed = client.post(
+        f"/admin/api/jobs/{job_id}/results",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert revealed.status_code == 200
+    assert revealed.headers["cache-control"] == "no-store"
+    assert revealed.json()["results"][0]["access_key"].startswith("icg_")
 
 
 def test_bulk_alias_api_authentication_validation_and_mixed_results(
@@ -707,17 +727,86 @@ def test_bulk_alias_api_authentication_validation_and_mixed_results(
         },
         headers={"X-CSRF-Token": csrf},
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.headers["cache-control"] == "no-store"
-    payload = response.json()
+    job_id = response.json()["job_id"]
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        payload = client.get(f"/admin/api/jobs/{job_id}").json()
+        if payload["status"] in {"completed", "partial", "failed"}:
+            break
+        time.sleep(0.01)
     assert payload["requested"] == 3
     assert payload["succeeded"] == 1
     assert payload["failed"] == 2
     assert [item["status"] for item in payload["results"]] == [
         "success",
+        "failed",
+        "failed",
+    ]
+    assert [item.get("error") for item in service.database.get_batch_job(job_id)["items"]] == [
+        None,
         "conflict",
         "not_found",
     ]
+
+
+def test_dashboard_exports_effective_alias_batch_limit(client, settings, service) -> None:
+    _login(client, settings)
+    response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert '<meta name="alias-batch-limit" content="50">' in response.text
+    assert 'data-alias-batch-limit="50"' in response.text
+
+
+def test_bulk_alias_api_enforces_configured_limit(client, settings, service) -> None:
+    csrf = _login(client, settings)
+    response = client.post(
+        "/admin/api/aliases/bulk",
+        json={"action": "issue_keys", "alias_ids": [f"alias-{index}" for index in range(51)]},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 422
+
+
+def test_batch_job_api_idempotency_conflict_and_poll_csrf_no_store(
+    client, settings, service
+) -> None:
+    service.save_hme_session(_hme_session())
+    FakeHmeClient.created = [
+        {"hme": "queued@icloud.com", "anonymousId": "queued", "isActive": True}
+    ]
+    csrf = _login(client, settings)
+    payload = {"count": 1, "label_prefix": "Queued"}
+    first = client.post(
+        "/admin/api/aliases",
+        json=payload,
+        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "request-1"},
+    )
+    repeated = client.post(
+        "/admin/api/aliases",
+        json=payload,
+        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "request-1"},
+    )
+    conflict = client.post(
+        "/admin/api/aliases",
+        json={"count": 1, "label_prefix": "Different"},
+        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "request-1"},
+    )
+    missing_csrf = client.post(
+        "/admin/api/aliases", json={"count": 1, "label_prefix": "Forbidden"}
+    )
+
+    assert first.status_code == repeated.status_code == 202
+    assert first.json()["job_id"] == repeated.json()["job_id"]
+    assert conflict.status_code == 409
+    assert missing_csrf.status_code == 403
+    polled = client.get(f"/admin/api/jobs/{first.json()['job_id']}")
+    assert polled.status_code == 200
+    assert polled.headers["cache-control"] == "no-store"
+    assert "Idempotency-Key" not in str(service.database.get_batch_job(first.json()["job_id"]))
 
 
 def test_create_alias_api_enforces_configured_and_hard_limits(client, settings, service) -> None:
@@ -910,7 +999,7 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     ).read_text()
 
     assert "class AuthenticationRequiredError extends Error" in script
-    assert script.count("instanceof AuthenticationRequiredError") == 9
+    assert script.count("instanceof AuthenticationRequiredError") >= 9
     assert "邮箱账号：${item.email}；解码网站：${url}；接码密钥：${item.access_key}" in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script
@@ -921,6 +1010,27 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert 'querySelector("#delete-alias-form")' in script
     assert "response.status === 401 || response.status === 403" in script
     assert 'window.location.assign("/admin/login")' in script
+    assert 'meta[name="alias-batch-limit"]' in script
+    assert "alreadySelected" in script
+    assert "aliasIds.length > aliasBatchLimit" in script
+    assert "单次最多选择 ${aliasBatchLimit} 项" in script
+
+
+def test_admin_script_computes_remaining_selection_budget() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "icloud_gateway" / "static" / "admin.js"
+    harness = """
+const noop = () => {};
+global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
+global.window = {location: {origin: "https://example.test"}, addEventListener: noop};
+const {limitedVisibleSelectionCount} = require(process.argv[1]);
+if (limitedVisibleSelectionCount(0, 159, 50) !== 50) process.exit(1);
+if (limitedVisibleSelectionCount(48, 20, 50) !== 2) process.exit(2);
+if (limitedVisibleSelectionCount(50, 20, 50) !== 0) process.exit(3);
+"""
+    subprocess.run([node, "-e", harness, str(script)], check=True)
 
 
 def test_every_template_icon_exists() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -25,6 +26,7 @@ from .config import Settings
 from .database import ConflictError, DatabaseError, NotFoundError
 from .hme import HmeError, HmeSessionError
 from .imap_otp import ImapCredentialsError, ImapError
+from .jobs import BatchJobManager
 from .security import (
     AdminSession,
     AdminSessionCodec,
@@ -182,6 +184,7 @@ def create_app(
     service: GatewayService | None = None,
 ) -> FastAPI:
     gateway = service or GatewayService(settings)
+    jobs = BatchJobManager(gateway)
     session_codec = AdminSessionCodec(
         settings.master_key, lifetime_seconds=settings.admin_session_seconds
     )
@@ -190,10 +193,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         gateway.database.purge_old_audit_events(days=7)
+        jobs.start()
         try:
             yield
         finally:
-            gateway.shutdown()
+            deadline = time.monotonic() + 10.0
+            jobs_stopped = jobs.shutdown(timeout=max(0.0, deadline - time.monotonic()))
+            if jobs_stopped:
+                gateway.shutdown(timeout=max(0.0, deadline - time.monotonic()))
 
     app = FastAPI(
         title="iCloud Code Gateway",
@@ -203,6 +210,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.gateway = gateway
+    app.state.jobs = jobs
     app.state.settings = settings
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
@@ -463,82 +471,88 @@ def create_app(
             return _redirect_notice("sync_error")
         return _redirect_notice("sync_done")
 
+    def _idempotency_key(request: Request) -> str | None:
+        value = request.headers.get("Idempotency-Key")
+        if value is not None and (not value.strip() or len(value) > 200):
+            raise ValueError("idempotency key is invalid")
+        return value
+
     @app.post("/admin/api/aliases")
     async def create_aliases(request: Request, payload: CreateAliasesRequest):
         _require_admin_json(request, session_codec)
-        if payload.count > settings.alias_batch_limit:
-            return JSONResponse({"status": "invalid_request"}, status_code=422)
         try:
-            batch = await asyncio.to_thread(
-                gateway.create_aliases,
+            job, created = jobs.create_alias_job(
                 count=payload.count,
                 label_prefix=payload.label_prefix,
                 note=payload.note,
                 sender_filter=payload.sender_filter,
+                idempotency_key=_idempotency_key(request),
             )
+        except ConflictError:
+            return JSONResponse({"status": "idempotency_conflict"}, status_code=409)
         except ValueError:
             return JSONResponse({"status": "invalid_request"}, status_code=422)
-        except (GatewayError, HmeError, HmeSessionError, DatabaseError):
-            return JSONResponse({"status": "error"}, status_code=502)
-        return {
-            "status": "partial" if batch.error_code else "created",
-            "requested": batch.requested_count,
-            "succeeded": batch.succeeded_count,
-            "failed": batch.failed_count,
-            "results": [
-                {
-                    "index": item.index,
-                    "status": item.status,
-                    **(
-                        {
-                            "id": item.alias["id"],
-                            "email": item.alias["email"],
-                            "label": item.alias["label"],
-                            "access_key": item.access_key,
-                        }
-                        if item.alias is not None
-                        else {}
-                    ),
-                }
-                for item in batch.results
-            ],
-            "created": [
-                {
-                    "id": item.alias["id"],
-                    "email": item.alias["email"],
-                    "label": item.alias["label"],
-                    "access_key": item.issued_key.access_key,
-                }
-                for item in batch.created
-            ],
-            "public_url": settings.public_base_url,
-        }
+        return JSONResponse(
+            {
+                "status": "queued" if created else job["status"],
+                "job_id": job["id"],
+                "requested": job["requested"],
+            },
+            status_code=202,
+            headers={"Location": f"/admin/api/jobs/{job['id']}"},
+        )
 
     @app.post("/admin/api/aliases/bulk")
     async def bulk_aliases(request: Request, payload: BulkAliasesRequest):
         _require_admin_json(request, session_codec)
-        if len(set(payload.alias_ids)) != len(payload.alias_ids):
-            return JSONResponse({"status": "invalid_request"}, status_code=422)
-        if payload.action in {"deactivate", "delete"} and not payload.confirmed:
+        if len(payload.alias_ids) > settings.alias_batch_limit:
             return JSONResponse({"status": "invalid_request"}, status_code=422)
         try:
-            batch = await asyncio.to_thread(
-                gateway.bulk_alias_action,
+            job, created = jobs.create_bulk_job(
                 action=payload.action,
                 alias_ids=payload.alias_ids,
                 confirmed=payload.confirmed,
+                idempotency_key=_idempotency_key(request),
             )
+        except ConflictError:
+            return JSONResponse({"status": "idempotency_conflict"}, status_code=409)
         except ValueError:
             return JSONResponse({"status": "invalid_request"}, status_code=422)
-        return {
-            "status": "ok" if batch.failed_count == 0 else "partial",
-            "action": payload.action,
-            "requested": batch.requested_count,
-            "succeeded": batch.succeeded_count,
-            "failed": batch.failed_count,
-            "results": list(batch.results),
-            "public_url": settings.public_base_url,
-        }
+        return JSONResponse(
+            {
+                "status": "queued" if created else job["status"],
+                "job_id": job["id"],
+                "requested": job["requested"],
+            },
+            status_code=202,
+            headers={"Location": f"/admin/api/jobs/{job['id']}"},
+        )
+
+    @app.get("/admin/api/jobs")
+    async def active_batch_jobs(request: Request):
+        if _admin_session(request, session_codec) is None:
+            raise HTTPException(status_code=401, detail="admin authentication required")
+        return {"jobs": jobs.active_jobs()}
+
+    @app.get("/admin/api/jobs/{job_id}")
+    async def batch_job_status(job_id: str, request: Request):
+        if _admin_session(request, session_codec) is None:
+            raise HTTPException(status_code=401, detail="admin authentication required")
+        try:
+            return jobs.public_job(job_id, reveal_keys=False)
+        except NotFoundError:
+            return JSONResponse({"status": "not_found"}, status_code=404)
+
+    @app.post("/admin/api/jobs/{job_id}/results")
+    async def batch_job_results(job_id: str, request: Request):
+        _require_admin_json(request, session_codec)
+        try:
+            job = jobs.public_job(job_id, reveal_keys=True)
+        except NotFoundError:
+            return JSONResponse({"status": "not_found"}, status_code=404)
+        if job["status"] not in {"completed", "partial", "failed", "needs_reconcile", "cancelled"}:
+            return JSONResponse({"status": "conflict"}, status_code=409)
+        return job
 
     @app.post("/admin/api/aliases/{alias_id}/key")
     async def issue_alias_key(alias_id: str, request: Request):

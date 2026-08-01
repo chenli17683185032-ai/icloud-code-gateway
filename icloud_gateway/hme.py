@@ -428,13 +428,12 @@ def validate_icloud_setup_session(
     sleeper: Sleeper = time.sleep,
     jitter: Jitter = random.random,
     setup_url: str | None = None,
+    stop_event: Any = None,
 ) -> ICloudHmeSession:
     """Run Apple's idempotent setup validate and return a rotated immutable session."""
     _validate_session(session)
-    _, cookies = _cookie_pairs(session.cookie)
-    token = cookies.get("X-APPLE-DS-WEB-SESSION-TOKEN", "").strip()
-    if not token:
-        raise HmeSessionError("iCloud HME session cannot be validated")
+    if stop_event is not None and stop_event.is_set():
+        raise HmeNetworkError("iCloud setup validate was cancelled")
     host = "setup.icloud.com.cn" if session.host.endswith(".icloud.com.cn") else "setup.icloud.com"
     endpoint = _validated_setup_url(setup_url or f"https://{host}{_SETUP_VALIDATE_PATH}")
     query = urllib.parse.urlencode(
@@ -468,7 +467,7 @@ def validate_icloud_setup_session(
                     "POST",
                     f"{endpoint}?{query}",
                     headers=headers,
-                    data=json.dumps({"dsWebAuthToken": token}, separators=(",", ":")),
+                    data="null",
                     proxies=proxies,
                     timeout=max(1.0, min(float(timeout), 60.0)),
                     allow_redirects=False,
@@ -478,7 +477,11 @@ def validate_icloud_setup_session(
                 if attempt + 1 >= bounded_attempts:
                     raise HmeNetworkError("iCloud setup validate network request failed") from exc
                 delay = min(8.0, 0.5 * (2**attempt)) + max(0.0, min(float(jitter()), 1.0)) * 0.25
-                sleeper(delay)
+                if stop_event is not None:
+                    if stop_event.wait(delay):
+                        raise HmeNetworkError("iCloud setup validate was cancelled") from exc
+                else:
+                    sleeper(delay)
         status_code = int(getattr(response, "status_code", 0) or 0)
         if status_code in {401, 403, 421}:
             raise HmeSessionError("iCloud setup validate rejected the session")

@@ -5,6 +5,14 @@
   const configuredPublicUrl =
     document.querySelector('meta[name="public-base-url"]')?.content || "";
   const publicUrl = configuredPublicUrl || window.location.origin;
+  const configuredAliasBatchLimit = Number.parseInt(
+    document.querySelector('meta[name="alias-batch-limit"]')?.content || "",
+    10,
+  );
+  const aliasBatchLimit =
+    Number.isSafeInteger(configuredAliasBatchLimit) && configuredAliasBatchLimit > 0
+      ? configuredAliasBatchLimit
+      : 50;
   const modal = document.querySelector("#key-modal");
   const modalMessage = document.querySelector("#key-modal-message");
   const issuedList = document.querySelector("#issued-key-list");
@@ -171,6 +179,42 @@
   const createForm = document.querySelector("#create-alias-form");
   const createButton = document.querySelector("#create-submit");
   const createMessage = document.querySelector("#create-message");
+  const terminalJobStatuses = new Set([
+    "completed",
+    "partial",
+    "failed",
+    "needs_reconcile",
+    "cancelled",
+  ]);
+
+  async function pollJob(jobId, messageElement) {
+    while (true) {
+      const job = await api(`/admin/api/jobs/${encodeURIComponent(jobId)}`);
+      messageElement.textContent = `任务进度 ${job.current}/${job.requested}，成功 ${job.succeeded}，失败 ${job.failed}。`;
+      if (terminalJobStatuses.has(job.status)) return job;
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+  }
+
+  async function revealCompletedJob(job) {
+    return api(`/admin/api/jobs/${encodeURIComponent(job.job_id)}/results`, {
+      method: "POST",
+    });
+  }
+
+  function showCompletedJob(job, messageElement) {
+    const successfulKeys = job.results
+      .filter((item) => item.status === "success" && item.access_key)
+      .map((item) => ({ ...item, public_url: job.public_url }));
+    const summary = `请求 ${job.requested} 项，成功 ${job.succeeded} 项，失败 ${job.failed} 项。`;
+    if (successfulKeys.length) {
+      openModal(successfulKeys, summary);
+    } else {
+      messageElement.textContent = summary;
+      if (job.status !== "needs_reconcile") window.location.reload();
+    }
+  }
+
   createForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(createForm);
@@ -184,20 +228,17 @@
       createMessage.textContent = "请填写标签。";
       return;
     }
-    createMessage.textContent = `正在串行创建 ${payload.count} 个 Alias，请勿关闭页面…`;
+    createMessage.textContent = `正在创建 ${payload.count} 项持久任务…`;
     createButton.disabled = true;
     createButton.classList.add("is-busy");
     try {
       const data = await api("/admin/api/aliases", {
         method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify(payload),
       });
-      openModal(
-        data.created.map((item) => ({ ...item, public_url: data.public_url })),
-        data.status === "partial"
-          ? `请求 ${data.requested} 个，成功 ${data.succeeded} 个，失败或状态未知 ${data.failed} 个。批次已安全停止。`
-          : `请求 ${data.requested} 个，成功 ${data.succeeded} 个。密钥可在 Alias 列表再次查看。`,
-      );
+      const job = await pollJob(data.job_id, createMessage);
+      showCompletedJob(await revealCompletedJob(job), createMessage);
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
       createMessage.textContent = "创建失败，未完成的 Alias 可通过对账恢复。";
@@ -344,6 +385,10 @@
     return aliasCheckboxes.filter((checkbox) => !checkbox.closest(".alias-row").hidden);
   }
 
+  function limitedVisibleSelectionCount(alreadySelected, visibleCount, limit) {
+    return Math.min(visibleCount, Math.max(0, limit - alreadySelected));
+  }
+
   function updateSelection() {
     const selected = aliasCheckboxes.filter((checkbox) => checkbox.checked).length;
     if (selectedCount) selectedCount.textContent = String(selected);
@@ -355,11 +400,41 @@
     }
   }
 
-  aliasCheckboxes.forEach((checkbox) => checkbox.addEventListener("change", updateSelection));
+  aliasCheckboxes.forEach((checkbox) =>
+    checkbox.addEventListener("change", () => {
+      const selected = aliasCheckboxes.filter((item) => item.checked);
+      if (selected.length > aliasBatchLimit) {
+        checkbox.checked = false;
+        if (bulkMessage) bulkMessage.textContent = `单次最多选择 ${aliasBatchLimit} 项。`;
+      }
+      updateSelection();
+    }),
+  );
   selectVisible?.addEventListener("change", () => {
-    visibleCheckboxes().forEach((checkbox) => {
-      checkbox.checked = selectVisible.checked;
+    const visible = visibleCheckboxes();
+    if (!selectVisible.checked) {
+      visible.forEach((checkbox) => {
+        checkbox.checked = false;
+      });
+      updateSelection();
+      return;
+    }
+    const alreadySelected = aliasCheckboxes.filter(
+      (checkbox) => checkbox.checked && !visible.includes(checkbox),
+    ).length;
+    const available = limitedVisibleSelectionCount(
+      alreadySelected,
+      visible.length,
+      aliasBatchLimit,
+    );
+    let selectedHere = 0;
+    visible.forEach((checkbox) => {
+      checkbox.checked = selectedHere < available;
+      if (checkbox.checked) selectedHere += 1;
     });
+    if (selectedHere < visible.length && bulkMessage) {
+      bulkMessage.textContent = `单次最多选择 ${aliasBatchLimit} 项，已选择当前可见项中的前 ${selectedHere} 项。`;
+    }
     updateSelection();
   });
 
@@ -371,6 +446,11 @@
         .map((checkbox) => checkbox.value);
       if (!aliasIds.length) {
         bulkMessage.textContent = "请先选择 Alias。";
+        return;
+      }
+      if (aliasIds.length > aliasBatchLimit) {
+        bulkMessage.textContent = `单次最多处理 ${aliasBatchLimit} 项，请缩小选择范围。`;
+        updateSelection();
         return;
       }
       let confirmed = false;
@@ -385,24 +465,15 @@
         if (!confirmed) return;
       }
       document.querySelectorAll(".bulk-action").forEach((item) => (item.disabled = true));
-      bulkMessage.textContent = `正在串行处理 ${aliasIds.length} 项，请勿关闭页面…`;
+      bulkMessage.textContent = `正在创建 ${aliasIds.length} 项持久任务…`;
       try {
         const data = await api("/admin/api/aliases/bulk", {
           method: "POST",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
           body: JSON.stringify({ action, alias_ids: aliasIds, confirmed }),
         });
-        const successfulKeys = data.results
-          .filter((item) => item.status === "success" && item.access_key)
-          .map((item) => ({ ...item, public_url: data.public_url }));
-        if (successfulKeys.length) {
-          openModal(
-            successfulKeys,
-            `请求 ${data.requested} 项，成功 ${data.succeeded} 项，失败 ${data.failed} 项。`,
-          );
-        } else {
-          window.alert(`处理完成：成功 ${data.succeeded} 项，失败 ${data.failed} 项。`);
-          window.location.reload();
-        }
+        const job = await pollJob(data.job_id, bulkMessage);
+        showCompletedJob(await revealCompletedJob(job), bulkMessage);
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
         bulkMessage.textContent = "批量操作失败，请刷新确认每项状态。";
@@ -410,6 +481,24 @@
       }
     });
   });
+
+  async function resumeActiveJobs() {
+    try {
+      const data = await api("/admin/api/jobs");
+      const job = data.jobs[0];
+      if (!job) return;
+      const messageElement = job.kind === "create_aliases" ? createMessage : bulkMessage;
+      if (!messageElement) return;
+      messageElement.textContent = `正在恢复任务 ${job.current}/${job.requested}…`;
+      const completed = await pollJob(job.job_id, messageElement);
+      showCompletedJob(await revealCompletedJob(completed), messageElement);
+    } catch (error) {
+      if (error?.constructor !== AuthenticationRequiredError && createMessage) {
+        createMessage.textContent = "恢复后台任务状态失败，请刷新重试。";
+      }
+    }
+  }
+  resumeActiveJobs();
 
   filter?.addEventListener("input", () => {
     const query = filter.value.trim().toLocaleLowerCase();
@@ -526,4 +615,8 @@
     }
   }
   if (capture?.dataset.active === "true") refreshCapture();
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { limitedVisibleSelectionCount };
+  }
 })();

@@ -99,6 +99,8 @@ uv run python -m compileall -q icloud_gateway tests
 
 完整部署、在线维护、代理验证、备份、恢复和回滚流程见 [OPERATIONS.md](OPERATIONS.md)。工程目标、控制闭环和逐节点验收记录见 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
 
+> 发布状态：`3030701` 已被并发与长任务审查标记为不可直接部署。修复分支必须完成 Alias 快照 CAS、SQLite 持久批任务、Compose 变量透传、有界停机及真实 Apple 会话的 validate/list 只读验收后，才能进入生产部署闭环。不要通过放宽 Cloudflare 超时部署同步批处理版本。
+
 德国云贝服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app/browser 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用联动小铺的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
 
 本次 IMAP 文件夹编码实现参考了 MIT 许可的

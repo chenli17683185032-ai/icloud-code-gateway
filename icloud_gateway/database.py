@@ -136,6 +136,51 @@ class Database:
                     ON audit_events(alias_id, created_at);
                 CREATE INDEX IF NOT EXISTS audit_events_type_id_idx
                     ON audit_events(event_type, id DESC);
+
+                CREATE TABLE IF NOT EXISTS batch_jobs (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('create_aliases', 'bulk_aliases')),
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('queued', 'running', 'completed', 'partial', 'failed',
+                                   'needs_reconcile', 'cancelled')
+                    ),
+                    idempotency_key_hash BLOB,
+                    request_fingerprint BLOB NOT NULL,
+                    requested INTEGER NOT NULL,
+                    succeeded INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    current INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS batch_jobs_idempotency_idx
+                    ON batch_jobs(kind, idempotency_key_hash)
+                    WHERE idempotency_key_hash IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS batch_jobs_active_idx
+                    ON batch_jobs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS batch_job_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES batch_jobs(id) ON DELETE CASCADE,
+                    item_index INTEGER NOT NULL,
+                    alias_id TEXT,
+                    input_blob BLOB NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('queued', 'running', 'success', 'failed', 'unknown', 'cancelled')
+                    ),
+                    result_blob BLOB,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error TEXT,
+                    UNIQUE(job_id, item_index)
+                );
+
+                CREATE INDEX IF NOT EXISTS batch_job_items_job_idx
+                    ON batch_job_items(job_id, item_index);
                 """
         )
         with self.transaction() as connection:
@@ -647,6 +692,283 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise NotFoundError("alias not found")
+
+    def create_batch_job(
+        self,
+        *,
+        kind: str,
+        action: str,
+        fingerprint: bytes,
+        items: list[Mapping[str, Any]],
+        idempotency_key: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        clean_kind = _clean_text(kind, limit=40)
+        clean_action = _clean_text(action, limit=40)
+        if clean_kind not in {"create_aliases", "bulk_aliases"} or not items:
+            raise ValueError("batch job is invalid")
+        key_hash = None
+        if idempotency_key is not None:
+            clean_key = _clean_text(idempotency_key, limit=200)
+            if not clean_key:
+                raise ValueError("idempotency key is invalid")
+            key_hash = self.secret_box.digest(clean_key, "batch-idempotency-key")
+        timestamp = _now()
+        job_id = str(uuid.uuid4())
+        with self.transaction() as connection:
+            if key_hash is not None:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM batch_jobs
+                    WHERE kind = ? AND idempotency_key_hash = ?
+                    """,
+                    (clean_kind, sqlite3.Binary(key_hash)),
+                ).fetchone()
+                if existing is not None:
+                    if not hmac.compare_digest(bytes(existing["request_fingerprint"]), fingerprint):
+                        raise ConflictError("idempotency key payload does not match")
+                    return self._batch_job_from_row(existing, connection=connection), False
+            connection.execute(
+                """
+                INSERT INTO batch_jobs(
+                    id, kind, action, status, idempotency_key_hash, request_fingerprint,
+                    requested, succeeded, failed, current, created_at, updated_at
+                ) VALUES(?, ?, ?, 'queued', ?, ?, ?, 0, 0, 0, ?, ?)
+                """,
+                (
+                    job_id,
+                    clean_kind,
+                    clean_action,
+                    None if key_hash is None else sqlite3.Binary(key_hash),
+                    sqlite3.Binary(fingerprint),
+                    len(items),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            for index, item in enumerate(items, start=1):
+                plaintext = json.dumps(
+                    dict(item), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+                encrypted = self.secret_box.encrypt(plaintext, "batch-job-input")
+                connection.execute(
+                    """
+                    INSERT INTO batch_job_items(
+                        job_id, item_index, alias_id, input_blob, stage, status,
+                        created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, 'queued', 'queued', ?, ?)
+                    """,
+                    (
+                        job_id,
+                        index,
+                        item.get("alias_id"),
+                        sqlite3.Binary(encrypted),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            row = connection.execute("SELECT * FROM batch_jobs WHERE id = ?", (job_id,)).fetchone()
+            assert row is not None
+            return self._batch_job_from_row(row, connection=connection), True
+
+    def get_batch_job(self, job_id: str) -> dict[str, Any]:
+        connection = self._connect()
+        row = connection.execute("SELECT * FROM batch_jobs WHERE id = ?", (str(job_id),)).fetchone()
+        if row is None:
+            raise NotFoundError("batch job not found")
+        return self._batch_job_from_row(row, connection=connection)
+
+    def list_active_batch_jobs(self) -> list[dict[str, Any]]:
+        connection = self._connect()
+        rows = connection.execute(
+            """
+            SELECT * FROM batch_jobs
+            WHERE status IN ('queued', 'running')
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+        return [self._batch_job_from_row(row, connection=connection) for row in rows]
+
+    def next_batch_job(self) -> dict[str, Any] | None:
+        connection = self._connect()
+        row = connection.execute(
+            """
+            SELECT * FROM batch_jobs
+            WHERE status IN ('queued', 'running')
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+        ).fetchone()
+        return None if row is None else self._batch_job_from_row(row, connection=connection)
+
+    def set_batch_job_status(
+        self, job_id: str, status: str, *, error: str | None = None
+    ) -> None:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE batch_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (status, error, _now(), str(job_id)),
+            )
+            if cursor.rowcount != 1:
+                raise NotFoundError("batch job not found")
+
+    def update_batch_item(
+        self,
+        job_id: str,
+        item_index: int,
+        *,
+        stage: str,
+        status: str,
+        alias_id: str | None = None,
+        result: Mapping[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        result_blob = None
+        if result is not None:
+            plaintext = json.dumps(
+                dict(result), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            result_blob = self.secret_box.encrypt(plaintext, "batch-job-result")
+        timestamp = _now()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE batch_job_items
+                SET stage = ?, status = ?, alias_id = COALESCE(?, alias_id),
+                    result_blob = COALESCE(?, result_blob), error = ?, updated_at = ?
+                WHERE job_id = ? AND item_index = ?
+                """,
+                (
+                    stage,
+                    status,
+                    alias_id,
+                    None if result_blob is None else sqlite3.Binary(result_blob),
+                    error,
+                    timestamp,
+                    str(job_id),
+                    int(item_index),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise NotFoundError("batch job item not found")
+            self._refresh_batch_job_counts(connection, str(job_id), timestamp)
+
+    def recover_interrupted_batch_jobs(self) -> None:
+        timestamp = _now()
+        with self.transaction() as connection:
+            interrupted = connection.execute(
+                """
+                SELECT job_id, item_index FROM batch_job_items
+                WHERE status = 'running'
+                """
+            ).fetchall()
+            for row in interrupted:
+                connection.execute(
+                    """
+                    UPDATE batch_job_items
+                    SET status = 'unknown', stage = 'unknown',
+                        error = 'interrupted during an in-flight operation', updated_at = ?
+                    WHERE job_id = ? AND item_index = ?
+                    """,
+                    (timestamp, row["job_id"], row["item_index"]),
+                )
+                connection.execute(
+                    """
+                    UPDATE batch_jobs
+                    SET status = 'needs_reconcile',
+                        error = 'an in-flight operation was interrupted; automatic replay stopped',
+                        updated_at = ? WHERE id = ?
+                    """,
+                    (timestamp, row["job_id"]),
+                )
+            queued = connection.execute(
+                """
+                SELECT id FROM batch_jobs
+                WHERE status = 'running' AND id NOT IN (
+                    SELECT DISTINCT job_id FROM batch_job_items WHERE status = 'unknown'
+                )
+                """
+            ).fetchall()
+            for row in queued:
+                connection.execute(
+                    "UPDATE batch_jobs SET status = 'queued', updated_at = ? WHERE id = ?",
+                    (timestamp, row["id"]),
+                )
+
+    def _refresh_batch_job_counts(
+        self, connection: sqlite3.Connection, job_id: str, timestamp: str
+    ) -> None:
+        counts = connection.execute(
+            """
+            SELECT
+                SUM(status = 'success') AS succeeded,
+                SUM(status IN ('failed', 'unknown', 'cancelled')) AS failed,
+                SUM(status != 'queued') AS current
+            FROM batch_job_items WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE batch_jobs SET succeeded = ?, failed = ?, current = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(counts["succeeded"] or 0),
+                int(counts["failed"] or 0),
+                int(counts["current"] or 0),
+                timestamp,
+                job_id,
+            ),
+        )
+
+    def _batch_job_from_row(
+        self, row: sqlite3.Row, *, connection: sqlite3.Connection
+    ) -> dict[str, Any]:
+        item_rows = connection.execute(
+            """
+            SELECT item_index, alias_id, input_blob, stage, status, result_blob,
+                   created_at, updated_at, error
+            FROM batch_job_items WHERE job_id = ? ORDER BY item_index
+            """,
+            (row["id"],),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for item in item_rows:
+            input_value = json.loads(
+                self.secret_box.decrypt(bytes(item["input_blob"]), "batch-job-input")
+            )
+            result_value = None
+            if item["result_blob"] is not None:
+                result_value = json.loads(
+                    self.secret_box.decrypt(bytes(item["result_blob"]), "batch-job-result")
+                )
+            items.append(
+                {
+                    "index": int(item["item_index"]),
+                    "alias_id": item["alias_id"],
+                    "input": input_value,
+                    "stage": str(item["stage"]),
+                    "status": str(item["status"]),
+                    "result": result_value,
+                    "created_at": str(item["created_at"]),
+                    "updated_at": str(item["updated_at"]),
+                    "error": item["error"],
+                }
+            )
+        return {
+            "id": str(row["id"]),
+            "kind": str(row["kind"]),
+            "action": str(row["action"]),
+            "status": str(row["status"]),
+            "requested": int(row["requested"]),
+            "succeeded": int(row["succeeded"]),
+            "failed": int(row["failed"]),
+            "current": int(row["current"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "error": row["error"],
+            "items": items,
+        }
 
     def record_audit_event(
         self,

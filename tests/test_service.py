@@ -21,6 +21,7 @@ from icloud_gateway.imap_otp import (
 from icloud_gateway.rate_limit import SlidingWindowRateLimiter
 from icloud_gateway.security import hash_access_key
 from icloud_gateway.service import (
+    GatewayBusyError,
     GatewayError,
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
@@ -761,6 +762,180 @@ def test_hme_refresh_is_singleflight_and_read_recovers_transparently(tmp_path) -
     gateway.shutdown()
 
 
+def test_stale_sync_snapshot_cannot_reactivate_a_deactivated_alias(tmp_path) -> None:
+    snapshot_read = threading.Event()
+    release_snapshot = threading.Event()
+    block_sync = [False]
+
+    class BlockingSyncClient(FakeHmeClient):
+        def list_aliases(self):
+            snapshot = super().list_aliases()
+            if block_sync[0]:
+                block_sync[0] = False
+                snapshot_read.set()
+                assert release_snapshot.wait(2)
+            return snapshot
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=BlockingSyncClient,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+    issued = gateway.issue_access_key(alias["id"])
+    block_sync[0] = True
+
+    sync_thread = threading.Thread(target=gateway.sync_aliases)
+    sync_thread.start()
+    assert snapshot_read.wait(1)
+
+    deactivated = gateway.deactivate_alias(alias["id"])
+    release_snapshot.set()
+    sync_thread.join(2)
+
+    assert not sync_thread.is_alive()
+    assert deactivated["state"] == "inactive"
+    stored = gateway.database.get_alias(alias["id"])
+    assert stored["state"] == "inactive"
+    assert stored["has_access_key"] is False
+    assert (
+        gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key)) is None
+    )
+    assert gateway.database.list_audit_events(limit=1)[0]["outcome"] == "discarded_stale"
+    gateway.shutdown()
+
+
+def test_stale_sync_snapshot_cannot_restore_a_deleted_alias(tmp_path) -> None:
+    snapshot_read = threading.Event()
+    release_snapshot = threading.Event()
+    block_sync = [False]
+
+    class BlockingSyncClient(FakeHmeClient):
+        def list_aliases(self):
+            snapshot = super().list_aliases()
+            if block_sync[0]:
+                block_sync[0] = False
+                snapshot_read.set()
+                assert release_snapshot.wait(2)
+            return snapshot
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=BlockingSyncClient,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": False}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+    block_sync[0] = True
+
+    sync_thread = threading.Thread(target=gateway.sync_aliases)
+    sync_thread.start()
+    assert snapshot_read.wait(1)
+
+    gateway.delete_alias(alias["id"], confirmation=alias["email"])
+    release_snapshot.set()
+    sync_thread.join(2)
+
+    assert not sync_thread.is_alive()
+    with pytest.raises(NotFoundError):
+        gateway.database.get_alias(alias["id"])
+    assert gateway.database.list_aliases() == []
+    assert gateway.database.list_audit_events(limit=1)[0]["outcome"] == "discarded_stale"
+    gateway.shutdown()
+
+
+def test_stale_refresh_validation_does_not_replace_session_or_alias_state(tmp_path) -> None:
+    refresh_read = threading.Event()
+    release_refresh = threading.Event()
+    old = hme_session()
+    candidate = ICloudHmeSession(**{**old.as_secret_dict(), "client_id": "refreshed"})
+
+    class BlockingRefreshClient(FakeHmeClient):
+        def __init__(self, current):
+            self.current = current
+
+        def list_aliases(self):
+            snapshot = super().list_aliases()
+            if self.current.client_id == "refreshed":
+                refresh_read.set()
+                assert release_refresh.wait(2)
+            return snapshot
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=BlockingRefreshClient,
+        hme_session_refresher=lambda _session: candidate,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(old)
+    alias = gateway.database.list_aliases()[0]
+    result = []
+
+    refresh_thread = threading.Thread(target=lambda: result.append(gateway._refresh_hme_session()))
+    refresh_thread.start()
+    assert refresh_read.wait(1)
+
+    gateway.deactivate_alias(alias["id"])
+    release_refresh.set()
+    refresh_thread.join(2)
+
+    assert not refresh_thread.is_alive()
+    assert result == [old]
+    assert gateway.get_hme_session() == old
+    assert gateway.database.get_alias(alias["id"])["state"] == "inactive"
+    assert gateway.database.list_audit_events(limit=1)[0]["outcome"] == "discarded_stale"
+    gateway.shutdown()
+
+
+def test_key_issuance_fails_closed_while_remote_lifecycle_write_is_in_flight(tmp_path) -> None:
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    class BlockingDeactivateClient(FakeHmeClient):
+        def deactivate_alias(self, anonymous_id):
+            write_started.set()
+            assert release_write.wait(2)
+            return super().deactivate_alias(anonymous_id)
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=BlockingDeactivateClient,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+
+    lifecycle_thread = threading.Thread(target=lambda: gateway.deactivate_alias(alias["id"]))
+    lifecycle_thread.start()
+    assert write_started.wait(1)
+
+    with pytest.raises(GatewayBusyError):
+        gateway.issue_access_key(alias["id"])
+
+    release_write.set()
+    lifecycle_thread.join(2)
+    assert not lifecycle_thread.is_alive()
+    assert gateway.database.get_alias(alias["id"])["state"] == "inactive"
+    gateway.shutdown()
+
+
 def test_write_auth_rejection_refreshes_but_does_not_replay(tmp_path) -> None:
     old = hme_session()
     new = ICloudHmeSession(**{**old.as_secret_dict(), "client_id": "refreshed"})
@@ -814,6 +989,34 @@ def test_shutdown_interrupts_maintenance_thread(tmp_path) -> None:
 
     assert time.monotonic() - started < 2
     assert not thread.is_alive()
+
+
+def test_shutdown_has_one_deadline_and_keeps_database_open_if_worker_stuck(tmp_path) -> None:
+    configured = replace(settings(tmp_path), hme_maintenance_interval_seconds=300)
+    gateway = GatewayService(
+        configured,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+    gateway._maintenance_thread = thread
+    closed = []
+    original_close = gateway.database.close
+    gateway.database.close = lambda: closed.append(True)
+
+    started = time.monotonic()
+    assert gateway.shutdown(timeout=0.05) is False
+
+    assert time.monotonic() - started < 0.5
+    assert closed == []
+    assert gateway.database.quick_check() == "ok"
+    release.set()
+    thread.join(1)
+    gateway.database.close = original_close
+    assert gateway.shutdown(timeout=0.5) is True
 
 
 def test_key_dimension_rate_limit_does_not_depend_on_ip_limit(tmp_path) -> None:

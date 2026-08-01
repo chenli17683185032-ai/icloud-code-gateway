@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block head %}<meta name="csrf-token" content="{{ csrf_token }}"><meta name="public-base-url" content="{{ public_base_url }}">{% endblock %}
+{% block head %}<meta name="csrf-token" content="{{ csrf_token }}"><meta name="public-base-url" content="{{ public_base_url }}"><meta name="alias-batch-limit" content="{{ alias_batch_limit }}">{% endblock %}
 {% block body_class %}admin-page{% endblock %}
 
 {% block body %}
@@ -25,7 +25,7 @@
   </div>
 </header>
 
-<main class="admin-main">
+<main class="admin-main" data-alias-batch-limit="{{ alias_batch_limit }}">
   {% if notice %}
   <div class="notice notice-{{ notice_kind }}" role="status">
     <img src="/static/icons/{% if notice_kind == 'error' %}circle-alert{% else %}circle-check{% endif %}.svg" alt="" aria-hidden="true">
@@ -118,7 +118,7 @@
     </div>
 
     {% if aliases %}
-    <div class="bulk-toolbar" id="bulk-toolbar" aria-live="polite">
+    <div class="bulk-toolbar" id="bulk-toolbar" data-alias-batch-limit="{{ alias_batch_limit }}" aria-live="polite">
       <strong><span id="selected-count">0</span> 条已选择</strong>
       <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="reveal_keys">批量复制现有参数</button>
       <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="issue_keys">批量签发 / 轮换密钥</button>

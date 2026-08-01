@@ -1336,3 +1336,88 @@ Browser runtime
 - 2026-07-31：节点 Z 收口完成。本计划与 `OPERATIONS.md` 的部署记录提交 `6110c95` 已推送
   GitHub `main`，桌面云贝唯一连接手册已原位更新且保持 `0600`；本地取证/切换脚本和采样
   临时件均已清理。Clash 保持任务开始时的 `rule / US 33 AI加速 x1.0`，未改变用户网络选择。
+
+## 22. `3030701` 发布阻断修复计划（2026-08-01）
+
+### 22.1 结论与停止条件
+
+提交 `3030701` 增加 HME 会话维护和批量 Alias 管理，但独立并发审查确认两个 P1 与三个
+P2，当前禁止部署到生产：
+
+- 后台刷新在锁外读取 Apple Alias 快照，稍后可用旧快照覆盖已经完成的停用、恢复或删除。
+- 同步 HTTP 批次固定等待 2 秒；50/100 项仅节流就需 98/198 秒，无法穿过 Cloudflare
+  125 秒读取边界，客户端超时后服务端线程仍继续执行。
+- 四个新增环境变量没有进入 Compose app 环境，服务器 `.env` 修改不生效。
+- 管理页允许全选超过 API 100 项硬上限，159 项生产基线会直接触发 422。
+- 维护线程无超时 `join()`，上游请求和三次验证重试可能使优雅停机超过一分钟。
+
+在并发回归、持久任务恢复、两套 Compose 展开、选择上限、停机上界和 setup validate
+真实会话只读验收全部闭环前，不得部署、不得调用真实 HME 写接口，也不得用调大 Cloudflare
+超时掩盖同步批任务设计缺陷。
+
+### 22.2 架构决策
+
+- **一致性：** 外部 list 请求开始时取得 Alias generation，提交前在协调锁内执行 CAS；任何
+  远端生命周期写成功、本地远端状态提交或 Session 候选替换都会推进 generation。版本不符的
+  快照直接丢弃或重新只读测量，不能覆盖新状态。网络请求期间不长期持有全局锁。
+- **批任务：** 创建、批量停用和批量删除改为 SQLite 持久化 job/item 状态机。HTTP POST 只
+  校验、写入任务并返回 `202 + job_id`；后台单 worker 串行执行，GET 轮询返回进度。请求使用
+  `Idempotency-Key + fingerprint`，同 key 同请求返回原任务，不同请求返回冲突。
+- **副作用边界：** 每项记录 `queued/running/succeeded/failed/unknown`。网络响应不确定的 Apple
+  写操作进入 `unknown/needs_reconcile` 并停止，不自动重放；进程重启只恢复尚未开始或已证明
+  可安全继续的条目。
+- **密钥：** job 表不保存明文 access key。签发结果仍使用现有 Alias AES-GCM 密文；管理员
+  在任务完成后通过受 CSRF 保护且 `no-store` 的结果读取显式 reveal。
+- **前端：** 页面从服务端取得有效批量上限；选择和发送前均执行上限校验。创建和批量操作使用
+  进度轮询，刷新页面可恢复未完成任务视图，密钥不进入 URL、localStorage 或 sessionStorage。
+- **停机：** stop event 必须打断退避等待；worker 停止领取新项。优雅停机使用总 deadline，
+  不允许无界 join，也不允许关闭 SQLite 后遗留线程继续访问。
+- **协议：** setup validate 只允许 Apple 固定主机/路径且禁止重定向。请求体以真实浏览器或只读
+  生产验收为最终证据；模拟测试通过不等于协议上线。验收只允许 validate/list，不创建、停用、
+  恢复或删除 Alias。
+
+### 22.3 实施节点
+
+- [x] 节点 A：确认本地与 GitHub `main` 均为 `3030701`，工作树干净；建立
+  `fix/release-blockers-3030701` 分支，复核 163 项原测试通过不覆盖上述并发与链路缺陷。
+- [ ] 节点 B：增加稳定失败的旧快照并发回归，实施 generation/CAS fencing，并证明停用、恢复、
+  删除和 Session 刷新不会被过期快照回退。
+- [ ] 节点 C：增加 SQLite job/item 兼容迁移、幂等任务 API、单 worker、重启恢复和逐项
+  unknown 停止策略；前端改为创建任务和进度轮询。
+- [ ] 节点 D：修复两套 Compose 变量透传、前端有效上限、维护线程有界停机和 setup validate
+  契约；更新 README 与 `OPERATIONS.md`。
+- [ ] 节点 E：独立运行并发故障注入、进程重启恢复、幂等冲突、159 项选择、Compose `.env`
+  覆盖、停机 deadline、完整 pytest/Ruff/compileall/JS/diff/秘密扫描。
+- [ ] 节点 F：代码审查和本地门禁通过后创建修复提交并推送 GitHub；仍标记“禁止生产部署”，
+  等待真实 Apple 会话的 validate/list 只读验收。
+- [ ] 节点 G：用户明确授权部署后，先备份 SQLite/profile/源码/镜像，隔离候选验证迁移和任务
+  恢复，再由独立 watchdog 只替换 app；只读协议验收失败立即回滚，成功后才解除发布阻断。
+
+### 22.4 测试矩阵
+
+| 层级 | 必测闭环 |
+| --- | --- |
+| 并发 | 旧 list 快照与 deactivate/reactivate/delete/refresh 交错；CAS 拒绝；key 不可发给远端失活项 |
+| 数据库 | 旧 v1 库兼容迁移；job/idempotency 唯一性；item 阶段持久化；明文 key 不进入 job 表 |
+| worker | 单 worker；逐项节流可中断；重启恢复不重复成功项；unknown 停止且不重放 |
+| Web | POST 202；GET no-store；认证/CSRF；幂等冲突；任务结果 reveal；旧同步长请求不再使用 |
+| 前端 | 159 项时最多选有效上限；发送前 guard；轮询进度；刷新恢复；无秘密存储 |
+| 配置 | 基础与 server Compose 展开均含四变量；自定义 `.env` 值进入 app 容器 |
+| 停机 | maintenance/worker 正在等待或请求时总时长有界；数据库不在活跃线程前关闭 |
+| 协议 | validate 方法、URL、headers/body 契约；401/403/421；Set-Cookie 合并；真实会话只读 validate/list |
+
+### 22.5 回滚与生产验收
+
+- schema 只做兼容性加法；旧 app 回滚时忽略新表。若迁移后 `quick_check`、Alias/key 指纹或
+  现有设置发生非预期变化，停止并恢复部署前 SQLite 备份。
+- 候选验证使用隔离数据库副本；不得让候选 worker 连接真实 Apple 并恢复生产 queued job。
+- 真实 setup validate 首次验收只在正式 app 的单次维护控制器内执行，记录状态码、Cookie 名
+  变化计数和 list 数量，不记录 Cookie、token、Apple ID、Alias 邮箱或响应正文。
+- `validate` 或 list 协议不兼容时保持旧生产镜像与现有 Session 捕获路径，状态标记
+  `reauth_required/degraded`，不回退到多种 body 盲试，不调用写接口。
+
+### 22.6 当前实施记录
+
+- 2026-08-01：收到针对 `3030701` 的独立审查；复核代码确认五项问题均有直接实现依据。
+  本地与 `origin/main` 实际同步为 `3030701`，与“本地落后一个提交”的外部描述不同；已创建
+  修复分支并并行启动一致性、持久任务和部署边界三条修复线。生产服务器尚未访问或修改。

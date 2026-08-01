@@ -174,14 +174,22 @@ class GatewayService:
         self.hme_client_factory = hme_client_factory or (
             lambda session: HmeClient(session, proxy=settings.hme_proxy)
         )
+        self._stop_event = threading.Event()
         self.hme_session_refresher = hme_session_refresher or (
-            lambda session: validate_icloud_setup_session(session, proxy=settings.hme_proxy)
+            lambda session: validate_icloud_setup_session(
+                session,
+                proxy=settings.hme_proxy,
+                stop_event=self._stop_event,
+            )
         )
         self.imap_reader_factory = imap_reader_factory
         self.rate_limiter = rate_limiter or SlidingWindowRateLimiter()
         self.clock = clock
         self.sleeper = sleeper
         self._hme_lock = threading.RLock()
+        self._remote_write_lock = threading.Lock()
+        self._remote_write_active = False
+        self._alias_generation = 0
         self._refresh_condition = threading.Condition(threading.Lock())
         self._refreshing = False
         self._refresh_generation = 0
@@ -195,7 +203,6 @@ class GatewayService:
             "last_error_kind": None,
         }
         self._last_validated_ts: float | None = None
-        self._stop_event = threading.Event()
         self._maintenance_thread: threading.Thread | None = None
         self._imap_slots = threading.BoundedSemaphore(4)
         self.capture_manager = CaptureManager(
@@ -213,13 +220,22 @@ class GatewayService:
             )
             self._maintenance_thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, timeout: float = 10.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
         self._stop_event.set()
+        with self._refresh_condition:
+            self._refresh_condition.notify_all()
         thread = self._maintenance_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join()
-        self.capture_manager.shutdown(timeout=5.0)
+            thread.join(max(0.0, deadline - time.monotonic()))
+        if thread is not None and thread.is_alive():
+            return False
+        if not self.capture_manager.shutdown(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            return False
         self.database.close()
+        return True
 
     def get_hme_session(self) -> ICloudHmeSession | None:
         value = self.database.get_secret(HME_SETTING_KEY)
@@ -282,8 +298,56 @@ class GatewayService:
         finally:
             self._close_client(client)
 
-    def _refresh_hme_session(self) -> ICloudHmeSession:
+    def _begin_alias_snapshot(self, *, allow_during_write: bool = False) -> int:
+        with self._hme_lock:
+            if self._remote_write_active and not allow_during_write:
+                raise GatewayBusyError("alias lifecycle operation is in progress")
+            return self._alias_generation
+
+    def _commit_alias_snapshot(
+        self,
+        remote_aliases: list[dict[str, Any]],
+        generation: int,
+        *,
+        event_type: str,
+        event_outcome: str,
+        session: ICloudHmeSession | None = None,
+        allow_during_write: bool = False,
+    ) -> bool:
+        with self._hme_lock:
+            if (
+                self._remote_write_active and not allow_during_write
+            ) or generation != self._alias_generation:
+                self.database.record_audit_event(event_type, "discarded_stale")
+                return False
+            if session is not None:
+                self.database.set_secret(HME_SETTING_KEY, session.as_secret_dict())
+            if not allow_during_write:
+                self._reconcile_remote_aliases(remote_aliases)
+            self._alias_generation += 1
+            self.database.record_audit_event(event_type, event_outcome)
+            return True
+
+    def _begin_remote_write(self) -> None:
+        if not self._remote_write_lock.acquire(blocking=False):
+            raise GatewayBusyError("alias lifecycle operation is already in progress")
+        try:
+            with self._hme_lock:
+                self._remote_write_active = True
+                self._alias_generation += 1
+        except Exception:
+            self._remote_write_lock.release()
+            raise
+
+    def _finish_remote_write(self) -> None:
+        with self._hme_lock:
+            self._remote_write_active = False
+        self._remote_write_lock.release()
+
+    def _refresh_hme_session(self, *, during_write: bool = False) -> ICloudHmeSession:
         with self._refresh_condition:
+            if self._stop_event.is_set():
+                raise GatewayRetryableError("gateway is shutting down")
             generation = self._refresh_generation
             if self._refreshing:
                 while self._refreshing and not self._stop_event.is_set():
@@ -301,17 +365,32 @@ class GatewayService:
         error: Exception | None = None
         result: ICloudHmeSession | None = None
         try:
+            alias_generation = self._begin_alias_snapshot(allow_during_write=during_write)
             old_session = self.get_hme_session()
             if old_session is None:
                 raise GatewayNotConfiguredError("iCloud HME session is not configured")
             candidate = self.hme_session_refresher(old_session)
+            if self._stop_event.is_set():
+                raise GatewayRetryableError("gateway is shutting down")
             aliases = self._validated_alias_snapshot(candidate)
-            with self._hme_lock:
-                self.database.set_secret(HME_SETTING_KEY, candidate.as_secret_dict())
-                self._reconcile_remote_aliases(aliases)
-                self.database.record_audit_event("hme_session", "refreshed")
-            self._set_hme_state("ready", validated=True)
-            result = candidate
+            if self._stop_event.is_set():
+                raise GatewayRetryableError("gateway is shutting down")
+            committed = self._commit_alias_snapshot(
+                aliases,
+                alias_generation,
+                event_type="hme_session",
+                event_outcome="refreshed",
+                session=candidate,
+                allow_during_write=during_write,
+            )
+            if committed:
+                self._set_hme_state("ready", validated=True)
+                result = candidate
+            else:
+                current = self.get_hme_session()
+                if current is None:
+                    raise GatewayNotConfiguredError("iCloud HME session is not configured")
+                result = current
         except HmeSessionError as exc:
             error = exc
             self._set_hme_state("reauth_required", error_kind="authentication")
@@ -345,7 +424,7 @@ class GatewayService:
 
     def _refresh_after_write_rejection(self) -> None:
         with suppress(Exception):
-            self._refresh_hme_session()
+            self._refresh_hme_session(during_write=True)
         raise GatewayRetryableError(
             "iCloud rejected authentication before confirming the write; retry explicitly"
         )
@@ -377,12 +456,17 @@ class GatewayService:
                     )
 
     def save_hme_session(self, session: ICloudHmeSession) -> int:
+        alias_generation = self._begin_alias_snapshot()
         aliases = self._validated_alias_snapshot(session)
-        with self._hme_lock:
-            self.database.set_secret(HME_SETTING_KEY, session.as_secret_dict())
-            self._reconcile_remote_aliases(aliases)
-            self.database.record_audit_event("hme_session", "saved")
-        self._set_hme_state("ready", validated=True)
+        committed = self._commit_alias_snapshot(
+            aliases,
+            alias_generation,
+            event_type="hme_session",
+            event_outcome="saved",
+            session=session,
+        )
+        if committed:
+            self._set_hme_state("ready", validated=True)
         return len(aliases)
 
     def import_hme_session(self, source: str) -> int:
@@ -390,18 +474,23 @@ class GatewayService:
         return self.save_hme_session(session)
 
     def sync_aliases(self) -> list[dict[str, Any]]:
+        alias_generation = self._begin_alias_snapshot()
         session = self.get_hme_session()
         if session is None:
             raise GatewayNotConfiguredError("iCloud HME session is not configured")
         try:
             remote_aliases = self._validated_alias_snapshot(session)
         except HmeSessionError:
-            session = self._refresh_hme_session()
-            remote_aliases = self._validated_alias_snapshot(session)
-        with self._hme_lock:
-            self._reconcile_remote_aliases(remote_aliases)
-            self.database.record_audit_event("hme_sync", "succeeded")
-        self._set_hme_state("ready", validated=True)
+            self._refresh_hme_session()
+            return self.database.list_aliases()
+        committed = self._commit_alias_snapshot(
+            remote_aliases,
+            alias_generation,
+            event_type="hme_sync",
+            event_outcome="succeeded",
+        )
+        if committed:
+            self._set_hme_state("ready", validated=True)
         return self.database.list_aliases()
 
     def _hme_client(self) -> HmeClient:
@@ -633,7 +722,11 @@ class GatewayService:
         confirmed: bool = False,
     ) -> BulkAliasActionResult:
         ids = [str(alias_id).strip() for alias_id in alias_ids]
-        if not ids or len(ids) > 100 or any(not alias_id for alias_id in ids):
+        if (
+            not ids
+            or len(ids) > min(self.settings.alias_batch_limit, 100)
+            or any(not alias_id for alias_id in ids)
+        ):
             raise ValueError("alias IDs are invalid")
         if len(set(ids)) != len(ids):
             raise ValueError("alias IDs must be unique")
@@ -723,7 +816,11 @@ class GatewayService:
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
+        if self._remote_write_active:
+            raise GatewayBusyError("alias lifecycle operation is in progress")
         with self._hme_lock:
+            if self._remote_write_active:
+                raise GatewayBusyError("alias lifecycle operation is in progress")
             issued = self.database.issue_access_key(alias_id)
             self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
             return issued
@@ -758,72 +855,96 @@ class GatewayService:
 
     def deactivate_alias(self, alias_id: str) -> dict[str, Any]:
         self._ensure_hme_fresh()
-        with self._hme_lock:
-            _alias, anonymous_id = self._remote_alias(alias_id, state="active")
-            client = self._hme_client()
+        self._begin_remote_write()
+        client: HmeClient | None = None
+        try:
+            with self._hme_lock:
+                _alias, anonymous_id = self._remote_alias(alias_id, state="active")
+                client = self._hme_client()
             try:
-                try:
-                    client.deactivate_alias(anonymous_id)
-                except HmeSessionError:
-                    self._refresh_after_write_rejection()
-                remote_aliases = self._confirmed_remote_aliases(
-                    client,
-                    anonymous_id,
-                    expected_active=False,
-                )
+                client.deactivate_alias(anonymous_id)
+            except HmeSessionError:
+                self._refresh_after_write_rejection()
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_active=False,
+            )
+            remote_aliases = self._validated_remote_aliases(client.list_aliases())
+            with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
+                self._alias_generation += 1
                 self.database.record_audit_event(
                     "alias_deactivate", "succeeded", alias_id=str(alias_id)
                 )
                 return self.database.get_alias(alias_id)
-            finally:
+        finally:
+            if client is not None:
                 self._close_client(client)
+            self._finish_remote_write()
 
     def reactivate_alias(self, alias_id: str) -> dict[str, Any]:
         self._ensure_hme_fresh()
-        with self._hme_lock:
-            _alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
-            client = self._hme_client()
+        self._begin_remote_write()
+        client: HmeClient | None = None
+        try:
+            with self._hme_lock:
+                _alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
+                client = self._hme_client()
             try:
-                try:
-                    client.reactivate_alias(anonymous_id)
-                except HmeSessionError:
-                    self._refresh_after_write_rejection()
-                remote_aliases = self._confirmed_remote_aliases(
-                    client,
-                    anonymous_id,
-                    expected_active=True,
-                )
+                client.reactivate_alias(anonymous_id)
+            except HmeSessionError:
+                self._refresh_after_write_rejection()
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_active=True,
+            )
+            remote_aliases = self._validated_remote_aliases(client.list_aliases())
+            with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
+                self._alias_generation += 1
                 self.database.record_audit_event(
                     "alias_reactivate", "succeeded", alias_id=str(alias_id)
                 )
                 return self.database.get_alias(alias_id)
-            finally:
+        finally:
+            if client is not None:
                 self._close_client(client)
+            self._finish_remote_write()
 
     def delete_alias(self, alias_id: str, *, confirmation: str) -> None:
         self._ensure_hme_fresh()
-        with self._hme_lock:
-            alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
-            if str(confirmation or "").strip().casefold() != alias["email"].casefold():
-                raise ConflictError("alias deletion confirmation does not match")
-            client = self._hme_client()
+        self._begin_remote_write()
+        client: HmeClient | None = None
+        try:
+            with self._hme_lock:
+                alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
+                if str(confirmation or "").strip().casefold() != alias["email"].casefold():
+                    raise ConflictError("alias deletion confirmation does not match")
+                client = self._hme_client()
             try:
-                try:
-                    client.delete_alias(anonymous_id)
-                except HmeSessionError:
-                    self._refresh_after_write_rejection()
-                remote_aliases = self._confirmed_remote_aliases(
-                    client,
-                    anonymous_id,
-                    expected_absent=True,
-                )
+                client.delete_alias(anonymous_id)
+            except HmeSessionError:
+                self._refresh_after_write_rejection()
+            remote_aliases = self._confirmed_remote_aliases(
+                client,
+                anonymous_id,
+                expected_absent=True,
+            )
+            remote_aliases = self._validated_remote_aliases(
+                client.list_aliases(),
+                allow_empty=self.database.count_remote_aliases() <= 1,
+            )
+            with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
                 self.database.delete_alias(alias_id)
+                self._alias_generation += 1
                 self.database.record_audit_event("alias_delete", "succeeded")
-            finally:
+        finally:
+            if client is not None:
                 self._close_client(client)
+            self._finish_remote_write()
 
     def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
         ip_key = str(client_ip or "unknown")

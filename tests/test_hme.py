@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 import requests
@@ -295,7 +296,8 @@ def test_setup_validate_merges_rotated_cookies_and_preserves_others() -> None:
     assert calls[0][0] == "POST"
     assert calls[0][1].startswith("https://setup.icloud.com.cn/setup/ws/1/validate?")
     assert calls[0][2]["allow_redirects"] is False
-    assert json.loads(calls[0][2]["data"]) == {"dsWebAuthToken": "session-secret"}
+    assert calls[0][2]["data"] == "null"
+    assert calls[0][2]["headers"]["Content-Type"] == "application/json"
 
 
 def test_set_cookie_fallback_splits_combined_headers_without_splitting_expires() -> None:
@@ -338,6 +340,22 @@ def test_setup_validate_retries_network_errors_without_misclassifying_auth() -> 
         )
     assert not isinstance(caught.value, HmeSessionError)
     assert "session-secret" not in str(caught.value)
+
+
+def test_setup_validate_stop_event_interrupts_retry_wait() -> None:
+    stop_event = threading.Event()
+    calls = []
+
+    def requester(*_args, **_kwargs):
+        calls.append(1)
+        raise requests.ConnectionError("offline")
+
+    stop_event.set()
+    with pytest.raises(HmeNetworkError, match="cancelled"):
+        validate_icloud_setup_session(
+            session(), requester=requester, stop_event=stop_event
+        )
+    assert calls == []
 
 
 def test_setup_validate_rejects_non_allowlisted_endpoint_without_request() -> None:
