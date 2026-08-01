@@ -1059,7 +1059,9 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
 
     assert "class AuthenticationRequiredError extends Error" in script
     assert script.count("instanceof AuthenticationRequiredError") >= 9
-    assert "邮箱账号：${item.email}；解码网站：${url}；接码密钥：${item.access_key}" in script
+    assert "邮箱：${item.email}；网站：${url}；密钥：${item.access_key}" in script
+    assert 'createCopyButton(emailList(items), "一键复制")' in script
+    assert 'createCopyButton(standardParameterList(items), "导出信息")' in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script
     assert "window.prompt" not in script
@@ -1108,7 +1110,13 @@ def test_admin_script_summarizes_partial_unknown_job_and_standard_fields() -> No
 const noop = () => {};
 global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
 global.window = {location: {origin: "https://gateway.example"}, addEventListener: noop};
-const {jobCounts, jobSummary, standardParameters} = require(process.argv[1]);
+const {
+  emailList,
+  jobCounts,
+  jobSummary,
+  standardParameterList,
+  standardParameters,
+} = require(process.argv[1]);
 const job = {
   status: "needs_reconcile",
   requested: 10,
@@ -1125,18 +1133,27 @@ const summary = jobSummary(job);
 if (!summary.includes("成功 5 项")) process.exit(2);
 if (!summary.includes("远端结果不确定 1 项")) process.exit(3);
 if (!summary.includes("尚未开始 4 项")) process.exit(4);
-const item = {
-  email: "one@icloud.com",
-  access_key: "icg_test",
-  public_url: "https://gateway.example",
-};
-const output = standardParameters(item);
-const expectedOutput = [
-  "邮箱账号：one@icloud.com",
-  "解码网站：https://gateway.example",
-  "接码密钥：icg_test",
-].join("；");
-if (output !== expectedOutput) process.exit(5);
+const items = [
+  {
+    email: "one@icloud.com",
+    access_key: "icg_one",
+    public_url: "https://gateway.example",
+  },
+  {
+    email: "two@icloud.com",
+    access_key: "icg_two",
+    public_url: "https://gateway.example",
+  },
+];
+const expectedOutput = "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one";
+if (standardParameters(items[0]) !== expectedOutput) process.exit(5);
+const expectedEmails = "one@icloud.com\ntwo@icloud.com";
+if (emailList(items) !== expectedEmails) process.exit(6);
+const expectedExport = [
+  "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one",
+  "邮箱：two@icloud.com；网站：https://gateway.example；密钥：icg_two",
+].join("\n");
+if (standardParameterList(items) !== expectedExport) process.exit(7);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 

@@ -60,9 +60,17 @@
     return data;
   }
 
+  function emailList(items) {
+    return items.map((item) => item.email).join("\n");
+  }
+
   function standardParameters(item) {
     const url = item.public_url || publicUrl;
-    return `邮箱账号：${item.email}；解码网站：${url}；接码密钥：${item.access_key}`;
+    return `邮箱：${item.email}；网站：${url}；密钥：${item.access_key}`;
+  }
+
+  function standardParameterList(items) {
+    return items.map(standardParameters).join("\n");
   }
 
   function createCopyButton(value, label = "复制") {
@@ -94,10 +102,8 @@
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
     issuedList.replaceChildren();
-    if (items.length > 1) {
-      const all = items.map(standardParameters).join("\n");
-      issuedList.append(createCopyButton(all, "复制全部成功项"));
-    }
+    issuedList.append(createCopyButton(emailList(items), "一键复制"));
+    issuedList.append(createCopyButton(standardParameterList(items), "导出信息"));
     items.forEach((item) => {
       const row = document.createElement("div");
       row.className = "issued-key-row";
@@ -656,10 +662,12 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      emailList,
       firstNonTerminalJob,
       jobCounts,
       jobSummary,
       limitedVisibleSelectionCount,
+      standardParameterList,
       standardParameters,
     };
   }
