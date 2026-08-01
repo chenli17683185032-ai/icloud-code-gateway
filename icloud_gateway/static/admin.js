@@ -503,11 +503,14 @@
     });
   });
 
+  function firstNonTerminalJob(jobs) {
+    return jobs.find((item) => !terminalJobStatuses.has(item.status));
+  }
+
   async function resumeActiveJobs() {
     try {
       const data = await api("/admin/api/jobs");
-      const job =
-        data.jobs.find((item) => !terminalJobStatuses.has(item.status)) || data.jobs[0];
+      const job = firstNonTerminalJob(data.jobs);
       if (!job) return;
       const messageElement = job.kind === "create_aliases" ? createMessage : bulkMessage;
       if (!messageElement) return;
@@ -639,6 +642,12 @@
   if (capture?.dataset.active === "true") refreshCapture();
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { jobCounts, jobSummary, limitedVisibleSelectionCount, standardParameters };
+    module.exports = {
+      firstNonTerminalJob,
+      jobCounts,
+      jobSummary,
+      limitedVisibleSelectionCount,
+      standardParameters,
+    };
   }
 })();

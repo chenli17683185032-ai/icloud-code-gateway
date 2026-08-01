@@ -1117,6 +1117,28 @@ if (output !== expectedOutput) process.exit(5);
     subprocess.run([node, "-e", harness, str(script)], check=True)
 
 
+def test_admin_script_does_not_resume_terminal_reconcile_jobs() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "icloud_gateway" / "static" / "admin.js"
+    harness = """
+const noop = () => {};
+global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
+global.window = {location: {origin: "https://example.test"}, addEventListener: noop};
+const {firstNonTerminalJob} = require(process.argv[1]);
+const terminal = [
+  {job_id: "reconcile", status: "needs_reconcile"},
+  {job_id: "failed", status: "failed"},
+  {job_id: "completed", status: "completed"},
+];
+if (firstNonTerminalJob(terminal) !== undefined) process.exit(1);
+const queued = {job_id: "queued", status: "queued"};
+if (firstNonTerminalJob([...terminal, queued]) !== queued) process.exit(2);
+"""
+    subprocess.run([node, "-e", harness, str(script)], check=True)
+
+
 def test_admin_script_computes_remaining_selection_budget() -> None:
     node = shutil.which("node")
     if node is None:
