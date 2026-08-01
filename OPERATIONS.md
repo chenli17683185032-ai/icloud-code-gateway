@@ -324,6 +324,17 @@ docker compose ps
 
 ## 11. 运维记录
 
+- 2026-08-01：状态机修复提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea` 已推送 GitHub
+  `main`，但未部署。生产预检、完整备份和隔离迁移均通过；候选数据库保持 179 个 Alias（161
+  活动）、54 个 key hash、50 个 key 密文、378 条审计和 2 条设置，三类摘要与生产完全一致，job
+  表为空且未启动 worker。唯一一次真实 setup validate 被 Apple 拒绝，HME list 调用数为 0，未执行
+  HME 写或 app 切换。按门禁恢复服务器源码/marker 到 `67968b7` 并清理候选镜像、卷、容器、上传
+  包和部署锁；四容器保持原 ID、healthy/restart=0/OOM=false，公网 200，SQLite/profile 未覆盖。
+  失败审计目录为 `/opt/new-api/icloud-code-gateway/backups/state-machine-20260801T041859Z-a954e06`，
+  18 个文件的最终清单 SHA-256 为
+  `808bb1fb685d199746fbcee5f8b6404b86ac38d40edbd09afe1a1734f5569de2`。再次发布前必须先在持久
+  Chromium 中重新认证并捕获 Apple Session，再建立新的单次 validate/list 门禁；禁止直接重试本次
+  已失败的 Session。
 - 2026-07-26：完成本地容器闭环。确认复用 Playwright 基础镜像层、独立 Chromium/profile；旧 profile 从 UID 102 无损接管。故障注入后 browser 自动重启，app 未重启，Cookie 与 SQLite Alias 保持。
 - 2026-07-26：发现并修复 Caddy `forward_auth` 携带 WebSocket Upgrade 头导致 403 的问题。验收结果为：未登录 WebSocket 303 拒绝，登录后 101 Upgrade 并收到 RFB 3.8 握手。
 - 2026-07-26：使用无效代理端点执行隔离容器测试，连接失败且没有直连降级。

@@ -1497,9 +1497,9 @@ P2，当前禁止部署到生产：
 - [x] 节点 B：在本文件写入全量修复、验证、部署、回滚和停止条件；原始 `400f484` 保持禁止部署。
 - [x] 节点 C：增加先失败的完整快照、双 manager、reconcile 刷新恢复和 stop-before-write 测试；实施
   单快照提交、原子 claim、跨进程 owner 锁、可见 reconcile 和两阶段关停。
-- [ ] 节点 D：运行定向故障注入和完整本地门禁；更新第 22 节完成状态与 `OPERATIONS.md` 发布条件，
+- [x] 节点 D：运行定向故障注入和完整本地门禁；更新第 22 节完成状态与 `OPERATIONS.md` 发布条件，
   创建最小功能提交并推送 GitHub `main`，再次确认远端提交未漂移。
-- [ ] 节点 E：从桌面云贝唯一连接手册建立 SSH；只读采集部署标记、源码/镜像、容器健康、restart/
+- [x] 节点 E：从桌面云贝唯一连接手册建立 SSH；只读采集部署标记、源码/镜像、容器健康、restart/
   OOM、NTP、磁盘、`.env` 权限、Compose 展开、SQLite 和脱敏数据基线，确认无待恢复任务。
 - [ ] 节点 F：建立权限 `0700` 的唯一审计目录，备份 SQLite/profile/源码/marker/旧镜像元数据并校验；
   非删除式同步 Git 跟踪文件并逐文件核对，构建唯一候选镜像，在隔离数据库副本上验证迁移、恢复、
@@ -1549,3 +1549,25 @@ P2，当前禁止部署到生产：
   两个 JavaScript 文件语法、基础/server Compose 四个自定义值展开、`git diff --check` 和跟踪文件
   高风险秘密扫描均通过。格式器同时机械收敛基线中 6 个旧格式问题；GitHub `origin/main` 复核仍为
   `400f484`，没有远端漂移。当前待创建并推送功能提交，生产仍未访问。
+- 2026-08-01：节点 D 完成。功能提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea` 已快进
+  本地 `main` 并推送 GitHub，`ls-remote` 复核远端 `main` 完全一致。开始节点 E 前仍未访问
+  生产、Apple 或 IMAP；后续服务器同步和 marker 均固定以该功能提交为目标。
+- 2026-08-01：节点 E 通过。SSH 严格主机校验使用手册固定 ED25519 指纹，私钥仅交给 `ssh -i`
+  且权限为 `0600`。生产仍为 `67968b7`；NTP 同步、`.env=0600`、Compose 有效、根卷约 43GiB
+  可用，四容器均 healthy/restart=0/OOM=false，公网三入口 200，iCloud 域名近 24 小时 502 为 0，
+  无锁、候选资源或活动/unknown job。SQLite 为 `ok`，179/161 个 Alias、54/50 个 key、378 条
+  审计和 2 条设置；三类脱敏摘要已固化。
+- 2026-08-01：节点 F 在真实协议门禁停止，未进入节点 G。部署锁和权限 `0700` 的审计目录建立后，
+  SQLite 在线备份、源码/marker、旧镜像元数据和 Chromium profile 均已校验；第二次有效 profile
+  维护窗口为 13 秒，browser 恢复同 ID/`restart=0`。72 个目标文件逐项一致，候选镜像 revision 为
+  `a954e06`；隔离副本迁移后仍为 179/161、54/50、378、2 且摘要全同，新增 job 表为空、worker
+  lock 不存在，证明候选没有启动 worker。
+- 2026-08-01：唯一一次真实 setup validate 被 Apple 拒绝，因此严格按停止条件不重试、不执行 HME
+  list（调用数 0）、不调用任何 generate/reserve/deactivate/reactivate/delete，也未启动 app 切换或
+  watchdog。服务器源码和 marker 已恢复 `67968b7`，SQLite/profile 未恢复或覆盖；四容器 ID、镜像、
+  restart/OOM 与基线一致，公网 200，Alias 和 settings 摘要不变。候选镜像/卷/容器、上传源包、未用
+  rollback/Caddy 标签和部署锁均已删除。失败审计保留于
+  `/opt/new-api/icloud-code-gateway/backups/state-machine-20260801T041859Z-a954e06`，18 个文件的最终
+  清单 SHA-256 为 `808bb1fb685d199746fbcee5f8b6404b86ac38d40edbd09afe1a1734f5569de2`。
+  当前发布阻断是生产保存的 Apple Session 已失效；必须先在持久浏览器中完成重新认证/捕获，再为
+  新会话重新制定一次性的 validate/list 门禁，不能沿用本次已消费的调用预算。
