@@ -82,10 +82,19 @@ class CodeRequest(BaseModel):
 
 
 class CreateAliasesRequest(BaseModel):
-    count: Annotated[int, Field(ge=1, le=5)] = 1
+    count: Annotated[int, Field(ge=1, le=100)] = 1
     label_prefix: Annotated[str, Field(min_length=1, max_length=140)]
     note: Annotated[str, Field(max_length=500)] = ""
     sender_filter: Annotated[str, Field(max_length=254)] = ""
+
+
+class BulkAliasesRequest(BaseModel):
+    action: Literal["issue_keys", "reveal_keys", "deactivate", "delete"]
+    alias_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=64)]],
+        Field(min_length=1, max_length=100),
+    ]
+    confirmed: bool = False
 
 
 class ConfirmedAliasAction(BaseModel):
@@ -342,6 +351,8 @@ def create_app(
                 "notice": NOTICE_MESSAGES.get(notice, ""),
                 "notice_kind": "error" if notice.endswith("error") else "success",
                 "cdp_configured": bool(settings.cdp_url),
+                "alias_batch_limit": settings.alias_batch_limit,
+                "public_base_url": settings.public_base_url,
             }
         )
         return templates.TemplateResponse(
@@ -455,6 +466,8 @@ def create_app(
     @app.post("/admin/api/aliases")
     async def create_aliases(request: Request, payload: CreateAliasesRequest):
         _require_admin_json(request, session_codec)
+        if payload.count > settings.alias_batch_limit:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
         try:
             batch = await asyncio.to_thread(
                 gateway.create_aliases,
@@ -463,11 +476,32 @@ def create_app(
                 note=payload.note,
                 sender_filter=payload.sender_filter,
             )
-        except (GatewayError, HmeError, HmeSessionError, DatabaseError, ValueError):
+        except ValueError:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError):
             return JSONResponse({"status": "error"}, status_code=502)
         return {
             "status": "partial" if batch.error_code else "created",
             "requested": batch.requested_count,
+            "succeeded": batch.succeeded_count,
+            "failed": batch.failed_count,
+            "results": [
+                {
+                    "index": item.index,
+                    "status": item.status,
+                    **(
+                        {
+                            "id": item.alias["id"],
+                            "email": item.alias["email"],
+                            "label": item.alias["label"],
+                            "access_key": item.access_key,
+                        }
+                        if item.alias is not None
+                        else {}
+                    ),
+                }
+                for item in batch.results
+            ],
             "created": [
                 {
                     "id": item.alias["id"],
@@ -477,6 +511,33 @@ def create_app(
                 }
                 for item in batch.created
             ],
+            "public_url": settings.public_base_url,
+        }
+
+    @app.post("/admin/api/aliases/bulk")
+    async def bulk_aliases(request: Request, payload: BulkAliasesRequest):
+        _require_admin_json(request, session_codec)
+        if len(set(payload.alias_ids)) != len(payload.alias_ids):
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        if payload.action in {"deactivate", "delete"} and not payload.confirmed:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        try:
+            batch = await asyncio.to_thread(
+                gateway.bulk_alias_action,
+                action=payload.action,
+                alias_ids=payload.alias_ids,
+                confirmed=payload.confirmed,
+            )
+        except ValueError:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        return {
+            "status": "ok" if batch.failed_count == 0 else "partial",
+            "action": payload.action,
+            "requested": batch.requested_count,
+            "succeeded": batch.succeeded_count,
+            "failed": batch.failed_count,
+            "results": list(batch.results),
+            "public_url": settings.public_base_url,
         }
 
     @app.post("/admin/api/aliases/{alias_id}/key")
@@ -495,6 +556,7 @@ def create_app(
             "email": alias["email"],
             "label": alias["label"],
             "access_key": issued.access_key,
+            "public_url": settings.public_base_url,
         }
 
     @app.post("/admin/api/aliases/{alias_id}/key/reveal")
@@ -515,6 +577,7 @@ def create_app(
             "email": alias["email"],
             "label": alias["label"],
             "access_key": access_key,
+            "public_url": settings.public_base_url,
         }
 
     @app.post("/admin/api/codes/recent")

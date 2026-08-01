@@ -287,7 +287,7 @@ docker compose ps browser
 
 ## 8. 更新与回滚
 
-更新前完成 SQLite 在线备份。按顺序构建，验证新镜像后只替换需要更新的服务：
+更新前完成 SQLite 在线备份。升级到本版本时，先把新增的 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT` 从 `.env.example` 合并到服务器 `.env`，再按顺序构建，验证新镜像后只替换需要更新的服务：
 
 ```bash
 git pull --ff-only origin main

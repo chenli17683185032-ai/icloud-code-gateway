@@ -674,6 +674,69 @@ def test_partial_alias_batch_returns_already_created_keys(client, settings, serv
     assert response.json()["created"][0]["access_key"].startswith("icg_")
 
 
+def test_bulk_alias_api_authentication_validation_and_mixed_results(
+    client, settings, service
+) -> None:
+    active = service.database.upsert_alias(
+        email="active@icloud.com",
+        remote_metadata={"anonymousId": "active", "isActive": True},
+        state="active",
+    )
+    inactive = service.database.upsert_alias(
+        email="inactive@icloud.com",
+        remote_metadata={"anonymousId": "inactive", "isActive": False},
+        state="inactive",
+    )
+    unauthenticated = client.post(
+        "/admin/api/aliases/bulk",
+        json={"action": "issue_keys", "alias_ids": [active["id"]]},
+    )
+    assert unauthenticated.status_code == 401
+    csrf = _login(client, settings)
+    duplicate = client.post(
+        "/admin/api/aliases/bulk",
+        json={"action": "issue_keys", "alias_ids": [active["id"], active["id"]]},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert duplicate.status_code == 422
+    response = client.post(
+        "/admin/api/aliases/bulk",
+        json={
+            "action": "issue_keys",
+            "alias_ids": [active["id"], inactive["id"], "missing"],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert payload["requested"] == 3
+    assert payload["succeeded"] == 1
+    assert payload["failed"] == 2
+    assert [item["status"] for item in payload["results"]] == [
+        "success",
+        "conflict",
+        "not_found",
+    ]
+
+
+def test_create_alias_api_enforces_configured_and_hard_limits(client, settings, service) -> None:
+    csrf = _login(client, settings)
+    configured = client.post(
+        "/admin/api/aliases",
+        json={"count": 51, "label_prefix": "Person"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    hard = client.post(
+        "/admin/api/aliases",
+        json={"count": 101, "label_prefix": "Person"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert configured.status_code == 422
+    assert hard.status_code == 422
+    assert FakeHmeClient.created == []
+
+
 def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, service) -> None:
     original_hme = _hme_session()
     service.save_hme_session(original_hme)
@@ -847,7 +910,10 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     ).read_text()
 
     assert "class AuthenticationRequiredError extends Error" in script
-    assert script.count("instanceof AuthenticationRequiredError") == 8
+    assert script.count("instanceof AuthenticationRequiredError") == 9
+    assert "邮箱账号：${item.email}；解码网站：${url}；接码密钥：${item.access_key}" in script
+    assert "localStorage" not in script
+    assert "sessionStorage" not in script
     assert "window.prompt" not in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script

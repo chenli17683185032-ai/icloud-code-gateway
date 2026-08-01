@@ -827,6 +827,31 @@ a:focus-visible {
   background: transparent;
 }
 
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+  padding: 10px 12px;
+}
+
+.bulk-toolbar strong {
+  margin-right: auto;
+}
+
+.bulk-toolbar .form-message {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.alias-select {
+  margin: 0;
+}
+
 .alias-table {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -838,6 +863,7 @@ a:focus-visible {
 .alias-row {
   display: grid;
   grid-template-columns:
+    32px
     minmax(250px, 1.5fr)
     minmax(150px, 0.8fr)
     minmax(125px, 0.6fr)
@@ -1391,7 +1417,7 @@ a:focus-visible {
 
   .alias-header,
   .alias-row {
-    grid-template-columns: minmax(220px, 1.4fr) minmax(140px, 0.8fr) 110px 82px 180px;
+    grid-template-columns: 32px minmax(220px, 1.4fr) minmax(140px, 0.8fr) 110px 82px 180px;
   }
 
   .lookup-history-header,
@@ -1439,14 +1465,21 @@ a:focus-visible {
     padding: 16px;
   }
 
+  .alias-select {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
   .alias-identity {
     grid-column: 1;
+    padding-left: 30px;
   }
 
   .alias-label,
   .alias-key,
   .alias-state {
     grid-column: 1;
+    padding-left: 30px;
   }
 
   .alias-actions {

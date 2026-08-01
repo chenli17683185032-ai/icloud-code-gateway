@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -8,7 +10,7 @@ import pytest
 
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, NotFoundError
-from icloud_gateway.hme import HmeError, ICloudHmeSession
+from icloud_gateway.hme import HmeError, HmeNetworkError, HmeSessionError, ICloudHmeSession
 from icloud_gateway.imap_otp import (
     ImapConfig,
     ImapCredentialsError,
@@ -22,6 +24,7 @@ from icloud_gateway.service import (
     GatewayError,
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
+    GatewayRetryableError,
     GatewayService,
 )
 
@@ -71,7 +74,10 @@ class FakeHmeClient:
     def create_alias(self, *, label, note):
         if not self.created:
             raise HmeError("rate limited")
-        item = dict(self.created.pop(0))
+        outcome = self.created.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        item = dict(outcome)
         item["label"] = label
         item["note"] = note
         return item
@@ -299,6 +305,81 @@ def test_create_aliases_issues_one_unique_key_per_alias(tmp_path) -> None:
     assert batch.created[0].issued_key.access_key != batch.created[1].issued_key.access_key
     assert batch.error_code is None
     assert delays == [2.0]
+
+
+def test_create_aliases_enforces_configured_limit_without_truncation(tmp_path) -> None:
+    configured = replace(settings(tmp_path), alias_batch_limit=50)
+    value = GatewayService(
+        configured,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeReader,
+        sleeper=lambda _seconds: None,
+    )
+    FakeHmeClient.aliases = []
+    value.save_hme_session(hme_session())
+
+    with pytest.raises(ValueError):
+        value.create_aliases(count=51, label_prefix="Person")
+    with pytest.raises(ValueError):
+        value.create_aliases(count=101, label_prefix="Person")
+    assert FakeHmeClient.created == []
+
+    FakeHmeClient.created = [
+        {
+            "hme": f"person{index}@icloud.com",
+            "anonymousId": f"person{index}",
+            "isActive": True,
+        }
+        for index in range(50)
+    ]
+    batch = value.create_aliases(count=50, label_prefix="Person")
+    assert batch.requested_count == 50
+    assert batch.succeeded_count == 50
+    assert batch.failed_count == 0
+    assert len(batch.results) == 50
+
+
+def test_create_aliases_only_marks_network_failures_as_unknown(tmp_path) -> None:
+    value = service(tmp_path)
+    FakeHmeClient.aliases = []
+    value.save_hme_session(hme_session())
+
+    FakeHmeClient.created = [HmeNetworkError("timed out")]
+    network = value.create_aliases(count=1, label_prefix="Person")
+    assert network.results[0].status == "unknown"
+
+    FakeHmeClient.created = [HmeError("rejected before write")]
+    rejected = value.create_aliases(count=1, label_prefix="Person")
+    assert rejected.results[0].status == "error"
+
+
+def test_bulk_alias_actions_reject_duplicates_and_preserve_mixed_results(tmp_path) -> None:
+    value = service(tmp_path)
+    active = value.database.upsert_alias(
+        email="active@icloud.com",
+        remote_metadata={"anonymousId": "active", "isActive": True},
+        state="active",
+    )
+    inactive = value.database.upsert_alias(
+        email="inactive@icloud.com",
+        remote_metadata={"anonymousId": "inactive", "isActive": False},
+        state="inactive",
+    )
+    with pytest.raises(ValueError):
+        value.bulk_alias_action(action="issue_keys", alias_ids=[active["id"], active["id"]])
+
+    result = value.bulk_alias_action(
+        action="issue_keys",
+        alias_ids=[active["id"], inactive["id"], "missing"],
+    )
+    assert [item["status"] for item in result.results] == [
+        "success",
+        "conflict",
+        "not_found",
+    ]
+    assert result.succeeded_count == 1
+    assert result.failed_count == 2
+    assert result.results[0]["access_key"].startswith("icg_")
 
 
 def test_imap_configuration_is_tested_before_it_replaces_the_saved_value(tmp_path) -> None:
@@ -547,6 +628,28 @@ def test_remote_lifecycle_changes_require_readback_before_local_mutation(tmp_pat
     assert reactivated["state"] == "active"
 
 
+def test_remote_lifecycle_closes_client_when_confirmation_fails(tmp_path) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+    closed = []
+
+    class CloseTrackingClient(FakeHmeClient):
+        def close(self):
+            closed.append(True)
+
+    gateway.hme_client_factory = CloseTrackingClient
+    FakeHmeClient.confirm_lifecycle = False
+
+    with pytest.raises(GatewayError):
+        gateway.deactivate_alias(alias["id"])
+
+    assert closed == [True]
+
+
 def test_remote_lifecycle_rejects_partial_confirmation_snapshot(tmp_path) -> None:
     gateway = service(tmp_path)
     FakeHmeClient.aliases = [
@@ -601,6 +704,116 @@ def test_permanent_delete_requires_inactive_state_confirmation_and_remote_absenc
     gateway.delete_alias(alias["id"], confirmation="person@icloud.com")
     with pytest.raises(NotFoundError):
         gateway.database.get_alias(alias["id"])
+
+
+def test_hme_refresh_is_singleflight_and_read_recovers_transparently(tmp_path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    refresh_calls = []
+    old = hme_session()
+    new = ICloudHmeSession(**{**old.as_secret_dict(), "client_id": "refreshed"})
+
+    class ExpiringClient(FakeHmeClient):
+        def __init__(self, current):
+            self.current = current
+
+        def list_aliases(self):
+            if self.current.client_id != "refreshed":
+                raise HmeSessionError("expired")
+            return []
+
+    def refresher(_session):
+        refresh_calls.append(1)
+        entered.set()
+        release.wait(2)
+        return new
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=ExpiringClient,
+        hme_session_refresher=refresher,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    gateway.database.set_secret("hme_session", old.as_secret_dict())
+    results = []
+    errors = []
+
+    def run_sync():
+        try:
+            results.append(gateway.sync_aliases())
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_sync) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    assert entered.wait(1)
+    release.set()
+    for thread in threads:
+        thread.join(2)
+
+    assert errors == []
+    assert results == [[], [], [], []]
+    assert len(refresh_calls) == 1
+    assert gateway.get_hme_session() == new
+    assert gateway.hme_status()["state"] == "ready"
+    gateway.shutdown()
+
+
+def test_write_auth_rejection_refreshes_but_does_not_replay(tmp_path) -> None:
+    old = hme_session()
+    new = ICloudHmeSession(**{**old.as_secret_dict(), "client_id": "refreshed"})
+    writes = []
+
+    class RejectingWriteClient(FakeHmeClient):
+        def __init__(self, current):
+            self.current = current
+
+        def list_aliases(self):
+            return [dict(item) for item in self.aliases]
+
+        def deactivate_alias(self, anonymous_id):
+            writes.append((self.current.client_id, anonymous_id))
+            raise HmeSessionError("expired")
+
+    gateway = GatewayService(
+        settings(tmp_path),
+        hme_client_factory=RejectingWriteClient,
+        hme_session_refresher=lambda _session: new,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    FakeHmeClient.aliases = [
+        {"hme": "person@icloud.com", "anonymousId": "person", "isActive": True}
+    ]
+    gateway.save_hme_session(old)
+    alias = gateway.database.list_aliases()[0]
+
+    with pytest.raises(GatewayRetryableError):
+        gateway.deactivate_alias(alias["id"])
+
+    assert writes == [("client", "person")]
+    assert gateway.get_hme_session() == new
+    assert gateway.database.get_alias(alias["id"])["state"] == "active"
+    gateway.shutdown()
+
+
+def test_shutdown_interrupts_maintenance_thread(tmp_path) -> None:
+    configured = replace(settings(tmp_path), hme_maintenance_interval_seconds=300)
+    gateway = GatewayService(
+        configured,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeReader,
+    )
+    thread = gateway._maintenance_thread
+    assert thread is not None and thread.is_alive()
+
+    started = time.monotonic()
+    gateway.shutdown()
+
+    assert time.monotonic() - started < 2
+    assert not thread.is_alive()
 
 
 def test_key_dimension_rate_limit_does_not_depend_on_ip_limit(tmp_path) -> None:

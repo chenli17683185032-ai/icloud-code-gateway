@@ -55,10 +55,14 @@ chmod 600 .env
 python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'
 ```
 
-把生成值写入 `ICLOUD_GATEWAY_MASTER_KEY`，再配置管理员密码、VNC 密码、域名和回国代理。生产环境应保持：
+把生成值写入 `ICLOUD_GATEWAY_MASTER_KEY`，再配置管理员密码、VNC 密码、域名和回国代理。生产环境应保持；其余会话维护与批量创建参数可按 `.env.example` 调整：
 
 ```dotenv
 ICLOUD_GATEWAY_COOKIE_SECURE=1
+ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS=21600
+ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS=3600
+ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS=3600
+ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=50
 CN_PROXY_REQUIRED=1
 ```
 
@@ -105,6 +109,7 @@ uv run python -m compileall -q icloud_gateway tests
 
 - 不保存或自动填写 Apple ID 密码、2FA 码、恢复密钥。
 - 不向普通使用者开放收件箱、邮件正文、Alias 列表或 iCloud 管理能力。
-- 不自动批量停用、恢复或删除真实 HME Alias；远端生命周期操作只由管理员逐条明确确认。
+- 不自动执行真实 HME Alias 生命周期操作；仅支持管理员显式选择最多 100 条后批量停用或永久删除。网关严格串行写入、逐条读取 Apple 状态确认并返回逐项结果；永久删除仅允许失活项且需要二次确认。
+- 批量创建默认网关上限为 50（可配置，硬上限 100），这不是 Apple 配额；普通 Alias 没有公开批量端点，仍逐项 generate→reserve 并遵守间隔、私有 API 限流与账户真实配额，状态不确定时不会盲目重试。
 - 不共享联动小铺正在运行的 Chromium 进程/profile。
 - 不保证 Apple Session 永不过期；过期后管理员通过网站中的同一个浏览器重新登录维护。

@@ -2,6 +2,9 @@
   "use strict";
 
   const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
+  const configuredPublicUrl =
+    document.querySelector('meta[name="public-base-url"]')?.content || "";
+  const publicUrl = configuredPublicUrl || window.location.origin;
   const modal = document.querySelector("#key-modal");
   const modalMessage = document.querySelector("#key-modal-message");
   const issuedList = document.querySelector("#issued-key-list");
@@ -49,7 +52,12 @@
     return data;
   }
 
-  function createCopyButton(value) {
+  function standardParameters(item) {
+    const url = item.public_url || publicUrl;
+    return `邮箱账号：${item.email}；解码网站：${url}；接码密钥：${item.access_key}`;
+  }
+
+  function createCopyButton(value, label = "复制") {
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "secondary-button small-button";
@@ -58,7 +66,7 @@
     icon.alt = "";
     icon.setAttribute("aria-hidden", "true");
     const copyText = document.createElement("span");
-    copyText.textContent = "复制";
+    copyText.textContent = label;
     copy.append(icon, copyText);
     copy.addEventListener("click", async () => {
       try {
@@ -68,7 +76,7 @@
         copyText.textContent = "复制失败";
       }
       window.setTimeout(() => {
-        copyText.textContent = "复制";
+        copyText.textContent = label;
       }, 1600);
     });
     return copy;
@@ -78,6 +86,10 @@
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
     issuedList.replaceChildren();
+    if (items.length > 1) {
+      const all = items.map(standardParameters).join("\n");
+      issuedList.append(createCopyButton(all, "复制全部成功项"));
+    }
     items.forEach((item) => {
       const row = document.createElement("div");
       row.className = "issued-key-row";
@@ -91,9 +103,9 @@
       identity.append(label, email);
 
       const key = document.createElement("code");
-      key.textContent = item.access_key;
+      key.textContent = standardParameters(item);
 
-      const copy = createCopyButton(item.access_key);
+      const copy = createCopyButton(standardParameters(item));
 
       row.append(identity, key, copy);
       issuedList.append(row);
@@ -172,7 +184,7 @@
       createMessage.textContent = "请填写标签。";
       return;
     }
-    createMessage.textContent = "";
+    createMessage.textContent = `正在串行创建 ${payload.count} 个 Alias，请勿关闭页面…`;
     createButton.disabled = true;
     createButton.classList.add("is-busy");
     try {
@@ -181,10 +193,10 @@
         body: JSON.stringify(payload),
       });
       openModal(
-        data.created,
+        data.created.map((item) => ({ ...item, public_url: data.public_url })),
         data.status === "partial"
-          ? `已创建 ${data.created.length} 个，批次已停止。`
-          : `已创建 ${data.created.length} 个。密钥可在 Alias 列表再次查看。`,
+          ? `请求 ${data.requested} 个，成功 ${data.succeeded} 个，失败或状态未知 ${data.failed} 个。批次已安全停止。`
+          : `请求 ${data.requested} 个，成功 ${data.succeeded} 个。密钥可在 Alias 列表再次查看。`,
       );
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
@@ -323,6 +335,82 @@
 
   const filter = document.querySelector("#alias-filter");
   const empty = document.querySelector("#alias-filter-empty");
+  const selectVisible = document.querySelector("#select-visible-aliases");
+  const selectedCount = document.querySelector("#selected-count");
+  const bulkMessage = document.querySelector("#bulk-message");
+  const aliasCheckboxes = [...document.querySelectorAll(".alias-checkbox")];
+
+  function visibleCheckboxes() {
+    return aliasCheckboxes.filter((checkbox) => !checkbox.closest(".alias-row").hidden);
+  }
+
+  function updateSelection() {
+    const selected = aliasCheckboxes.filter((checkbox) => checkbox.checked).length;
+    if (selectedCount) selectedCount.textContent = String(selected);
+    const visible = visibleCheckboxes();
+    const visibleSelected = visible.filter((checkbox) => checkbox.checked).length;
+    if (selectVisible) {
+      selectVisible.checked = visible.length > 0 && visibleSelected === visible.length;
+      selectVisible.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+    }
+  }
+
+  aliasCheckboxes.forEach((checkbox) => checkbox.addEventListener("change", updateSelection));
+  selectVisible?.addEventListener("change", () => {
+    visibleCheckboxes().forEach((checkbox) => {
+      checkbox.checked = selectVisible.checked;
+    });
+    updateSelection();
+  });
+
+  document.querySelectorAll(".bulk-action").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.bulkAction;
+      const aliasIds = aliasCheckboxes
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value);
+      if (!aliasIds.length) {
+        bulkMessage.textContent = "请先选择 Alias。";
+        return;
+      }
+      let confirmed = false;
+      if (action === "issue_keys") {
+        confirmed = window.confirm("将为所有选中活动项签发或轮换密钥，旧密钥会立即失效。继续？");
+        if (!confirmed) return;
+      } else if (action === "deactivate") {
+        confirmed = window.confirm("将串行停用所有选中活动项，并逐条等待 Apple 确认。继续？");
+        if (!confirmed) return;
+      } else if (action === "delete") {
+        confirmed = window.confirm("将从 iCloud 永久删除所有选中的失活项。此操作无法恢复，确定继续？");
+        if (!confirmed) return;
+      }
+      document.querySelectorAll(".bulk-action").forEach((item) => (item.disabled = true));
+      bulkMessage.textContent = `正在串行处理 ${aliasIds.length} 项，请勿关闭页面…`;
+      try {
+        const data = await api("/admin/api/aliases/bulk", {
+          method: "POST",
+          body: JSON.stringify({ action, alias_ids: aliasIds, confirmed }),
+        });
+        const successfulKeys = data.results
+          .filter((item) => item.status === "success" && item.access_key)
+          .map((item) => ({ ...item, public_url: data.public_url }));
+        if (successfulKeys.length) {
+          openModal(
+            successfulKeys,
+            `请求 ${data.requested} 项，成功 ${data.succeeded} 项，失败 ${data.failed} 项。`,
+          );
+        } else {
+          window.alert(`处理完成：成功 ${data.succeeded} 项，失败 ${data.failed} 项。`);
+          window.location.reload();
+        }
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
+        bulkMessage.textContent = "批量操作失败，请刷新确认每项状态。";
+        document.querySelectorAll(".bulk-action").forEach((item) => (item.disabled = false));
+      }
+    });
+  });
+
   filter?.addEventListener("input", () => {
     const query = filter.value.trim().toLocaleLowerCase();
     let visible = 0;
@@ -332,7 +420,9 @@
       if (matches) visible += 1;
     });
     if (empty) empty.hidden = visible !== 0;
+    updateSelection();
   });
+  updateSelection();
 
   function clearAdminCodes() {
     adminCodesList?.replaceChildren();

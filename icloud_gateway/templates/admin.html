@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block head %}<meta name="csrf-token" content="{{ csrf_token }}">{% endblock %}
+{% block head %}<meta name="csrf-token" content="{{ csrf_token }}"><meta name="public-base-url" content="{{ public_base_url }}">{% endblock %}
 {% block body_class %}admin-page{% endblock %}
 
 {% block body %}
@@ -38,10 +38,10 @@
       <div class="status-icon"><img src="/static/icons/cloud.svg" alt="" aria-hidden="true"></div>
       <div>
         <p class="status-name">HME Session</p>
-        <p class="status-value {% if hme.configured %}status-good{% else %}status-muted{% endif %}">
-          {% if hme.configured %}已配置{% else %}未配置{% endif %}
+        <p class="status-value {% if hme.state == 'ready' %}status-good{% else %}status-muted{% endif %}">
+          {{ {'ready': '连接正常', 'refreshing': '正在刷新', 'degraded': '暂时不可用', 'reauth_required': '需要重新登录', 'not_configured': '未配置'}.get(hme.state, hme.state) }}
         </p>
-        {% if hme.host %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
+        {% if hme.last_validated_at %}<p class="status-meta">最近验证 {{ hme.last_validated_at }}</p>{% elif hme.host %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
       </div>
     </div>
     <div class="status-item">
@@ -72,13 +72,8 @@
     <form class="create-form" id="create-alias-form">
       <div class="field compact-field">
         <label for="create-count">数量</label>
-        <select id="create-count" name="count">
-          <option value="1">1</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-          <option value="5">5</option>
-        </select>
+        <input id="create-count" name="count" type="number" min="1" max="{{ alias_batch_limit }}" value="1" required>
+        <p class="field-help">单批最多 {{ alias_batch_limit }} 个，Apple 配额与限流仍生效。</p>
       </div>
       <div class="field">
         <label for="label-prefix">标签</label>
@@ -92,7 +87,7 @@
         <label for="create-note">备注</label>
         <input id="create-note" name="note" maxlength="500">
       </div>
-      <button class="primary-button create-submit" id="create-submit" type="submit" {% if not hme.configured %}disabled{% endif %}>
+      <button class="primary-button create-submit" id="create-submit" type="submit" {% if hme.state not in ['ready', 'degraded'] %}disabled{% endif %}>
         <img src="/static/icons/plus.svg" alt="" aria-hidden="true">
         <span>创建并签发</span>
       </button>
@@ -123,8 +118,17 @@
     </div>
 
     {% if aliases %}
+    <div class="bulk-toolbar" id="bulk-toolbar" aria-live="polite">
+      <strong><span id="selected-count">0</span> 条已选择</strong>
+      <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="reveal_keys">批量复制现有参数</button>
+      <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="issue_keys">批量签发 / 轮换密钥</button>
+      <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="deactivate">批量停用</button>
+      <button class="primary-button danger-command small-button bulk-action" type="button" data-bulk-action="delete">批量永久删除失活项</button>
+      <p class="form-message" id="bulk-message"></p>
+    </div>
     <div class="alias-table" role="table" aria-label="Alias 列表">
       <div class="alias-header" role="row">
+        <label class="checkbox-control" role="columnheader"><input id="select-visible-aliases" type="checkbox"><span class="sr-only">选择当前筛选可见项</span></label>
         <span role="columnheader">Alias</span>
         <span role="columnheader">标签</span>
         <span role="columnheader">密钥</span>
@@ -133,6 +137,7 @@
       </div>
       {% for alias in aliases %}
       <article class="alias-row" role="row" data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}">
+        <label class="alias-select checkbox-control" role="cell"><input class="alias-checkbox" type="checkbox" value="{{ alias.id }}" aria-label="选择 {{ alias.email }}"><span class="sr-only">选择 {{ alias.email }}</span></label>
         <div class="alias-identity" role="cell">
           <strong>{{ alias.email }}</strong>
           {% if alias.sender_filter %}<span>发件人 {{ alias.sender_filter }}</span>{% endif %}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,13 +11,15 @@ from zoneinfo import ZoneInfo
 
 from .browser_capture import CaptureManager
 from .config import Settings
-from .database import ConflictError, Database, IssuedAccessKey
+from .database import ConflictError, Database, IssuedAccessKey, NotFoundError
 from .hme import (
     HmeClient,
     HmeError,
+    HmeNetworkError,
     HmeSessionError,
     ICloudHmeSession,
     parse_hme_session_import,
+    validate_icloud_setup_session,
 )
 from .imap_otp import (
     ImapConfig,
@@ -64,6 +67,10 @@ class GatewayBusyError(GatewayError):
     code = "busy"
 
 
+class GatewayRetryableError(GatewayError):
+    code = "retryable"
+
+
 @dataclass(frozen=True)
 class CodeLookupResult:
     status: str
@@ -80,13 +87,45 @@ class CreatedAlias:
 
 
 @dataclass(frozen=True)
+class AliasBatchItemResult:
+    index: int
+    status: str
+    alias: dict[str, Any] | None = None
+    access_key: str | None = None
+
+
+@dataclass(frozen=True)
 class AliasBatchResult:
     requested_count: int
     created: tuple[CreatedAlias, ...]
+    results: tuple[AliasBatchItemResult, ...]
     error_code: str | None = None
+
+    @property
+    def succeeded_count(self) -> int:
+        return len(self.created)
+
+    @property
+    def failed_count(self) -> int:
+        return self.requested_count - self.succeeded_count
+
+
+@dataclass(frozen=True)
+class BulkAliasActionResult:
+    requested_count: int
+    results: tuple[dict[str, Any], ...]
+
+    @property
+    def succeeded_count(self) -> int:
+        return sum(item["status"] == "success" for item in self.results)
+
+    @property
+    def failed_count(self) -> int:
+        return self.requested_count - self.succeeded_count
 
 
 HmeClientFactory = Callable[[ICloudHmeSession], HmeClient]
+HmeSessionRefresher = Callable[[ICloudHmeSession], ICloudHmeSession]
 ImapReaderFactory = Callable[[ImapConfig], ImapOtpReader]
 
 
@@ -96,6 +135,12 @@ def _utc_now() -> datetime:
 
 def _timestamp() -> str:
     return _utc_now().isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _iso_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _beijing_timestamp(value: str) -> str:
@@ -115,10 +160,12 @@ class GatewayService:
         *,
         database: Database | None = None,
         hme_client_factory: HmeClientFactory | None = None,
+        hme_session_refresher: HmeSessionRefresher | None = None,
         imap_reader_factory: ImapReaderFactory = ImapOtpReader,
         rate_limiter: SlidingWindowRateLimiter | None = None,
         clock: Callable[[], float] = time.time,
         sleeper: Callable[[float], Any] = time.sleep,
+        start_maintenance: bool = True,
     ) -> None:
         self.settings = settings
         self.secret_box = SecretBox(settings.master_key)
@@ -127,46 +174,234 @@ class GatewayService:
         self.hme_client_factory = hme_client_factory or (
             lambda session: HmeClient(session, proxy=settings.hme_proxy)
         )
+        self.hme_session_refresher = hme_session_refresher or (
+            lambda session: validate_icloud_setup_session(session, proxy=settings.hme_proxy)
+        )
         self.imap_reader_factory = imap_reader_factory
         self.rate_limiter = rate_limiter or SlidingWindowRateLimiter()
         self.clock = clock
         self.sleeper = sleeper
         self._hme_lock = threading.RLock()
+        self._refresh_condition = threading.Condition(threading.Lock())
+        self._refreshing = False
+        self._refresh_generation = 0
+        self._refresh_error: Exception | None = None
+        self._state_lock = threading.RLock()
+        self._hme_state: dict[str, Any] = {
+            "state": "not_configured" if self.get_hme_session() is None else "degraded",
+            "last_validated_at": None,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "last_error_kind": None,
+        }
+        self._last_validated_ts: float | None = None
+        self._stop_event = threading.Event()
+        self._maintenance_thread: threading.Thread | None = None
         self._imap_slots = threading.BoundedSemaphore(4)
         self.capture_manager = CaptureManager(
             cdp_url=settings.cdp_url,
             on_session=self.save_hme_session,
+            on_status=self._capture_status_changed,
             get_session_template=self.get_hme_session,
             timeout_seconds=settings.capture_timeout_seconds,
         )
+        if start_maintenance:
+            self._maintenance_thread = threading.Thread(
+                target=self._maintenance_loop,
+                name="icloud-hme-maintenance",
+                daemon=True,
+            )
+            self._maintenance_thread.start()
 
     def shutdown(self) -> None:
-        self.capture_manager.shutdown(timeout=10.0)
+        self._stop_event.set()
+        thread = self._maintenance_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+        self.capture_manager.shutdown(timeout=5.0)
         self.database.close()
 
     def get_hme_session(self) -> ICloudHmeSession | None:
         value = self.database.get_secret(HME_SETTING_KEY)
         return None if value is None else ICloudHmeSession.from_mapping(value)
 
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        close = getattr(client, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
+
+    def _set_hme_state(
+        self,
+        state: str,
+        *,
+        error_kind: str | None = None,
+        next_attempt_ts: float | None = None,
+        validated: bool = False,
+    ) -> None:
+        now = float(self.clock())
+        with self._state_lock:
+            self._hme_state.update(
+                {
+                    "state": state,
+                    "last_attempt_at": _iso_timestamp(now),
+                    "next_attempt_at": (
+                        None if next_attempt_ts is None else _iso_timestamp(next_attempt_ts)
+                    ),
+                    "last_error_kind": error_kind,
+                }
+            )
+            if validated:
+                self._last_validated_ts = now
+                self._hme_state["last_validated_at"] = _iso_timestamp(now)
+
+    def hme_status(self) -> dict[str, Any]:
+        try:
+            configured = self.get_hme_session() is not None
+        except (HmeSessionError, SecurityError):
+            configured = False
+        with self._state_lock:
+            status = dict(self._hme_state)
+        status["configured"] = configured
+        if not configured:
+            status["state"] = "not_configured"
+        return status
+
+    def _capture_status_changed(self, status: dict[str, Any]) -> None:
+        state = str(status.get("state") or "")
+        if state in {"starting", "verifying"}:
+            self._set_hme_state("refreshing", error_kind="authentication")
+        elif state in {"waiting_login", "failed"}:
+            self._set_hme_state("reauth_required", error_kind="authentication")
+
+    def _validated_alias_snapshot(self, session: ICloudHmeSession) -> list[dict[str, Any]]:
+        client = self.hme_client_factory(session)
+        try:
+            return self._validated_remote_aliases(client.list_aliases())
+        finally:
+            self._close_client(client)
+
+    def _refresh_hme_session(self) -> ICloudHmeSession:
+        with self._refresh_condition:
+            generation = self._refresh_generation
+            if self._refreshing:
+                while self._refreshing and not self._stop_event.is_set():
+                    self._refresh_condition.wait(timeout=1.0)
+                if self._refresh_generation != generation:
+                    if self._refresh_error is not None:
+                        raise self._refresh_error
+                    refreshed = self.get_hme_session()
+                    if refreshed is None:
+                        raise GatewayNotConfiguredError("iCloud HME session is not configured")
+                    return refreshed
+            self._refreshing = True
+            self._refresh_error = None
+        self._set_hme_state("refreshing")
+        error: Exception | None = None
+        result: ICloudHmeSession | None = None
+        try:
+            old_session = self.get_hme_session()
+            if old_session is None:
+                raise GatewayNotConfiguredError("iCloud HME session is not configured")
+            candidate = self.hme_session_refresher(old_session)
+            aliases = self._validated_alias_snapshot(candidate)
+            with self._hme_lock:
+                self.database.set_secret(HME_SETTING_KEY, candidate.as_secret_dict())
+                self._reconcile_remote_aliases(aliases)
+                self.database.record_audit_event("hme_session", "refreshed")
+            self._set_hme_state("ready", validated=True)
+            result = candidate
+        except HmeSessionError as exc:
+            error = exc
+            self._set_hme_state("reauth_required", error_kind="authentication")
+            if self.settings.cdp_url:
+                with suppress(Exception):
+                    self.capture_manager.start()
+        except (HmeNetworkError, HmeError, OSError, TimeoutError) as exc:
+            error = exc
+            self._set_hme_state("degraded", error_kind="network")
+        except Exception as exc:
+            error = exc
+            self._set_hme_state("degraded", error_kind="internal")
+        finally:
+            with self._refresh_condition:
+                self._refresh_error = error
+                self._refreshing = False
+                self._refresh_generation += 1
+                self._refresh_condition.notify_all()
+        if error is not None:
+            raise error
+        assert result is not None
+        return result
+
+    def _ensure_hme_fresh(self) -> None:
+        with self._state_lock:
+            last_validated = self._last_validated_ts
+        if last_validated is None or float(self.clock()) - last_validated >= float(
+            self.settings.hme_freshness_seconds
+        ):
+            self._refresh_hme_session()
+
+    def _refresh_after_write_rejection(self) -> None:
+        with suppress(Exception):
+            self._refresh_hme_session()
+        raise GatewayRetryableError(
+            "iCloud rejected authentication before confirming the write; retry explicitly"
+        )
+
+    def _maintenance_loop(self) -> None:
+        delay = float(self.settings.hme_maintenance_interval_seconds)
+        backoff = 300.0
+        while not self._stop_event.wait(delay):
+            try:
+                self._refresh_hme_session()
+            except GatewayNotConfiguredError:
+                delay = float(self.settings.hme_maintenance_interval_seconds)
+            except HmeSessionError:
+                delay = float(self.settings.hme_maintenance_interval_seconds)
+            except Exception:
+                delay = min(float(self.settings.hme_retry_max_seconds), backoff)
+                backoff = min(float(self.settings.hme_retry_max_seconds), backoff * 2.0)
+                self._set_hme_state(
+                    "degraded",
+                    error_kind="network",
+                    next_attempt_ts=float(self.clock()) + delay,
+                )
+            else:
+                backoff = 300.0
+                delay = float(self.settings.hme_maintenance_interval_seconds)
+                with self._state_lock:
+                    self._hme_state["next_attempt_at"] = _iso_timestamp(
+                        float(self.clock()) + delay
+                    )
+
     def save_hme_session(self, session: ICloudHmeSession) -> int:
+        aliases = self._validated_alias_snapshot(session)
         with self._hme_lock:
-            client = self.hme_client_factory(session)
-            aliases = self._validated_remote_aliases(client.list_aliases())
             self.database.set_secret(HME_SETTING_KEY, session.as_secret_dict())
             self._reconcile_remote_aliases(aliases)
             self.database.record_audit_event("hme_session", "saved")
-            return len(aliases)
+        self._set_hme_state("ready", validated=True)
+        return len(aliases)
 
     def import_hme_session(self, source: str) -> int:
         session = parse_hme_session_import(source)
         return self.save_hme_session(session)
 
     def sync_aliases(self) -> list[dict[str, Any]]:
+        session = self.get_hme_session()
+        if session is None:
+            raise GatewayNotConfiguredError("iCloud HME session is not configured")
+        try:
+            remote_aliases = self._validated_alias_snapshot(session)
+        except HmeSessionError:
+            session = self._refresh_hme_session()
+            remote_aliases = self._validated_alias_snapshot(session)
         with self._hme_lock:
-            client = self._hme_client()
-            remote_aliases = self._validated_remote_aliases(client.list_aliases())
             self._reconcile_remote_aliases(remote_aliases)
             self.database.record_audit_event("hme_sync", "succeeded")
+        self._set_hme_state("ready", validated=True)
         return self.database.list_aliases()
 
     def _hme_client(self) -> HmeClient:
@@ -306,19 +541,23 @@ class GatewayService:
         note: str = "",
         sender_filter: str = "",
     ) -> AliasBatchResult:
-        bounded_count = max(1, min(int(count), 5))
+        requested_count = int(count)
+        if requested_count < 1 or requested_count > min(self.settings.alias_batch_limit, 100):
+            raise ValueError("alias batch count is outside the configured limit")
         prefix = str(label_prefix or "").strip()
         if not prefix or len(prefix) > 140:
             raise ValueError("label prefix is invalid")
+        self._ensure_hme_fresh()
         with self._hme_lock:
             session = self.get_hme_session()
             if session is None:
                 raise GatewayNotConfiguredError("iCloud HME session is not configured")
             client = self.hme_client_factory(session)
             created: list[CreatedAlias] = []
-            for index in range(bounded_count):
+            results: list[AliasBatchItemResult] = []
+            for index in range(requested_count):
                 try:
-                    label = prefix if bounded_count == 1 else f"{prefix} {index + 1}"
+                    label = prefix if requested_count == 1 else f"{prefix} {index + 1}"
                     remote = client.create_alias(label=label, note=note)
                     email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
                     if email.count("@") != 1 or not str(remote.get("anonymousId") or "").strip():
@@ -334,24 +573,124 @@ class GatewayService:
                     )
                     issued = self.database.issue_access_key(alias["id"])
                     created.append(CreatedAlias(alias=alias, issued_key=issued))
+                    results.append(
+                        AliasBatchItemResult(
+                            index=index + 1,
+                            status="success",
+                            alias=alias,
+                            access_key=issued.access_key,
+                        )
+                    )
                     self.database.record_audit_event(
                         "alias_create", "succeeded", alias_id=alias["id"]
                     )
-                except Exception:
-                    self.database.record_audit_event("alias_create", "failed")
-                    if not created:
-                        raise
+                except HmeSessionError:
+                    self.database.record_audit_event("alias_create", "auth_rejected")
+                    self._close_client(client)
+                    self._refresh_after_write_rejection()
+                except HmeNetworkError:
+                    self.database.record_audit_event("alias_create", "unknown")
+                    results.append(AliasBatchItemResult(index=index + 1, status="unknown"))
+                    results.extend(
+                        AliasBatchItemResult(index=remaining + 1, status="error")
+                        for remaining in range(index + 1, requested_count)
+                    )
+                    self._close_client(client)
                     return AliasBatchResult(
-                        requested_count=bounded_count,
+                        requested_count=requested_count,
                         created=tuple(created),
+                        results=tuple(results),
                         error_code="batch_stopped",
                     )
-                if index + 1 < bounded_count:
+                except Exception:
+                    self.database.record_audit_event("alias_create", "error")
+                    results.append(AliasBatchItemResult(index=index + 1, status="error"))
+                    results.extend(
+                        AliasBatchItemResult(index=remaining + 1, status="error")
+                        for remaining in range(index + 1, requested_count)
+                    )
+                    self._close_client(client)
+                    return AliasBatchResult(
+                        requested_count=requested_count,
+                        created=tuple(created),
+                        results=tuple(results),
+                        error_code="batch_stopped",
+                    )
+                if index + 1 < requested_count:
                     self.sleeper(2.0)
+            self._close_client(client)
             return AliasBatchResult(
-                requested_count=bounded_count,
+                requested_count=requested_count,
                 created=tuple(created),
+                results=tuple(results),
             )
+
+    def bulk_alias_action(
+        self,
+        *,
+        action: str,
+        alias_ids: list[str] | tuple[str, ...],
+        confirmed: bool = False,
+    ) -> BulkAliasActionResult:
+        ids = [str(alias_id).strip() for alias_id in alias_ids]
+        if not ids or len(ids) > 100 or any(not alias_id for alias_id in ids):
+            raise ValueError("alias IDs are invalid")
+        if len(set(ids)) != len(ids):
+            raise ValueError("alias IDs must be unique")
+        if action not in {"issue_keys", "reveal_keys", "deactivate", "delete"}:
+            raise ValueError("bulk alias action is invalid")
+        if action in {"deactivate", "delete"} and not confirmed:
+            raise ValueError("bulk alias action requires confirmation")
+
+        results: list[dict[str, Any]] = []
+        with self._hme_lock:
+            for alias_id in ids:
+                try:
+                    if action == "issue_keys":
+                        issued = self.issue_access_key(alias_id)
+                        alias = self.database.get_alias(alias_id)
+                        result = {
+                            "id": alias_id,
+                            "status": "success",
+                            "email": alias["email"],
+                            "label": alias["label"],
+                            "access_key": issued.access_key,
+                        }
+                    elif action == "reveal_keys":
+                        access_key = self.reveal_access_key(alias_id)
+                        alias = self.database.get_alias(alias_id)
+                        result = {
+                            "id": alias_id,
+                            "status": "success",
+                            "email": alias["email"],
+                            "label": alias["label"],
+                            "access_key": access_key,
+                        }
+                    elif action == "deactivate":
+                        alias = self.deactivate_alias(alias_id)
+                        result = {
+                            "id": alias_id,
+                            "status": "success",
+                            "email": alias["email"],
+                        }
+                    else:
+                        alias = self.database.get_alias(alias_id)
+                        self.delete_alias(alias_id, confirmation=alias["email"])
+                        result = {
+                            "id": alias_id,
+                            "status": "success",
+                            "email": alias["email"],
+                        }
+                except NotFoundError:
+                    result = {"id": alias_id, "status": "not_found"}
+                except ConflictError:
+                    result = {"id": alias_id, "status": "conflict"}
+                except (HmeError, HmeSessionError, GatewayError):
+                    result = {"id": alias_id, "status": "unknown"}
+                except Exception:
+                    result = {"id": alias_id, "status": "error"}
+                results.append(result)
+        return BulkAliasActionResult(requested_count=len(ids), results=tuple(results))
 
     def configure_imap(self, values: Mapping[str, Any], *, test: bool = True) -> ImapConfig:
         existing = self.get_imap_config()
@@ -418,52 +757,73 @@ class GatewayService:
         return alias
 
     def deactivate_alias(self, alias_id: str) -> dict[str, Any]:
+        self._ensure_hme_fresh()
         with self._hme_lock:
             _alias, anonymous_id = self._remote_alias(alias_id, state="active")
             client = self._hme_client()
-            client.deactivate_alias(anonymous_id)
-            remote_aliases = self._confirmed_remote_aliases(
-                client,
-                anonymous_id,
-                expected_active=False,
-            )
-            self._reconcile_remote_aliases(remote_aliases)
-            self.database.record_audit_event(
-                "alias_deactivate", "succeeded", alias_id=str(alias_id)
-            )
-            return self.database.get_alias(alias_id)
+            try:
+                try:
+                    client.deactivate_alias(anonymous_id)
+                except HmeSessionError:
+                    self._refresh_after_write_rejection()
+                remote_aliases = self._confirmed_remote_aliases(
+                    client,
+                    anonymous_id,
+                    expected_active=False,
+                )
+                self._reconcile_remote_aliases(remote_aliases)
+                self.database.record_audit_event(
+                    "alias_deactivate", "succeeded", alias_id=str(alias_id)
+                )
+                return self.database.get_alias(alias_id)
+            finally:
+                self._close_client(client)
 
     def reactivate_alias(self, alias_id: str) -> dict[str, Any]:
+        self._ensure_hme_fresh()
         with self._hme_lock:
             _alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
             client = self._hme_client()
-            client.reactivate_alias(anonymous_id)
-            remote_aliases = self._confirmed_remote_aliases(
-                client,
-                anonymous_id,
-                expected_active=True,
-            )
-            self._reconcile_remote_aliases(remote_aliases)
-            self.database.record_audit_event(
-                "alias_reactivate", "succeeded", alias_id=str(alias_id)
-            )
-            return self.database.get_alias(alias_id)
+            try:
+                try:
+                    client.reactivate_alias(anonymous_id)
+                except HmeSessionError:
+                    self._refresh_after_write_rejection()
+                remote_aliases = self._confirmed_remote_aliases(
+                    client,
+                    anonymous_id,
+                    expected_active=True,
+                )
+                self._reconcile_remote_aliases(remote_aliases)
+                self.database.record_audit_event(
+                    "alias_reactivate", "succeeded", alias_id=str(alias_id)
+                )
+                return self.database.get_alias(alias_id)
+            finally:
+                self._close_client(client)
 
     def delete_alias(self, alias_id: str, *, confirmation: str) -> None:
+        self._ensure_hme_fresh()
         with self._hme_lock:
             alias, anonymous_id = self._remote_alias(alias_id, state="inactive")
             if str(confirmation or "").strip().casefold() != alias["email"].casefold():
                 raise ConflictError("alias deletion confirmation does not match")
             client = self._hme_client()
-            client.delete_alias(anonymous_id)
-            remote_aliases = self._confirmed_remote_aliases(
-                client,
-                anonymous_id,
-                expected_absent=True,
-            )
-            self._reconcile_remote_aliases(remote_aliases)
-            self.database.delete_alias(alias_id)
-            self.database.record_audit_event("alias_delete", "succeeded")
+            try:
+                try:
+                    client.delete_alias(anonymous_id)
+                except HmeSessionError:
+                    self._refresh_after_write_rejection()
+                remote_aliases = self._confirmed_remote_aliases(
+                    client,
+                    anonymous_id,
+                    expected_absent=True,
+                )
+                self._reconcile_remote_aliases(remote_aliases)
+                self.database.delete_alias(alias_id)
+                self.database.record_audit_event("alias_delete", "succeeded")
+            finally:
+                self._close_client(client)
 
     def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
         ip_key = str(client_ip or "unknown")
@@ -604,7 +964,7 @@ class GatewayService:
             event["created_at_display"] = _beijing_timestamp(event["created_at"])
         return {
             "hme": {
-                "configured": hme_session is not None,
+                **self.hme_status(),
                 "host": None if hme_session is None else hme_session.host,
                 "error": hme_error,
             },
@@ -654,12 +1014,15 @@ class GatewayService:
 
 
 __all__ = [
+    "AliasBatchItemResult",
     "AliasBatchResult",
+    "BulkAliasActionResult",
     "CodeLookupResult",
     "CreatedAlias",
     "GatewayBusyError",
     "GatewayError",
     "GatewayNotConfiguredError",
     "GatewayRateLimitedError",
+    "GatewayRetryableError",
     "GatewayService",
 ]

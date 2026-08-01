@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import shlex
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import requests
@@ -36,6 +38,16 @@ _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 )
+_SETUP_HOSTS = frozenset({"setup.icloud.com", "setup.icloud.com.cn"})
+_SETUP_VALIDATE_PATH = "/setup/ws/1/validate"
+_SETUP_AUTH_ERROR_CODES = frozenset(
+    {
+        "AUTHENTICATION_FAILED",
+        "INVALID_AUTH_TOKEN",
+        "SESSION_EXPIRED",
+        "UNAUTHORIZED",
+    }
+)
 
 
 class HmeError(RuntimeError):
@@ -43,6 +55,10 @@ class HmeError(RuntimeError):
 
 
 class HmeSessionError(HmeError):
+    pass
+
+
+class HmeNetworkError(HmeError):
     pass
 
 
@@ -308,6 +324,186 @@ def _validate_session(session: ICloudHmeSession) -> None:
 
 
 Requester = Callable[..., Any]
+Sleeper = Callable[[float], Any]
+Jitter = Callable[[], float]
+
+
+def _cookie_pairs(cookie_header: str) -> tuple[list[str], dict[str, str]]:
+    order: list[str] = []
+    values: dict[str, str] = {}
+    for part in str(cookie_header or "").split(";"):
+        name, separator, value = part.partition("=")
+        name = name.strip()
+        if not separator or not name or "\r" in name or "\n" in name:
+            continue
+        if name not in values:
+            order.append(name)
+        values[name] = value.strip()
+    return order, values
+
+
+def merge_set_cookie_headers(cookie_header: str, set_cookie_headers: list[str]) -> str:
+    order, values = _cookie_pairs(cookie_header)
+    for header in set_cookie_headers:
+        combined = re.split(
+            r",(?=\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=)",
+            str(header or ""),
+        )
+        for cookie in combined:
+            first = cookie.split(";", 1)[0]
+            name, separator, value = first.partition("=")
+            name = name.strip()
+            if (
+                not separator
+                or not name
+                or "\r" in name
+                or "\n" in name
+                or "\r" in value
+                or "\n" in value
+            ):
+                continue
+            if name not in values:
+                order.append(name)
+            values[name] = value.strip()
+    return "; ".join(f"{name}={values[name]}" for name in order)
+
+
+def _set_cookie_headers(response: Any) -> list[str]:
+    raw_headers = getattr(getattr(response, "raw", None), "headers", None)
+    if raw_headers is not None:
+        getter = getattr(raw_headers, "getlist", None) or getattr(raw_headers, "get_all", None)
+        if callable(getter):
+            values = getter("Set-Cookie")
+            if values:
+                return [str(value) for value in values]
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, Mapping):
+        value = headers.get("Set-Cookie") or headers.get("set-cookie")
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        if value:
+            return [str(value)]
+    return []
+
+
+def _validated_setup_url(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise HmeSessionError("iCloud setup validate URL is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or str(parsed.hostname or "").casefold() not in _SETUP_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.path != _SETUP_VALIDATE_PATH
+        or parsed.params
+        or parsed.fragment
+    ):
+        raise HmeSessionError("iCloud setup validate URL is not allowed")
+    return urllib.parse.urlunparse(
+        ("https", str(parsed.hostname).casefold(), parsed.path, "", "", "")
+    )
+
+
+def _setup_auth_rejected(payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    candidates: list[Any] = [payload.get("errorCode"), payload.get("code")]
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        candidates.extend((error.get("errorCode"), error.get("code")))
+    return any(str(value or "").strip().upper() in _SETUP_AUTH_ERROR_CODES for value in candidates)
+
+
+def validate_icloud_setup_session(
+    session: ICloudHmeSession,
+    *,
+    proxy: str = "",
+    timeout: float = 30.0,
+    requester: Requester | None = None,
+    attempts: int = 3,
+    sleeper: Sleeper = time.sleep,
+    jitter: Jitter = random.random,
+    setup_url: str | None = None,
+) -> ICloudHmeSession:
+    """Run Apple's idempotent setup validate and return a rotated immutable session."""
+    _validate_session(session)
+    _, cookies = _cookie_pairs(session.cookie)
+    token = cookies.get("X-APPLE-DS-WEB-SESSION-TOKEN", "").strip()
+    if not token:
+        raise HmeSessionError("iCloud HME session cannot be validated")
+    host = "setup.icloud.com.cn" if session.host.endswith(".icloud.com.cn") else "setup.icloud.com"
+    endpoint = _validated_setup_url(setup_url or f"https://{host}{_SETUP_VALIDATE_PATH}")
+    query = urllib.parse.urlencode(
+        {
+            "clientBuildNumber": session.client_build_number,
+            "clientMasteringNumber": session.client_mastering_number,
+            "clientId": session.client_id,
+        }
+    )
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Origin": session.origin,
+        "Referer": session.referer,
+        "User-Agent": session.user_agent,
+        "Cookie": session.cookie,
+    }
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    http: requests.Session | None = None
+    request = requester
+    if request is None:
+        http = requests.Session()
+        http.trust_env = False
+        request = http.request
+    try:
+        response: Any = None
+        bounded_attempts = max(1, min(int(attempts), 5))
+        for attempt in range(bounded_attempts):
+            try:
+                response = request(
+                    "POST",
+                    f"{endpoint}?{query}",
+                    headers=headers,
+                    data=json.dumps({"dsWebAuthToken": token}, separators=(",", ":")),
+                    proxies=proxies,
+                    timeout=max(1.0, min(float(timeout), 60.0)),
+                    allow_redirects=False,
+                )
+                break
+            except (requests.RequestException, OSError, TimeoutError) as exc:
+                if attempt + 1 >= bounded_attempts:
+                    raise HmeNetworkError("iCloud setup validate network request failed") from exc
+                delay = min(8.0, 0.5 * (2**attempt)) + max(0.0, min(float(jitter()), 1.0)) * 0.25
+                sleeper(delay)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in {401, 403, 421}:
+            raise HmeSessionError("iCloud setup validate rejected the session")
+        if 300 <= status_code < 400:
+            raise HmeError("iCloud setup validate returned a redirect")
+        if status_code < 200 or status_code >= 300:
+            raise HmeError(f"iCloud setup validate returned HTTP {status_code or 'unknown'}")
+        try:
+            body = response.json()
+        except (TypeError, ValueError) as exc:
+            raise HmeError("iCloud setup validate response is not JSON") from exc
+        if _setup_auth_rejected(body):
+            raise HmeSessionError("iCloud setup validate rejected the session")
+        if not isinstance(body, Mapping):
+            raise HmeError("iCloud setup validate response is invalid")
+        ds_info = body.get("dsInfo")
+        if not isinstance(ds_info, Mapping) or not str(ds_info.get("appleId") or "").strip():
+            raise HmeError("iCloud setup validate response is invalid")
+        cookie = merge_set_cookie_headers(session.cookie, _set_cookie_headers(response))
+        refreshed = replace(session, cookie=cookie)
+        _validate_session(refreshed)
+        return refreshed
+    finally:
+        if http is not None:
+            http.close()
 
 
 class HmeClient:
@@ -323,7 +519,24 @@ class HmeClient:
         self.session = session
         self.proxy = str(proxy or "").strip()
         self.timeout = max(1.0, min(float(timeout), 60.0))
-        self.requester = requester
+        self._http: requests.Session | None = None
+        if requester is None:
+            self._http = requests.Session()
+            self._http.trust_env = False
+            self.requester = self._http.request
+        else:
+            self.requester = requester
+
+    def close(self) -> None:
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
+    def __enter__(self) -> HmeClient:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
 
     def list_settings(self) -> dict[str, Any]:
         response = self._request("GET", "/v2/hme/list")
@@ -399,28 +612,16 @@ class HmeClient:
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         try:
-            if self.requester is None:
-                with requests.Session() as http:
-                    http.trust_env = False
-                    response = http.request(
-                        method,
-                        f"https://{self.session.host}{path}?{params}",
-                        headers=self._headers(),
-                        data=self._payload(payload),
-                        proxies=proxies,
-                        timeout=self.timeout,
-                    )
-            else:
-                response = self.requester(
-                    method,
-                    f"https://{self.session.host}{path}?{params}",
-                    headers=self._headers(),
-                    data=self._payload(payload),
-                    proxies=proxies,
-                    timeout=self.timeout,
-                )
+            response = self.requester(
+                method,
+                f"https://{self.session.host}{path}?{params}",
+                headers=self._headers(),
+                data=self._payload(payload),
+                proxies=proxies,
+                timeout=self.timeout,
+            )
         except (requests.RequestException, OSError, TimeoutError) as exc:
-            raise HmeError("iCloud HME request failed") from exc
+            raise HmeNetworkError("iCloud HME network request failed") from exc
         status_code = int(getattr(response, "status_code", 0) or 0)
         if status_code in {401, 403, 421}:
             raise HmeSessionError("iCloud HME session is expired or rejected")
@@ -434,6 +635,8 @@ class HmeClient:
             raise HmeError("iCloud HME response is invalid")
         if body.get("success") is not True:
             code = _safe_error_code(body)
+            if code.upper() in _SETUP_AUTH_ERROR_CODES:
+                raise HmeSessionError("iCloud HME session is expired or rejected")
             suffix = f" ({code})" if code else ""
             raise HmeError(f"iCloud HME rejected the request{suffix}")
         return body
@@ -473,8 +676,11 @@ __all__ = [
     "CORE_SESSION_COOKIE_NAMES",
     "HmeClient",
     "HmeError",
+    "HmeNetworkError",
     "HmeSessionError",
     "ICloudHmeSession",
+    "merge_set_cookie_headers",
     "parse_hme_request",
     "parse_hme_session_import",
+    "validate_icloud_setup_session",
 ]

@@ -3,14 +3,18 @@ from __future__ import annotations
 import json
 
 import pytest
+import requests
 
 from icloud_gateway.hme import (
     HmeClient,
     HmeError,
+    HmeNetworkError,
     HmeSessionError,
     ICloudHmeSession,
+    merge_set_cookie_headers,
     parse_hme_request,
     parse_hme_session_import,
+    validate_icloud_setup_session,
 )
 
 URL = (
@@ -28,9 +32,10 @@ COOKIE = (
 
 
 class FakeResponse:
-    def __init__(self, body, *, status_code=200):
+    def __init__(self, body, *, status_code=200, headers=None):
         self.body = body
         self.status_code = status_code
+        self.headers = headers or {}
 
     def json(self):
         return self.body
@@ -224,6 +229,16 @@ def test_client_errors_never_include_cookie_or_upstream_response_text() -> None:
     assert "response-secret-canary" not in str(caught.value)
 
 
+def test_client_maps_body_auth_rejection_to_session_error() -> None:
+    with pytest.raises(HmeSessionError):
+        HmeClient(
+            session(),
+            requester=lambda *_args, **_kwargs: FakeResponse(
+                {"success": False, "error": {"code": "SESSION_EXPIRED"}}
+            ),
+        ).list_aliases()
+
+
 def test_client_routes_hme_requests_through_the_configured_proxy() -> None:
     calls = []
 
@@ -249,3 +264,88 @@ def test_expired_status_maps_to_session_error() -> None:
         HmeClient(
             session(), requester=lambda *_args, **_kwargs: FakeResponse({}, status_code=421)
         ).list_aliases()
+
+
+@pytest.mark.parametrize("status", [401, 403, 421])
+def test_setup_validate_auth_status_is_session_error(status: int) -> None:
+    with pytest.raises(HmeSessionError):
+        validate_icloud_setup_session(
+            session(),
+            requester=lambda *_args, **_kwargs: FakeResponse({}, status_code=status),
+        )
+
+
+def test_setup_validate_merges_rotated_cookies_and_preserves_others() -> None:
+    calls = []
+
+    def requester(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse(
+            {"dsInfo": {"appleId": "user@example.com"}},
+            headers={
+                "Set-Cookie": "X-APPLE-WEBAUTH-TOKEN=rotated-token; Path=/; Secure"
+            },
+        )
+
+    refreshed = validate_icloud_setup_session(session(), requester=requester)
+
+    assert "X-APPLE-WEBAUTH-TOKEN=rotated-token" in refreshed.cookie
+    assert "X-APPLE-WEBAUTH-USER=user-secret" in refreshed.cookie
+    assert refreshed is not session()
+    assert calls[0][0] == "POST"
+    assert calls[0][1].startswith("https://setup.icloud.com.cn/setup/ws/1/validate?")
+    assert calls[0][2]["allow_redirects"] is False
+    assert json.loads(calls[0][2]["data"]) == {"dsWebAuthToken": "session-secret"}
+
+
+def test_set_cookie_fallback_splits_combined_headers_without_splitting_expires() -> None:
+    merged = merge_set_cookie_headers(
+        COOKIE,
+        [
+            "X-APPLE-WEBAUTH-TOKEN=rotated; Expires=Wed, 21 Oct 2037 07:28:00 GMT; Path=/, "
+            "NEW-COOKIE=new-value; Path=/; Secure"
+        ],
+    )
+
+    assert "X-APPLE-WEBAUTH-TOKEN=rotated" in merged
+    assert "NEW-COOKIE=new-value" in merged
+    assert "21 Oct" not in merged
+
+
+def test_setup_validate_retries_network_errors_without_misclassifying_auth() -> None:
+    attempts = []
+    delays = []
+
+    def requester(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise requests.ConnectionError("secret upstream detail")
+        return FakeResponse({"dsInfo": {"appleId": "user@example.com"}})
+
+    refreshed = validate_icloud_setup_session(
+        session(), requester=requester, sleeper=delays.append, jitter=lambda: 0.0
+    )
+
+    assert refreshed == session()
+    assert len(attempts) == 3
+    assert delays == [0.5, 1.0]
+
+    with pytest.raises(HmeNetworkError) as caught:
+        validate_icloud_setup_session(
+            session(), requester=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                requests.ConnectionError("session-secret")
+            ), sleeper=lambda _delay: None, jitter=lambda: 0.0
+        )
+    assert not isinstance(caught.value, HmeSessionError)
+    assert "session-secret" not in str(caught.value)
+
+
+def test_setup_validate_rejects_non_allowlisted_endpoint_without_request() -> None:
+    called = []
+    with pytest.raises(HmeSessionError):
+        validate_icloud_setup_session(
+            session(),
+            setup_url="https://setup.icloud.com.evil.example/setup/ws/1/validate",
+            requester=lambda *_args, **_kwargs: called.append(True),
+        )
+    assert called == []

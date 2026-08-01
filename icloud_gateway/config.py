@@ -32,6 +32,16 @@ def _boolean_environment(name: str, default: bool) -> bool:
     raise ConfigurationError(f"{name} must be a boolean")
 
 
+def _integer_environment(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def decode_master_key(value: str) -> bytes:
     try:
         decoded = base64.urlsafe_b64decode(str(value).strip().encode("ascii"))
@@ -58,6 +68,10 @@ class Settings:
     otp_max_age_seconds: int = 5 * 60
     otp_future_skew_seconds: int = 60
     otp_request_timeout_seconds: int = 20
+    hme_maintenance_interval_seconds: int = 6 * 60 * 60
+    hme_freshness_seconds: int = 60 * 60
+    hme_retry_max_seconds: int = 60 * 60
+    alias_batch_limit: int = 50
 
     @property
     def database_path(self) -> Path:
@@ -105,6 +119,27 @@ class Settings:
             public_base_url=public_base_url,
             trusted_hosts=trusted_hosts,
             log_level=log_level,
+            hme_maintenance_interval_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS",
+                6 * 60 * 60,
+                minimum=300,
+                maximum=7 * 24 * 60 * 60,
+            ),
+            hme_freshness_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS",
+                60 * 60,
+                minimum=300,
+                maximum=24 * 60 * 60,
+            ),
+            hme_retry_max_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS",
+                60 * 60,
+                minimum=300,
+                maximum=24 * 60 * 60,
+            ),
+            alias_batch_limit=_integer_environment(
+                "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT", 50, minimum=1, maximum=100
+            ),
         )
 
 
