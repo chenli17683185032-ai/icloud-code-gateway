@@ -795,9 +795,7 @@ def test_batch_job_api_idempotency_conflict_and_poll_csrf_no_store(
         json={"count": 1, "label_prefix": "Different"},
         headers={"X-CSRF-Token": csrf, "Idempotency-Key": "request-1"},
     )
-    missing_csrf = client.post(
-        "/admin/api/aliases", json={"count": 1, "label_prefix": "Forbidden"}
-    )
+    missing_csrf = client.post("/admin/api/aliases", json={"count": 1, "label_prefix": "Forbidden"})
 
     assert first.status_code == repeated.status_code == 202
     assert first.json()["job_id"] == repeated.json()["job_id"]
@@ -888,6 +886,43 @@ def test_chunked_body_cannot_bypass_the_request_size_limit(client) -> None:
 
     assert response.status_code == 413
     assert response.json() == {"status": "request_too_large"}
+
+
+def test_lifespan_broadcasts_both_stops_before_waiting_and_keeps_database_open(
+    settings,
+) -> None:
+    gateway = GatewayService(
+        settings,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeImapReader,
+        start_maintenance=False,
+    )
+    app = create_app(settings, service=gateway)
+    jobs = app.state.jobs
+    events = []
+    jobs.start = lambda: events.append(("jobs_start", None))
+    jobs.request_stop = lambda: events.append(("jobs_stop", None))
+    gateway.request_stop = lambda: events.append(("gateway_stop", None))
+    jobs.shutdown = lambda *, timeout: events.append(("jobs_wait", timeout)) or False
+    gateway.shutdown = lambda *, timeout, close_database=True: (
+        events.append(("gateway_wait", (timeout, close_database))) or True
+    )
+
+    try:
+        with TestClient(app, base_url="http://testserver"):
+            pass
+
+        assert [event[0] for event in events] == [
+            "jobs_start",
+            "jobs_stop",
+            "gateway_stop",
+            "jobs_wait",
+            "gateway_wait",
+        ]
+        assert events[-1][1][1] is False
+        assert gateway.database.quick_check() == "ok"
+    finally:
+        gateway.database.close()
 
 
 def test_chunked_body_within_the_limit_still_reaches_the_route(client, service) -> None:

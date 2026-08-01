@@ -1380,15 +1380,15 @@ P2，当前禁止部署到生产：
 
 - [x] 节点 A：确认本地与 GitHub `main` 均为 `3030701`，工作树干净；建立
   `fix/release-blockers-3030701` 分支，复核 163 项原测试通过不覆盖上述并发与链路缺陷。
-- [ ] 节点 B：增加稳定失败的旧快照并发回归，实施 generation/CAS fencing，并证明停用、恢复、
+- [x] 节点 B：增加稳定失败的旧快照并发回归，实施 generation/CAS fencing，并证明停用、恢复、
   删除和 Session 刷新不会被过期快照回退。
-- [ ] 节点 C：增加 SQLite job/item 兼容迁移、幂等任务 API、单 worker、重启恢复和逐项
+- [x] 节点 C：增加 SQLite job/item 兼容迁移、幂等任务 API、单 worker、重启恢复和逐项
   unknown 停止策略；前端改为创建任务和进度轮询。
-- [ ] 节点 D：修复两套 Compose 变量透传、前端有效上限、维护线程有界停机和 setup validate
+- [x] 节点 D：修复两套 Compose 变量透传、前端有效上限、维护线程有界停机和 setup validate
   契约；更新 README 与 `OPERATIONS.md`。
-- [ ] 节点 E：独立运行并发故障注入、进程重启恢复、幂等冲突、159 项选择、Compose `.env`
+- [x] 节点 E：独立运行并发故障注入、进程重启恢复、幂等冲突、159 项选择、Compose `.env`
   覆盖、停机 deadline、完整 pytest/Ruff/compileall/JS/diff/秘密扫描。
-- [ ] 节点 F：代码审查和本地门禁通过后创建修复提交并推送 GitHub；仍标记“禁止生产部署”，
+- [x] 节点 F：代码审查和本地门禁通过后创建修复提交并推送 GitHub；仍标记“禁止生产部署”，
   等待真实 Apple 会话的 validate/list 只读验收。
 - [ ] 节点 G：用户明确授权部署后，先备份 SQLite/profile/源码/镜像，隔离候选验证迁移和任务
   恢复，再由独立 watchdog 只替换 app；只读协议验收失败立即回滚，成功后才解除发布阻断。
@@ -1421,3 +1421,131 @@ P2，当前禁止部署到生产：
 - 2026-08-01：收到针对 `3030701` 的独立审查；复核代码确认五项问题均有直接实现依据。
   本地与 `origin/main` 实际同步为 `3030701`，与“本地落后一个提交”的外部描述不同；已创建
   修复分支并并行启动一致性、持久任务和部署边界三条修复线。生产服务器尚未访问或修改。
+- 2026-08-01：节点 B-F 已由 `400f484` 完成并推送 GitHub `main`，本地基线为 `182 passed`；
+  generation/CAS、持久 job、Compose 透传、前端上限、有界停机和 setup validate 模拟契约均已
+  建立。后续复审发现的第二层状态机缺口转入第 23 节，故 `400f484` 本身仍禁止部署。
+
+## 23. `400f484` 复审阻断修复与生产部署计划（2026-08-01）
+
+### 23.1 目标、指标与停止条件
+
+用户已明确授权部署，但 `400f484` 的独立复审又稳定复现三个状态机缺口，并确认一个关停
+协同缺口。为避免把已知不稳定控制器直接接入 159 个生产 Alias，本轮先完成最小修复，再部署
+修复提交；不部署原始 `400f484`。
+
+- 生命周期写成功后的本地提交只能采用 `_confirmed_remote_aliases()` 已证明包含全部本地已知
+  remote ID 的同一份快照；不得再次读取一份仅结构合法但集合不完整的 list。故障注入中无关
+  Alias 的状态和 key 必须保持不变。
+- SQLite job 的选择和 `queued -> running` 必须在一个 `BEGIN IMMEDIATE` 事务内原子完成；同一
+  数据目录同时启动两个 app 时，只有持有跨进程 worker 锁的一方可以恢复和执行任务。同一任务
+  的 Apple 写副作用计数必须为 1。
+- `needs_reconcile` 是需要人工处理的活动故障状态。页面刷新后必须仍可发现并显示它及剩余 queued
+  项，不能因它属于终态而从恢复入口消失。
+- 关停必须先同时广播 job 与 Gateway stop，再在同一个 10 秒 deadline 内等待。广播后尚未开始
+  Apple 写的项目不得再进入写阶段；任一线程未停时不得关闭 SQLite。
+- 本地全量门禁必须通过，包括 pytest、Ruff check/format、compileall、JS syntax、两套 Compose
+  自定义值展开、diff、秘密扫描和四条确定性故障注入。
+- 生产切换前必须完成 SQLite、Chromium profile、源码、部署标记和旧镜像备份；隔离候选必须使用
+  数据库副本且不启动 job worker。真实 Apple 只允许一次 setup validate 和一次 HME list，不允许
+  generate/reserve/deactivate/reactivate/delete，也不记录 Cookie、token、Apple ID、Alias 或正文。
+- app 切换由服务器内独立 watchdog 控制，60 秒内未同时满足 healthy、内部/公网 200、revision、
+  SQLite `ok` 和数据指纹守恒时自动恢复旧镜像、旧源码与旧部署标记。普通回滚不恢复 SQLite。
+
+立即停止条件：GitHub `main` 漂移、SSH host key 不匹配、部署锁被占用、`.env` 非 `0600`、磁盘
+不足、生产 SQLite 非 `ok`、现有容器非健康或 restart/OOM 异常、存在未处置 active/unknown job、
+候选迁移或恢复失败、validate/list 只读协议失败、任何秘密出现在日志，或 watchdog 不可独立运行。
+
+### 23.2 最小充分控制模型
+
+| 控制元素 | 本轮对象 |
+| --- | --- |
+| 被控对象 | Apple HME Alias、SQLite Alias/key/job、app 进程与生产容器 |
+| 控制器 | generation/CAS、完整快照确认、SQLite 原子 claim、跨进程 worker 锁、两阶段 stop、watchdog |
+| 测量 | 副作用调用数、job/item 状态、线程存活、SQLite quick check、脱敏计数/摘要、HTTP/容器健康 |
+| 执行器 | 本地状态提交、job 领取/恢复、stop event、app-only force-recreate、旧镜像回滚 |
+| 扰动 | 部分 list、并发 app、进程崩溃、网络结果不确定、Session 过期、部署时延、SQLite 锁 |
+| 稳定性策略 | 先拒绝过期/不完整结果；写不盲重放；未知结果持续可见；单 owner；失败自动回滚 |
+
+闭环顺序：
+
+```text
+确定性失败测试
+  -> 最小代码修复
+  -> 本地全量门禁
+  -> GitHub main 固定功能提交
+  -> 生产只读基线与完整备份
+  -> 隔离数据库候选 + 真实 validate/list 只读测量
+  -> 独立 watchdog 只替换 app
+  -> 内外健康、数据和 revision 反馈
+  -> 接受新版本或 60 秒内自动恢复旧版本
+```
+
+### 23.3 GitHub 同类经验
+
+- `litements/litequeue` 的 SQLite queue 用 `BEGIN IMMEDIATE` 包裹 `UPDATE ... RETURNING` 原子领取，
+  并用递增 `claim_id` 拒绝旧 worker 修改新 claim；本项目采用相同的原子状态跃迁思想，但保留
+  现有 job/item 模型，不引入新依赖。
+- `coleifer/huey` 的 SQLite dequeue 把选择与删除放在同一提交事务内，证明持久队列不能用独立
+  SELECT 和随后 UPDATE 作为领取边界。
+- `pwnapplehat/icloud-hide-my-email` 继续证明 Apple lifecycle 是 POST 写、list 是独立 GET；它没有
+  提供跨请求一致性保证，因此本项目必须只采用自身已完成集合完整性确认的单份 list 快照。
+
+### 23.4 实施节点
+
+- [x] 节点 A：本地 `main` 快进到 GitHub `400f484`，工作树干净；复核三个确定性复现、关停路径、
+  现有运维手册和上述 GitHub 项目。生产尚未访问或修改。
+- [x] 节点 B：在本文件写入全量修复、验证、部署、回滚和停止条件；原始 `400f484` 保持禁止部署。
+- [x] 节点 C：增加先失败的完整快照、双 manager、reconcile 刷新恢复和 stop-before-write 测试；实施
+  单快照提交、原子 claim、跨进程 owner 锁、可见 reconcile 和两阶段关停。
+- [ ] 节点 D：运行定向故障注入和完整本地门禁；更新第 22 节完成状态与 `OPERATIONS.md` 发布条件，
+  创建最小功能提交并推送 GitHub `main`，再次确认远端提交未漂移。
+- [ ] 节点 E：从桌面云贝唯一连接手册建立 SSH；只读采集部署标记、源码/镜像、容器健康、restart/
+  OOM、NTP、磁盘、`.env` 权限、Compose 展开、SQLite 和脱敏数据基线，确认无待恢复任务。
+- [ ] 节点 F：建立权限 `0700` 的唯一审计目录，备份 SQLite/profile/源码/marker/旧镜像元数据并校验；
+  非删除式同步 Git 跟踪文件并逐文件核对，构建唯一候选镜像，在隔离数据库副本上验证迁移、恢复、
+  配置和真实 Apple validate/list 只读协议，候选不启动 job worker。
+- [ ] 节点 G：预先启动独立 60 秒 watchdog，只 force-recreate app；验证 healthy、内部/公网入口、
+  revision、SQLite、数据摘要、日志和无关容器不变。任一反馈失败自动回滚，不能等待人工介入。
+- [ ] 节点 H：固定唯一 release/rollback 标签，删除候选容器/卷/标签、上传包、脚本和部署锁；更新
+  本计划、`OPERATIONS.md` 与桌面云贝唯一连接手册，推送最终记录提交并清理本地临时资料。
+
+### 23.5 测试与验收矩阵
+
+| 层级 | 必须证明 |
+| --- | --- |
+| 快照 | 写后确认只 list 一次；第二个 Alias 不因假设的后续部分快照失活或丢 key；三种 lifecycle 均覆盖 |
+| Queue | 两个 Database/manager 同时启动只有一个 owner；原子 claim 不重复；崩溃恢复保持 unknown 不重放 |
+| UI/API | `needs_reconcile` 刷新后可见；逐项 error 可诊断；完成任务不泄露 key；结果 reveal 仍需 CSRF |
+| 关停 | refresh/backoff 中 stop 可中断；stop 后不开始 reserve/deactivate/delete；10 秒总 deadline；DB 不早关 |
+| 兼容 | 旧 schema v1 加法迁移；旧镜像忽略新增对象；159 Alias、key、settings、audit 摘要守恒 |
+| 配置 | 基础/server Compose 自定义四变量进入 app；生产 `.env` 合并后仍为 `0600` |
+| 协议 | setup validate 固定 POST/URL/header/body、无 redirect；真实 validate/list 各一次且仅记录脱敏计数 |
+| 部署 | app-only 切换；最长连续非 200 小于 60 秒；browser/cn-proxy/Caddy ID 与 restart/OOM 不变 |
+
+### 23.6 回滚边界
+
+- 代码、页面、任务 worker 或协议异常：恢复部署前 app 镜像、源码和 marker；保留当前 SQLite 与
+  browser profile，不删除新加法表/列，不自动重放 unknown Apple 写。
+- SQLite `quick_check` 或迁移守恒失败：切换前停止，生产不动；切换后先保留故障库，再按审计目录
+  的在线备份恢复。只有这一类数据损坏允许恢复 SQLite。
+- Apple validate/list 失败：保持生产 `67968b7` 和现有 Session 捕获路径，不调用任何 Apple 写接口，
+  不用多种 body 盲试；记录脱敏错误类别后停止部署。
+
+### 23.7 当前实施记录
+
+- 2026-08-01：用户在获知复审结论后明确授权部署。本轮选择先修复已稳定复现的控制缺口，再部署
+  修复提交。GitHub 参考确认 SQLite queue 应采用原子 claim/claim owner；本地 `main` 已快进为
+  `400f484`，未访问生产服务器，未调用 Apple 或 IMAP。
+- 2026-08-01：节点 C 的修复前故障注入已建立并稳定得到 10 个失败：三种 lifecycle 均发生第二次
+  list，三种 lifecycle 均可在 stop 后进入 Apple 写，`needs_reconcile` 从恢复列表消失，两个 manager
+  对同一项执行两次副作用，stop 后 create job 仍完成 reserve，以及 lifespan 在 worker 卡住时不广播
+  Gateway stop。测试仅使用本地 fake/SQLite，未访问生产或真实 Apple。
+- 2026-08-01：节点 C 已闭环。三种 lifecycle 直接提交同一份完整确认快照；job claim 在单个
+  `BEGIN IMMEDIATE` 中完成，数据库旁 `flock` 只允许一个 owner 恢复/执行且阻塞线程不会提前释放；
+  reconcile 任务及规范化逐项错误可在刷新后恢复；lifespan 先同时广播两个 stop，再共用 10 秒
+  deadline，未停 worker 时不关闭 SQLite。新增故障注入及受影响模块测试通过，完整本地门禁进入
+  节点 D；仍未访问生产、Apple 或 IMAP。
+- 2026-08-01：节点 D 的提交前门禁通过：全量 `193 passed`；Ruff check/format、Python compileall、
+  两个 JavaScript 文件语法、基础/server Compose 四个自定义值展开、`git diff --check` 和跟踪文件
+  高风险秘密扫描均通过。格式器同时机械收敛基线中 6 个旧格式问题；GitHub `origin/main` 复核仍为
+  `400f484`，没有远端漂移。当前待创建并推送功能提交，生产仍未访问。

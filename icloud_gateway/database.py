@@ -782,27 +782,42 @@ class Database:
         rows = connection.execute(
             """
             SELECT * FROM batch_jobs
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'running', 'needs_reconcile')
             ORDER BY created_at, id
             """
         ).fetchall()
         return [self._batch_job_from_row(row, connection=connection) for row in rows]
 
     def next_batch_job(self) -> dict[str, Any] | None:
-        connection = self._connect()
-        row = connection.execute(
-            """
-            SELECT * FROM batch_jobs
-            WHERE status IN ('queued', 'running')
-            ORDER BY created_at, id
-            LIMIT 1
-            """
-        ).fetchone()
-        return None if row is None else self._batch_job_from_row(row, connection=connection)
+        with self.transaction() as connection:
+            selected = connection.execute(
+                """
+                SELECT id FROM batch_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at, id
+                LIMIT 1
+                """
+            ).fetchone()
+            if selected is None:
+                return None
+            timestamp = _now()
+            claimed = connection.execute(
+                """
+                UPDATE batch_jobs
+                SET status = 'running', error = NULL, updated_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (timestamp, selected["id"]),
+            )
+            if claimed.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM batch_jobs WHERE id = ?", (selected["id"],)
+            ).fetchone()
+            assert row is not None
+            return self._batch_job_from_row(row, connection=connection)
 
-    def set_batch_job_status(
-        self, job_id: str, status: str, *, error: str | None = None
-    ) -> None:
+    def set_batch_job_status(self, job_id: str, status: str, *, error: str | None = None) -> None:
         with self.transaction() as connection:
             cursor = connection.execute(
                 "UPDATE batch_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",

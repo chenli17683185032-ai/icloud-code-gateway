@@ -187,10 +187,20 @@
     "cancelled",
   ]);
 
+  function jobSummary(job) {
+    const base = `请求 ${job.requested} 项，成功 ${job.succeeded} 项，失败 ${job.failed} 项。`;
+    if (job.status !== "needs_reconcile") return base;
+    const unknown = job.results.filter((item) => item.status === "unknown").length;
+    const queued = job.results.filter((item) => item.status === "queued").length;
+    return `${base} ${unknown} 项远端结果不确定，需要人工对账；${queued} 项尚未开始并保持排队。`;
+  }
+
   async function pollJob(jobId, messageElement) {
     while (true) {
       const job = await api(`/admin/api/jobs/${encodeURIComponent(jobId)}`);
-      messageElement.textContent = `任务进度 ${job.current}/${job.requested}，成功 ${job.succeeded}，失败 ${job.failed}。`;
+      messageElement.textContent = terminalJobStatuses.has(job.status)
+        ? jobSummary(job)
+        : `任务进度 ${job.current}/${job.requested}，成功 ${job.succeeded}，失败 ${job.failed}。`;
       if (terminalJobStatuses.has(job.status)) return job;
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
@@ -206,7 +216,7 @@
     const successfulKeys = job.results
       .filter((item) => item.status === "success" && item.access_key)
       .map((item) => ({ ...item, public_url: job.public_url }));
-    const summary = `请求 ${job.requested} 项，成功 ${job.succeeded} 项，失败 ${job.failed} 项。`;
+    const summary = jobSummary(job);
     if (successfulKeys.length) {
       openModal(successfulKeys, summary);
     } else {
@@ -485,7 +495,8 @@
   async function resumeActiveJobs() {
     try {
       const data = await api("/admin/api/jobs");
-      const job = data.jobs[0];
+      const job =
+        data.jobs.find((item) => !terminalJobStatuses.has(item.status)) || data.jobs[0];
       if (!job) return;
       const messageElement = job.kind === "create_aliases" ? createMessage : bulkMessage;
       if (!messageElement) return;

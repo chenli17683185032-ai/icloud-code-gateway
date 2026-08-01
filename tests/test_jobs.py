@@ -102,10 +102,14 @@ def test_completed_items_survive_restart_without_secret_job_results(database: Da
     assert recovered["status"] == "queued"
     assert recovered["items"][0]["status"] == "success"
     assert recovered["items"][1]["status"] == "queued"
-    raw = sqlite3.connect(database.path).execute(
-        "SELECT result_blob FROM batch_job_items WHERE job_id = ? AND item_index = 1",
-        (job["id"],),
-    ).fetchone()[0]
+    raw = (
+        sqlite3.connect(database.path)
+        .execute(
+            "SELECT result_blob FROM batch_job_items WHERE job_id = ? AND item_index = 1",
+            (job["id"],),
+        )
+        .fetchone()[0]
+    )
     assert b"one@example.com" not in raw
     assert b"icg_" not in raw
 
@@ -126,6 +130,206 @@ class _Gateway:
     def deactivate_alias(self, _alias_id):
         self.calls += 1
         raise GatewayError("confirmation failed after remote write")
+
+
+def test_reconciliation_job_remains_visible_with_normalized_item_error(
+    database: Database, tmp_path
+) -> None:
+    job, _created = database.create_batch_job(
+        kind="bulk_aliases",
+        action="deactivate",
+        fingerprint=b"v" * 32,
+        items=[{"alias_id": "one"}, {"alias_id": "two"}],
+    )
+    database.set_batch_job_status(job["id"], "running")
+    database.update_batch_item(job["id"], 1, stage="executing", status="running", alias_id="one")
+    database.recover_interrupted_batch_jobs()
+
+    visible = BatchJobManager(_Gateway(database, tmp_path)).active_jobs()
+
+    assert len(visible) == 1
+    assert visible[0]["status"] == "needs_reconcile"
+    assert visible[0]["results"][0]["error"] == "interrupted_in_flight"
+    assert visible[0]["results"][1]["status"] == "queued"
+
+
+def test_batch_job_claim_is_atomic_across_database_connections(
+    database: Database,
+) -> None:
+    second_database = Database(database.path, SecretBox(bytes(range(32))))
+    second_database.initialize()
+    job, _created = database.create_batch_job(
+        kind="bulk_aliases",
+        action="issue_keys",
+        fingerprint=b"c" * 32,
+        items=[{"alias_id": "one"}],
+    )
+    barrier = threading.Barrier(2)
+    results = []
+    results_lock = threading.Lock()
+
+    def claim(value: Database) -> None:
+        barrier.wait()
+        claimed = value.next_batch_job()
+        with results_lock:
+            results.append(claimed)
+
+    first_thread = threading.Thread(target=claim, args=(database,))
+    second_thread = threading.Thread(target=claim, args=(second_database,))
+    try:
+        first_thread.start()
+        second_thread.start()
+        first_thread.join(2)
+        second_thread.join(2)
+
+        assert not first_thread.is_alive()
+        assert not second_thread.is_alive()
+        claimed = [item for item in results if item is not None]
+        assert len(claimed) == 1
+        assert claimed[0]["id"] == job["id"]
+        assert claimed[0]["status"] == "running"
+    finally:
+        second_database.close()
+
+
+def test_two_managers_share_one_worker_owner_and_one_remote_side_effect(
+    database: Database, tmp_path
+) -> None:
+    second_database = Database(database.path, SecretBox(bytes(range(32))))
+    second_database.initialize()
+    job, _created = database.create_batch_job(
+        kind="bulk_aliases",
+        action="deactivate",
+        fingerprint=b"o" * 32,
+        items=[{"alias_id": "one"}],
+    )
+    calls = 0
+    calls_lock = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def deactivate(_alias_id):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            entered.set()
+        assert release.wait(2)
+        return {"id": "one", "email": "one@example.com", "label": "One"}
+
+    first_gateway = _Gateway(database, tmp_path)
+    second_gateway = _Gateway(second_database, tmp_path)
+    first_gateway.deactivate_alias = deactivate
+    second_gateway.deactivate_alias = deactivate
+    first = BatchJobManager(first_gateway, throttle_seconds=0)
+    second = BatchJobManager(second_gateway, throttle_seconds=0)
+    try:
+        first.start()
+        second.start()
+        assert entered.wait(1)
+        time.sleep(0.1)
+
+        assert calls == 1
+        assert sum((first.owns_worker, second.owns_worker)) == 1
+        assert first.shutdown(timeout=0.05) is False
+        assert first.owns_worker is True
+        assert second.owns_worker is False
+        release.set()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if database.get_batch_job(job["id"])["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert database.get_batch_job(job["id"])["status"] == "completed"
+        assert calls == 1
+    finally:
+        release.set()
+        first.shutdown(timeout=2)
+        second.shutdown(timeout=2)
+        second_database.close()
+
+
+def test_stop_during_freshness_keeps_unstarted_reserve_queued(tmp_path) -> None:
+    freshness_entered = threading.Event()
+    release_freshness = threading.Event()
+    generated = []
+    reserved = []
+
+    class Client:
+        def __init__(self, _session):
+            pass
+
+        def list_aliases(self):
+            return []
+
+        def generate_alias(self):
+            generated.append(True)
+            return "candidate@icloud.com"
+
+        def reserve_alias(self, candidate, *, label, note):
+            reserved.append((candidate, label, note))
+            return {
+                "hme": candidate,
+                "anonymousId": "candidate",
+                "isActive": True,
+            }
+
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=Client,
+        start_maintenance=False,
+    )
+    gateway.save_hme_session(
+        ICloudHmeSession(
+            host="p123-maildomainws.icloud.com.cn",
+            dsid="123",
+            client_id="client",
+            client_build_number="build",
+            client_mastering_number="master",
+            cookie=(
+                "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+                "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+            ),
+            origin="https://www.icloud.com.cn",
+            referer="https://www.icloud.com.cn/icloudplus/",
+        )
+    )
+
+    def blocking_freshness():
+        freshness_entered.set()
+        assert release_freshness.wait(2)
+
+    gateway._ensure_hme_fresh = blocking_freshness
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = manager.create_alias_job(
+        count=1,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager.start()
+        assert freshness_entered.wait(1)
+        manager.request_stop()
+        gateway.request_stop()
+        release_freshness.set()
+        assert manager.shutdown(timeout=2)
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "queued"
+        assert current["items"][0]["status"] == "queued"
+        assert generated == []
+        assert reserved == []
+    finally:
+        release_freshness.set()
+        manager.shutdown(timeout=2)
+        gateway.shutdown()
 
 
 def test_generated_candidate_is_reserved_without_generating_again(

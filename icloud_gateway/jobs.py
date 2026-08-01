@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import threading
 import time
 from collections.abc import Mapping
 from contextlib import suppress
-from typing import Any
+from typing import Any, BinaryIO
 
 from .database import ConflictError, Database, NotFoundError
 from .hme import HmeError, HmeNetworkError, HmeSessionError
-from .service import GatewayError
+from .service import GatewayError, GatewayStoppingError
 
 TERMINAL_JOB_STATUSES = {
     "completed",
@@ -39,27 +40,76 @@ class BatchJobManager:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        self._owner_lock: BinaryIO | None = None
+        self._owner = threading.Event()
+
+    @property
+    def owns_worker(self) -> bool:
+        return self._owner.is_set()
 
     def start(self) -> None:
         if self._thread is not None:
             return
-        self.database.recover_interrupted_batch_jobs()
-        self._thread = threading.Thread(
-            target=self._worker_loop,
-            name="icloud-batch-jobs",
-            daemon=True,
-        )
-        self._thread.start()
+        lock_path = self.database.path.with_name(f"{self.database.path.name}.batch-worker.lock")
+        self._owner_lock = lock_path.open("a+b")
+        with suppress(OSError):
+            lock_path.chmod(0o600)
+        try:
+            if self._try_acquire_owner():
+                self.database.recover_interrupted_batch_jobs()
+            self._thread = threading.Thread(
+                target=self._worker_loop,
+                name="icloud-batch-jobs",
+                daemon=True,
+            )
+            self._thread.start()
+        except Exception:
+            self._release_owner()
+            raise
+        self._wake.set()
+
+    def request_stop(self) -> None:
+        self._stop.set()
         self._wake.set()
 
     def shutdown(self, *, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout))
-        self._stop.set()
-        self._wake.set()
+        self.request_stop()
         thread = self._thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
         return thread is None or not thread.is_alive()
+
+    def _try_acquire_owner(self) -> bool:
+        if self._owner.is_set():
+            return True
+        if self._owner_lock is None:
+            return False
+        try:
+            fcntl.flock(self._owner_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        self._owner.set()
+        return True
+
+    def _release_owner(self) -> None:
+        owner_lock = self._owner_lock
+        if owner_lock is None:
+            return
+        if self._owner.is_set():
+            with suppress(OSError):
+                fcntl.flock(owner_lock.fileno(), fcntl.LOCK_UN)
+        self._owner.clear()
+        with suppress(OSError):
+            owner_lock.close()
+        self._owner_lock = None
+
+    def _stopping(self) -> bool:
+        return self._stop.is_set() or bool(getattr(self.gateway, "stop_requested", False))
+
+    def _raise_if_stopping(self) -> None:
+        if self._stopping():
+            raise GatewayStoppingError("batch worker is shutting down")
 
     def create_alias_job(
         self,
@@ -148,6 +198,9 @@ class BatchJobManager:
                 "stage": item["stage"],
                 "status": item["status"],
             }
+            item_error = self._public_item_error(item)
+            if item_error is not None:
+                value["error"] = item_error
             result = item.get("result")
             if isinstance(result, Mapping):
                 value.update({key: entry for key, entry in result.items() if key != "candidate"})
@@ -184,25 +237,53 @@ class BatchJobManager:
             "public_url": self.gateway.settings.public_base_url,
         }
 
+    @staticmethod
+    def _public_item_error(item: Mapping[str, Any]) -> str | None:
+        if not item.get("error"):
+            return None
+        if item.get("status") == "unknown":
+            if str(item.get("error")) == "interrupted during an in-flight operation":
+                return "interrupted_in_flight"
+            return "remote_write_unknown"
+        if item.get("error") in {"not_found", "conflict"}:
+            return str(item["error"])
+        if str(item.get("error")) == "remote write was not attempted":
+            return "remote_write_not_attempted"
+        return "operation_failed"
+
     def _worker_loop(self) -> None:
-        while not self._stop.is_set():
-            job = self.database.next_batch_job()
-            if job is None:
-                self._wake.wait(timeout=1.0)
-                self._wake.clear()
-                continue
-            try:
-                self._run_job(job)
-            except Exception:
-                with suppress(Exception):
-                    self.database.set_batch_job_status(
-                        job["id"], "failed", error="batch worker failed safely"
-                    )
+        recovered = self._owner.is_set()
+        try:
+            while not self._stop.is_set():
+                if not self._owner.is_set():
+                    if not self._try_acquire_owner():
+                        self._wake.wait(timeout=0.25)
+                        self._wake.clear()
+                        continue
+                    self.database.recover_interrupted_batch_jobs()
+                    recovered = True
+                if not recovered:
+                    self.database.recover_interrupted_batch_jobs()
+                    recovered = True
+                job = self.database.next_batch_job()
+                if job is None:
+                    self._wake.wait(timeout=1.0)
+                    self._wake.clear()
+                    continue
+                try:
+                    self._run_job(job)
+                except Exception:
+                    with suppress(Exception):
+                        self.database.set_batch_job_status(
+                            job["id"], "failed", error="batch worker failed safely"
+                        )
+        finally:
+            self._release_owner()
 
     def _run_job(self, job: Mapping[str, Any]) -> None:
         self.database.set_batch_job_status(job["id"], "running")
         for item in job["items"]:
-            if self._stop.is_set():
+            if self._stopping():
                 self.database.set_batch_job_status(job["id"], "queued")
                 return
             if item["status"] != "queued":
@@ -214,6 +295,9 @@ class BatchJobManager:
                     "needs_reconcile",
                     error="remote write outcome is unknown; automatic replay stopped",
                 )
+                return
+            if self._stopping():
+                self.database.set_batch_job_status(job["id"], "queued")
                 return
             if self._stop.wait(self.throttle_seconds):
                 self.database.set_batch_job_status(job["id"], "queued")
@@ -239,7 +323,9 @@ class BatchJobManager:
         remote_write_started = False
         remote_write_attempted = False
         try:
+            self._raise_if_stopping()
             self.gateway._ensure_hme_fresh()
+            self._raise_if_stopping()
             self.gateway._begin_remote_write()
             remote_write_started = True
             with self.gateway._hme_lock:
@@ -299,9 +385,7 @@ class BatchJobManager:
                     alias_id=alias["id"],
                     result={"id": alias["id"], "email": alias["email"], "label": alias["label"]},
                 )
-                self.database.record_audit_event(
-                    "alias_create", "succeeded", alias_id=alias["id"]
-                )
+                self.database.record_audit_event("alias_create", "succeeded", alias_id=alias["id"])
                 return False
         except (HmeNetworkError, HmeSessionError):
             if remote_write_attempted:
@@ -324,6 +408,8 @@ class BatchJobManager:
             self.database.record_audit_event("alias_create", "error")
             return False
         except Exception as exc:
+            if not remote_write_attempted and self._stopping():
+                return False
             if remote_write_attempted:
                 self.database.update_batch_item(
                     job_id,
@@ -349,10 +435,11 @@ class BatchJobManager:
         index = int(item["index"])
         alias_id = str(item["input"]["alias_id"])
         remote_write = action in {"deactivate", "delete"}
-        self.database.update_batch_item(
-            job_id, index, stage="executing", status="running", alias_id=alias_id
-        )
         try:
+            self._raise_if_stopping()
+            self.database.update_batch_item(
+                job_id, index, stage="executing", status="running", alias_id=alias_id
+            )
             if action == "issue_keys":
                 self.gateway.issue_access_key(alias_id)
                 alias = self.database.get_alias(alias_id)
@@ -374,6 +461,15 @@ class BatchJobManager:
                 status="success",
                 alias_id=alias_id,
                 result=result,
+            )
+            return False
+        except GatewayStoppingError:
+            self.database.update_batch_item(
+                job_id,
+                index,
+                stage="queued",
+                status="queued",
+                alias_id=alias_id,
             )
             return False
         except NotFoundError:

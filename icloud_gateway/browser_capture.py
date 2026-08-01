@@ -443,12 +443,18 @@ class CaptureManager:
         self._publish(status)
         return status.as_dict()
 
+    def request_stop(self) -> None:
+        with self._lock:
+            job = self._job
+            if job is not None and job.thread is not None and job.thread.is_alive():
+                job.cancel_event.set()
+
     def shutdown(self, *, timeout: float = 10.0) -> bool:
+        self.request_stop()
         with self._lock:
             job = self._job
             if job is None or job.thread is None or not job.thread.is_alive():
                 return True
-            job.cancel_event.set()
             thread = job.thread
         thread.join(max(0.0, float(timeout)))
         return not thread.is_alive()

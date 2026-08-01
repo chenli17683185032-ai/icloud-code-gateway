@@ -71,6 +71,10 @@ class GatewayRetryableError(GatewayError):
     code = "retryable"
 
 
+class GatewayStoppingError(GatewayRetryableError):
+    pass
+
+
 @dataclass(frozen=True)
 class CodeLookupResult:
     status: str
@@ -138,8 +142,10 @@ def _timestamp() -> str:
 
 
 def _iso_timestamp(value: float) -> str:
-    return datetime.fromtimestamp(value, tz=UTC).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.fromtimestamp(value, tz=UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -220,21 +226,29 @@ class GatewayService:
             )
             self._maintenance_thread.start()
 
-    def shutdown(self, *, timeout: float = 10.0) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        self._stop_event.set()
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    def request_stop(self) -> None:
+        with self._hme_lock:
+            self._stop_event.set()
         with self._refresh_condition:
             self._refresh_condition.notify_all()
+        self.capture_manager.request_stop()
+
+    def shutdown(self, *, timeout: float = 10.0, close_database: bool = True) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        self.request_stop()
         thread = self._maintenance_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
         if thread is not None and thread.is_alive():
             return False
-        if not self.capture_manager.shutdown(
-            timeout=max(0.0, deadline - time.monotonic())
-        ):
+        if not self.capture_manager.shutdown(timeout=max(0.0, deadline - time.monotonic())):
             return False
-        self.database.close()
+        if close_database:
+            self.database.close()
         return True
 
     def get_hme_session(self) -> ICloudHmeSession | None:
@@ -329,10 +343,14 @@ class GatewayService:
             return True
 
     def _begin_remote_write(self) -> None:
+        if self._stop_event.is_set():
+            raise GatewayStoppingError("gateway is shutting down")
         if not self._remote_write_lock.acquire(blocking=False):
             raise GatewayBusyError("alias lifecycle operation is already in progress")
         try:
             with self._hme_lock:
+                if self._stop_event.is_set():
+                    raise GatewayStoppingError("gateway is shutting down")
                 self._remote_write_active = True
                 self._alias_generation += 1
         except Exception:
@@ -347,7 +365,7 @@ class GatewayService:
     def _refresh_hme_session(self, *, during_write: bool = False) -> ICloudHmeSession:
         with self._refresh_condition:
             if self._stop_event.is_set():
-                raise GatewayRetryableError("gateway is shutting down")
+                raise GatewayStoppingError("gateway is shutting down")
             generation = self._refresh_generation
             if self._refreshing:
                 while self._refreshing and not self._stop_event.is_set():
@@ -371,10 +389,10 @@ class GatewayService:
                 raise GatewayNotConfiguredError("iCloud HME session is not configured")
             candidate = self.hme_session_refresher(old_session)
             if self._stop_event.is_set():
-                raise GatewayRetryableError("gateway is shutting down")
+                raise GatewayStoppingError("gateway is shutting down")
             aliases = self._validated_alias_snapshot(candidate)
             if self._stop_event.is_set():
-                raise GatewayRetryableError("gateway is shutting down")
+                raise GatewayStoppingError("gateway is shutting down")
             committed = self._commit_alias_snapshot(
                 aliases,
                 alias_generation,
@@ -415,6 +433,8 @@ class GatewayService:
         return result
 
     def _ensure_hme_fresh(self) -> None:
+        if self._stop_event.is_set():
+            raise GatewayStoppingError("gateway is shutting down")
         with self._state_lock:
             last_validated = self._last_validated_ts
         if last_validated is None or float(self.clock()) - last_validated >= float(
@@ -451,9 +471,7 @@ class GatewayService:
                 backoff = 300.0
                 delay = float(self.settings.hme_maintenance_interval_seconds)
                 with self._state_lock:
-                    self._hme_state["next_attempt_at"] = _iso_timestamp(
-                        float(self.clock()) + delay
-                    )
+                    self._hme_state["next_attempt_at"] = _iso_timestamp(float(self.clock()) + delay)
 
     def save_hme_session(self, session: ICloudHmeSession) -> int:
         alias_generation = self._begin_alias_snapshot()
@@ -870,7 +888,6 @@ class GatewayService:
                 anonymous_id,
                 expected_active=False,
             )
-            remote_aliases = self._validated_remote_aliases(client.list_aliases())
             with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
                 self._alias_generation += 1
@@ -900,7 +917,6 @@ class GatewayService:
                 anonymous_id,
                 expected_active=True,
             )
-            remote_aliases = self._validated_remote_aliases(client.list_aliases())
             with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
                 self._alias_generation += 1
@@ -931,10 +947,6 @@ class GatewayService:
                 client,
                 anonymous_id,
                 expected_absent=True,
-            )
-            remote_aliases = self._validated_remote_aliases(
-                client.list_aliases(),
-                allow_empty=self.database.count_remote_aliases() <= 1,
             )
             with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
@@ -1145,5 +1157,6 @@ __all__ = [
     "GatewayNotConfiguredError",
     "GatewayRateLimitedError",
     "GatewayRetryableError",
+    "GatewayStoppingError",
     "GatewayService",
 ]

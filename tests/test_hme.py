@@ -283,9 +283,7 @@ def test_setup_validate_merges_rotated_cookies_and_preserves_others() -> None:
         calls.append((method, url, kwargs))
         return FakeResponse(
             {"dsInfo": {"appleId": "user@example.com"}},
-            headers={
-                "Set-Cookie": "X-APPLE-WEBAUTH-TOKEN=rotated-token; Path=/; Secure"
-            },
+            headers={"Set-Cookie": "X-APPLE-WEBAUTH-TOKEN=rotated-token; Path=/; Secure"},
         )
 
     refreshed = validate_icloud_setup_session(session(), requester=requester)
@@ -334,9 +332,12 @@ def test_setup_validate_retries_network_errors_without_misclassifying_auth() -> 
 
     with pytest.raises(HmeNetworkError) as caught:
         validate_icloud_setup_session(
-            session(), requester=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            session(),
+            requester=lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 requests.ConnectionError("session-secret")
-            ), sleeper=lambda _delay: None, jitter=lambda: 0.0
+            ),
+            sleeper=lambda _delay: None,
+            jitter=lambda: 0.0,
         )
     assert not isinstance(caught.value, HmeSessionError)
     assert "session-secret" not in str(caught.value)
@@ -352,9 +353,7 @@ def test_setup_validate_stop_event_interrupts_retry_wait() -> None:
 
     stop_event.set()
     with pytest.raises(HmeNetworkError, match="cancelled"):
-        validate_icloud_setup_session(
-            session(), requester=requester, stop_event=stop_event
-        )
+        validate_icloud_setup_session(session(), requester=requester, stop_event=stop_event)
     assert calls == []
 
 

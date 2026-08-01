@@ -681,6 +681,116 @@ def test_remote_lifecycle_rejects_partial_confirmation_snapshot(tmp_path) -> Non
     assert gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key))
 
 
+@pytest.mark.parametrize(
+    ("action", "target_active", "expected_state"),
+    [
+        ("deactivate", True, "inactive"),
+        ("reactivate", False, "active"),
+        ("delete", False, None),
+    ],
+)
+def test_lifecycle_commits_the_same_complete_confirmation_snapshot(
+    tmp_path, action, target_active, expected_state
+) -> None:
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {
+            "hme": "target@icloud.com",
+            "anonymousId": "target",
+            "isActive": target_active,
+        },
+        {"hme": "keeper@icloud.com", "anonymousId": "keeper", "isActive": True},
+        {
+            "hme": "unrelated@icloud.com",
+            "anonymousId": "unrelated",
+            "isActive": True,
+        },
+    ]
+    gateway.save_hme_session(hme_session())
+    aliases = {item["email"]: item for item in gateway.database.list_aliases()}
+    target = aliases["target@icloud.com"]
+    unrelated = aliases["unrelated@icloud.com"]
+    issued = gateway.issue_access_key(unrelated["id"])
+    list_calls = []
+
+    class CompleteThenPartialClient(FakeHmeClient):
+        def list_aliases(self):
+            snapshot = super().list_aliases()
+            list_calls.append([item["anonymousId"] for item in snapshot])
+            if len(list_calls) > 1:
+                return [item for item in snapshot if item.get("anonymousId") != "unrelated"]
+            return snapshot
+
+    gateway.hme_client_factory = CompleteThenPartialClient
+    try:
+        if action == "deactivate":
+            gateway.deactivate_alias(target["id"])
+        elif action == "reactivate":
+            gateway.reactivate_alias(target["id"])
+        else:
+            gateway.delete_alias(target["id"], confirmation=target["email"])
+
+        assert len(list_calls) == 1
+        unchanged = gateway.database.get_alias(unrelated["id"])
+        assert unchanged["state"] == "active"
+        assert gateway.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key))
+        if expected_state is None:
+            with pytest.raises(NotFoundError):
+                gateway.database.get_alias(target["id"])
+        else:
+            assert gateway.database.get_alias(target["id"])["state"] == expected_state
+    finally:
+        gateway.shutdown()
+
+
+@pytest.mark.parametrize("operation", ["deactivate", "reactivate", "delete"])
+def test_stop_after_freshness_prevents_lifecycle_write(tmp_path, operation) -> None:
+    initial_active = operation == "deactivate"
+    gateway = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {
+            "hme": "person@icloud.com",
+            "anonymousId": "person",
+            "isActive": initial_active,
+        }
+    ]
+    gateway.save_hme_session(hme_session())
+    alias = gateway.database.list_aliases()[0]
+    freshness_entered = threading.Event()
+    release_freshness = threading.Event()
+    errors = []
+
+    def blocking_freshness():
+        freshness_entered.set()
+        assert release_freshness.wait(2)
+
+    gateway._ensure_hme_fresh = blocking_freshness
+
+    def run_operation():
+        try:
+            if operation == "deactivate":
+                gateway.deactivate_alias(alias["id"])
+            elif operation == "reactivate":
+                gateway.reactivate_alias(alias["id"])
+            else:
+                gateway.delete_alias(alias["id"], confirmation=alias["email"])
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_operation)
+    worker.start()
+    assert freshness_entered.wait(1)
+    gateway.request_stop()
+    release_freshness.set()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert FakeHmeClient.lifecycle_calls == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], GatewayRetryableError)
+    gateway.shutdown()
+
+
 def test_permanent_delete_requires_inactive_state_confirmation_and_remote_absence(
     tmp_path,
 ) -> None:

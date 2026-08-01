@@ -309,18 +309,18 @@ docker compose ps
 - 回国代理凭据：修改 `.env` 后重建 app 和 browser，并重新验证两个出口。
 - 主密钥：不能只替换环境值。需要先实现/执行数据库密文重加密迁移；直接替换会使已有密文不可读。
 
-## 10. 发布阻断：`3030701`
+## 10. 发布阻断：`400f484` 与后续修复
 
-`3030701` 当前不得部署到生产。部署前必须在后续修复提交中同时满足：
+`3030701` 的第一层发布阻断已由 `400f484` 修复，但复审确认 `400f484` 本身仍不得部署。生产只能接收晚于该提交且同时满足以下条件的修复版本：
 
-1. Alias list 快照使用 generation/CAS，过期后台快照不能覆盖停用、恢复或删除后的状态。
-2. 批量创建和批量生命周期操作使用 SQLite 持久任务；POST 快速返回任务 ID，页面轮询进度，Cloudflare 524 不会留下失控的无反馈请求。
-3. 两套 Compose 展开的 app 环境均包含 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT`，且服务器 `.env` 自定义值已验证生效。
-4. 159 条生产 Alias 的管理页最多选择服务端有效上限，发送前再次校验，不产生 422。
-5. maintenance/job worker 优雅停机总时长有界，SQLite 不会在线程仍运行时关闭。
-6. 使用真实现有 Apple 会话只执行一次 setup validate 和 HME list 只读验收；不记录 Cookie、token、Apple ID、Alias 或响应正文，不执行 generate/reserve/deactivate/reactivate/delete。
+1. Alias lifecycle 写成功后只提交已经证明集合完整的同一份确认快照，不进行第二次 list；停用、恢复和删除均不能让无关 Alias 失活或丢失 key。
+2. `queued -> running` 在单个 SQLite `BEGIN IMMEDIATE` 事务中原子完成；数据库旁的 worker owner 锁跨进程独占。只有 owner 执行恢复和远端副作用，阻塞线程未退出时不得释放锁。
+3. `needs_reconcile` 持续出现在管理页恢复接口，逐项错误只返回规范化代码；远端结果不确定的项不自动重放，尚未开始的项保持 queued。
+4. lifespan 先同时广播 job 和 Gateway stop，再使用同一个 10 秒 deadline 等待；stop 后不得开始 reserve/deactivate/reactivate/delete，任一后台线程未停时不得关闭 SQLite。
+5. 两套 Compose 自定义环境展开、完整测试、Ruff check/format、Python/JS 语法、diff 和秘密扫描必须通过。切换前还必须在隔离数据库副本上验证迁移与任务恢复，候选不得连接生产数据库启动 worker。
+6. 使用真实现有 Apple 会话只执行一次 setup validate 和一次 HME list 只读验收；不记录 Cookie、token、Apple ID、Alias 或响应正文，不执行 generate/reserve/deactivate/reactivate/delete。
 
-真实只读协议验收或隔离候选任一失败时，保持生产 `67968b7` 镜像和当前持久数据不变，不继续切换。详细实施节点、回滚和测试矩阵见 `IMPLEMENTATION_PLAN.md` 第 22 节。
+真实只读协议验收、隔离候选或 60 秒 watchdog 任一失败时，保持或自动恢复生产 `67968b7` 镜像、旧源码和旧部署标记；普通代码回滚不恢复 SQLite。详细实施节点、回滚和测试矩阵见 `IMPLEMENTATION_PLAN.md` 第 23 节。
 
 ## 11. 运维记录
 

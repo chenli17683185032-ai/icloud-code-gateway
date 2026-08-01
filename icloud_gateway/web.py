@@ -198,9 +198,13 @@ def create_app(
             yield
         finally:
             deadline = time.monotonic() + 10.0
+            jobs.request_stop()
+            gateway.request_stop()
             jobs_stopped = jobs.shutdown(timeout=max(0.0, deadline - time.monotonic()))
-            if jobs_stopped:
-                gateway.shutdown(timeout=max(0.0, deadline - time.monotonic()))
+            gateway.shutdown(
+                timeout=max(0.0, deadline - time.monotonic()),
+                close_database=jobs_stopped,
+            )
 
     app = FastAPI(
         title="iCloud Code Gateway",
