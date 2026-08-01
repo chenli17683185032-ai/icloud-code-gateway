@@ -1580,3 +1580,12 @@ P2，当前禁止部署到生产：
   清单 SHA-256 为 `808bb1fb685d199746fbcee5f8b6404b86ac38d40edbd09afe1a1734f5569de2`。
   当前发布阻断是生产保存的 Apple Session 已失效；必须先在持久浏览器中完成重新认证/捕获，再为
   新会话重新制定一次性的 validate/list 门禁，不能沿用本次已消费的调用预算。
+- 2026-08-02：后续修复链已先行部署至 `e9fdc4f`；本次从该生产基线发布纯 UI 提交
+  `49b2d9b0ecd6cd41a9aeb9b248d90858541f4ec3`，不再触碰第 23 节的 Apple 协议门禁。候选镜像使用
+  隔离临时数据目录，健康与“一键复制/导出信息”契约断言通过；独立 60 秒 watchdog 只重建 app，
+  `22.668s` 内完成 healthy、revision、marker、内外 200 和数据指纹闭环并接受新版本。生产 SQLite
+  `quick_check=ok`，194/176 个 Alias、446 条审计、2 条设置以及全部 job/item 指纹前后一致；既有 5 个
+  `needs_reconcile` 终态任务未自动重放。本轮未访问 Apple/HME 或 IMAP，browser、cn-proxy、Caddy
+  未修改。新镜像为 `sha256:2fbc3239f6a803f8dd1e0774400899e40a09eab9d4f3d1718702f398975fb874`，
+  审计目录 `/opt/new-api/icloud-code-gateway/backups/ui-copy-export-20260801T174254Z-49b2d9b`，清单
+  SHA-256 为 `2d228e321756d9a1885e54ca7780e205dbb662f72c4dd0bbdb6737b3f4c89e6b`。

@@ -332,6 +332,7 @@ docker compose ps
 
 ## 11. 运维记录
 
+- 2026-08-02：复制/导出格式修复提交 `49b2d9b0ecd6cd41a9aeb9b248d90858541f4ec3` 已部署。“一键复制”仅输出邮箱且一行一个，“导出信息”采用“邮箱、网站、密钥”标准字段。生产从 `e9fdc4f` 升级，目标仅变更管理页脚本、模板和测试；候选镜像在隔离临时数据目录中通过健康及 UI 契约断言后，由独立 60 秒 watchdog 只 force-recreate app，`22.668s` 完成 healthy、revision、marker、内外 200 和数据指纹闭环，状态 `accepted`，未触发回滚。新 app 容器 `7dd21948d0820e7be762cd930bfa47439f2c0b34d11c97a9b2f583d22d29c4fe`，镜像 `sha256:2fbc3239f6a803f8dd1e0774400899e40a09eab9d4f3d1718702f398975fb874`，固定为 `prod/release-49b2d9b`；browser `bcef6bba...`、cn-proxy `ed6f331e...` 未重建，共享 Caddy 未改，正式容器均为 `healthy/restart=0/OOM=false`。SQLite `quick_check=ok`，194/176 个 Alias、446 条审计、2 条设置以及 job/item 数据指纹前后完全一致；既有 5 个 `needs_reconcile` 终态任务保持不变，未自动重放，本轮未访问 Apple/HME 或 IMAP。公网健康/首页/登录为 200，未登录 noVNC 为 303，严重日志为 0。审计目录为 `/opt/new-api/icloud-code-gateway/backups/ui-copy-export-20260801T174254Z-49b2d9b`，清单 SHA-256 为 `2d228e321756d9a1885e54ca7780e205dbb662f72c4dd0bbdb6737b3f4c89e6b`；旧镜像 `sha256:b1eeaa894651a696a4485f2d00d448d7085e0a9460b0906f981d1905ad49978f` 保留专用 rollback 标签。普通回滚只恢复源码/marker、重标旧镜像并仅重建 app，不恢复 SQLite，不动 browser/profile、cn-proxy 或 Caddy。
 - 2026-08-01：状态机修复提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea` 已推送 GitHub
   `main`，但未部署。生产预检、完整备份和隔离迁移均通过；候选数据库保持 179 个 Alias（161
   活动）、54 个 key hash、50 个 key 密文、378 条审计和 2 条设置，三类摘要与生产完全一致，job
