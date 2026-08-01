@@ -462,9 +462,8 @@
   document.querySelectorAll(".bulk-action").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.dataset.bulkAction;
-      const aliasIds = aliasCheckboxes
-        .filter((checkbox) => checkbox.checked)
-        .map((checkbox) => checkbox.value);
+      const selectedAliases = aliasCheckboxes.filter((checkbox) => checkbox.checked);
+      const aliasIds = selectedAliases.map((checkbox) => checkbox.value);
       if (!aliasIds.length) {
         bulkMessage.textContent = "请先选择 Alias。";
         return;
@@ -472,6 +471,20 @@
       if (aliasIds.length > aliasBatchLimit) {
         bulkMessage.textContent = `单次最多处理 ${aliasBatchLimit} 项，请缩小选择范围。`;
         updateSelection();
+        return;
+      }
+      if (
+        action === "deactivate" &&
+        selectedAliases.some((checkbox) => checkbox.dataset.aliasState !== "active")
+      ) {
+        bulkMessage.textContent = "批量停用只能处理活动项，请取消选择失活项后重试。";
+        return;
+      }
+      if (
+        action === "delete" &&
+        selectedAliases.some((checkbox) => checkbox.dataset.aliasState !== "inactive")
+      ) {
+        bulkMessage.textContent = "永久删除只能处理失活项，请先批量停用选中的活动项。";
         return;
       }
       let confirmed = false;

@@ -11,7 +11,7 @@ from typing import Any, BinaryIO
 
 from .database import ConflictError, Database, NotFoundError
 from .hme import HmeError, HmeNetworkError, HmeSessionError, ICloudHmeSession
-from .service import GatewayError, GatewayStoppingError
+from .service import GatewayError, GatewayRetryableError, GatewayStoppingError
 
 TERMINAL_JOB_STATUSES = {
     "completed",
@@ -168,6 +168,14 @@ class BatchJobManager:
             raise ValueError("bulk alias action is invalid")
         if action in {"deactivate", "delete"} and not confirmed:
             raise ValueError("bulk alias action requires confirmation")
+        if action in {"deactivate", "delete"}:
+            required_state = "active" if action == "deactivate" else "inactive"
+            try:
+                aliases = [self.database.get_alias(alias_id) for alias_id in ids]
+            except NotFoundError as exc:
+                raise ValueError("bulk alias contains an unknown ID") from exc
+            if any(alias["state"] != required_state for alias in aliases):
+                raise ValueError(f"bulk {action} requires {required_state} aliases")
         payload = {"action": action, "alias_ids": ids, "confirmed": bool(confirmed)}
         job, created = self.database.create_batch_job(
             kind="bulk_aliases",
@@ -440,6 +448,11 @@ class BatchJobManager:
         remote_write = action in {"deactivate", "delete"}
         try:
             self._raise_if_stopping()
+            if action in {"deactivate", "delete"}:
+                required_state = "active" if action == "deactivate" else "inactive"
+                alias = self.database.get_alias(alias_id)
+                if alias["state"] != required_state:
+                    raise ConflictError(f"alias must be {required_state}")
             self.database.update_batch_item(
                 job_id, index, stage="executing", status="running", alias_id=alias_id
             )
@@ -483,6 +496,16 @@ class BatchJobManager:
         except ConflictError:
             self.database.update_batch_item(
                 job_id, index, stage="failed", status="failed", alias_id=alias_id, error="conflict"
+            )
+            return False
+        except GatewayRetryableError as exc:
+            self.database.update_batch_item(
+                job_id,
+                index,
+                stage="failed",
+                status="failed",
+                alias_id=alias_id,
+                error=type(exc).__name__,
             )
             return False
         except (HmeNetworkError, HmeSessionError, HmeError, GatewayError) as exc:

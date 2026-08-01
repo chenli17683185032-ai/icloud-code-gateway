@@ -11,7 +11,12 @@ from icloud_gateway.database import ConflictError, Database
 from icloud_gateway.hme import ICloudHmeSession
 from icloud_gateway.jobs import BatchJobManager, request_fingerprint
 from icloud_gateway.security import SecretBox
-from icloud_gateway.service import GatewayBusyError, GatewayError, GatewayService
+from icloud_gateway.service import (
+    GatewayBusyError,
+    GatewayError,
+    GatewayRetryableError,
+    GatewayService,
+)
 
 
 @pytest.fixture
@@ -197,11 +202,14 @@ def test_two_managers_share_one_worker_owner_and_one_remote_side_effect(
 ) -> None:
     second_database = Database(database.path, SecretBox(bytes(range(32))))
     second_database.initialize()
+    alias = database.upsert_alias(
+        email="one@example.com", remote_metadata={"anonymousId": "one"}, state="active"
+    )
     job, _created = database.create_batch_job(
         kind="bulk_aliases",
         action="deactivate",
         fingerprint=b"o" * 32,
-        items=[{"alias_id": "one"}],
+        items=[{"alias_id": alias["id"]}],
     )
     calls = 0
     calls_lock = threading.Lock()
@@ -655,11 +663,17 @@ def test_shutdown_reports_a_blocked_worker(database: Database, tmp_path) -> None
 
 
 def test_unknown_remote_write_stops_worker_without_replay(database: Database, tmp_path) -> None:
+    first = database.upsert_alias(
+        email="one@icloud.com", remote_metadata={"anonymousId": "one"}, state="active"
+    )
+    second = database.upsert_alias(
+        email="two@icloud.com", remote_metadata={"anonymousId": "two"}, state="active"
+    )
     gateway = _Gateway(database, tmp_path)
     manager = BatchJobManager(gateway, throttle_seconds=0)
     job, _created = manager.create_bulk_job(
         action="deactivate",
-        alias_ids=["one", "two"],
+        alias_ids=[first["id"], second["id"]],
         confirmed=True,
         idempotency_key=None,
     )
@@ -677,3 +691,46 @@ def test_unknown_remote_write_stops_worker_without_replay(database: Database, tm
     assert current["items"][0]["status"] == "unknown"
     assert current["items"][1]["status"] == "queued"
     assert gateway.calls == 1
+
+
+def test_bulk_delete_rejects_active_aliases_before_creating_a_job(
+    database: Database, tmp_path
+) -> None:
+    alias = database.upsert_alias(
+        email="active@icloud.com", remote_metadata={"anonymousId": "active"}, state="active"
+    )
+    manager = BatchJobManager(_Gateway(database, tmp_path), throttle_seconds=0)
+
+    with pytest.raises(ValueError, match="requires inactive aliases"):
+        manager.create_bulk_job(
+            action="delete",
+            alias_ids=[alias["id"]],
+            confirmed=True,
+            idempotency_key=None,
+        )
+
+    assert database.list_active_batch_jobs() == []
+
+
+def test_retryable_auth_rejection_is_failed_not_unknown(database: Database, tmp_path) -> None:
+    alias = database.upsert_alias(
+        email="active@icloud.com", remote_metadata={"anonymousId": "active"}, state="active"
+    )
+    gateway = _Gateway(database, tmp_path)
+    gateway.deactivate_alias = lambda _alias_id: (_ for _ in ()).throw(
+        GatewayRetryableError("authentication refreshed; retry explicitly")
+    )
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = manager.create_bulk_job(
+        action="deactivate",
+        alias_ids=[alias["id"]],
+        confirmed=True,
+        idempotency_key=None,
+    )
+
+    manager._run_job(database.get_batch_job(job["id"]))
+
+    current = database.get_batch_job(job["id"])
+    assert current["status"] == "failed"
+    assert current["items"][0]["status"] == "failed"
+    assert current["items"][0]["error"] == "GatewayRetryableError"

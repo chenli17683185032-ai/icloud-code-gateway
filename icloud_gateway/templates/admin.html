@@ -137,7 +137,7 @@
       </div>
       {% for alias in aliases %}
       <article class="alias-row" role="row" data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}">
-        <label class="alias-select checkbox-control" role="cell"><input class="alias-checkbox" type="checkbox" value="{{ alias.id }}" aria-label="选择 {{ alias.email }}"><span class="sr-only">选择 {{ alias.email }}</span></label>
+        <label class="alias-select checkbox-control" role="cell"><input class="alias-checkbox" type="checkbox" value="{{ alias.id }}" data-alias-state="{{ alias.state }}" aria-label="选择 {{ alias.email }}"><span class="sr-only">选择 {{ alias.email }}</span></label>
         <div class="alias-identity" role="cell">
           <strong>{{ alias.email }}</strong>
           {% if alias.sender_filter %}<span>发件人 {{ alias.sender_filter }}</span>{% endif %}

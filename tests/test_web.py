@@ -752,12 +752,36 @@ def test_bulk_alias_api_authentication_validation_and_mixed_results(
 
 
 def test_dashboard_exports_effective_alias_batch_limit(client, settings, service) -> None:
+    service.database.upsert_alias(
+        email="active@icloud.com",
+        remote_metadata={"anonymousId": "active", "isActive": True},
+        state="active",
+    )
     _login(client, settings)
     response = client.get("/admin")
 
     assert response.status_code == 200
     assert '<meta name="alias-batch-limit" content="50">' in response.text
     assert 'data-alias-batch-limit="50"' in response.text
+    assert 'data-alias-state="active"' in response.text
+
+
+def test_bulk_delete_rejects_active_aliases_before_job_creation(client, settings, service) -> None:
+    active = service.database.upsert_alias(
+        email="active@icloud.com",
+        remote_metadata={"anonymousId": "active", "isActive": True},
+        state="active",
+    )
+    csrf = _login(client, settings)
+
+    response = client.post(
+        "/admin/api/aliases/bulk",
+        json={"action": "delete", "alias_ids": [active["id"]], "confirmed": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 422
+    assert service.database.list_active_batch_jobs() == []
 
 
 def test_bulk_alias_api_enforces_configured_limit(client, settings, service) -> None:
