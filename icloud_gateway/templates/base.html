@@ -8,8 +8,8 @@
   <meta name="theme-color" content="#101613" media="(prefers-color-scheme: dark)">
   {% block head %}{% endblock %}
   <title>{{ page_title }}</title>
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="/static/favicon.svg?v={{ static_versions['favicon.svg'] }}" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_versions['app.css'] }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
   {% block body %}{% endblock %}

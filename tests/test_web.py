@@ -1049,6 +1049,72 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "alreadySelected" in script
     assert "aliasIds.length > aliasBatchLimit" in script
     assert "单次最多选择 ${aliasBatchLimit} 项" in script
+    assert "明确失败 ${counts.failed} 项" in script
+    assert "远端结果不确定 ${counts.unknown} 项" in script
+    assert "尚未开始 ${counts.queued} 项" in script
+
+
+def test_admin_static_assets_are_versioned_and_revalidated(client, settings) -> None:
+    _login(client, settings)
+
+    dashboard = client.get("/admin")
+    script_path = next(
+        part.split('"', 1)[0]
+        for part in dashboard.text.split('src="')[1:]
+        if part.startswith("/static/admin.js?v=")
+    )
+    stylesheet_path = next(
+        part.split('"', 1)[0]
+        for part in dashboard.text.split('href="')[1:]
+        if part.startswith("/static/app.css?v=")
+    )
+
+    assert len(script_path.rsplit("=", 1)[1]) == 16
+    assert len(stylesheet_path.rsplit("=", 1)[1]) == 16
+    assert client.get(script_path).headers["cache-control"] == "no-cache"
+    assert client.get(stylesheet_path).headers["cache-control"] == "no-cache"
+
+
+def test_admin_script_summarizes_partial_unknown_job_and_standard_fields() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "icloud_gateway" / "static" / "admin.js"
+    harness = r"""
+const noop = () => {};
+global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
+global.window = {location: {origin: "https://gateway.example"}, addEventListener: noop};
+const {jobCounts, jobSummary, standardParameters} = require(process.argv[1]);
+const job = {
+  status: "needs_reconcile",
+  requested: 10,
+  results: [
+    ...Array.from({length: 5}, () => ({status: "success"})),
+    {status: "unknown"},
+    ...Array.from({length: 4}, () => ({status: "queued"})),
+  ],
+};
+const counts = jobCounts(job);
+const expected = {success: 5, failed: 0, unknown: 1, queued: 4, running: 0, cancelled: 0};
+if (JSON.stringify(counts) !== JSON.stringify(expected)) process.exit(1);
+const summary = jobSummary(job);
+if (!summary.includes("成功 5 项")) process.exit(2);
+if (!summary.includes("远端结果不确定 1 项")) process.exit(3);
+if (!summary.includes("尚未开始 4 项")) process.exit(4);
+const item = {
+  email: "one@icloud.com",
+  access_key: "icg_test",
+  public_url: "https://gateway.example",
+};
+const output = standardParameters(item);
+const expectedOutput = [
+  "邮箱账号：one@icloud.com",
+  "解码网站：https://gateway.example",
+  "接码密钥：icg_test",
+].join("；");
+if (output !== expectedOutput) process.exit(5);
+"""
+    subprocess.run([node, "-e", harness, str(script)], check=True)
 
 
 def test_admin_script_computes_remaining_selection_budget() -> None:

@@ -10,7 +10,7 @@ from contextlib import suppress
 from typing import Any, BinaryIO
 
 from .database import ConflictError, Database, NotFoundError
-from .hme import HmeError, HmeNetworkError, HmeSessionError
+from .hme import HmeError, HmeNetworkError, HmeSessionError, ICloudHmeSession
 from .service import GatewayError, GatewayStoppingError
 
 TERMINAL_JOB_STATUSES = {
@@ -377,6 +377,9 @@ class BatchJobManager:
                     state="inactive" if remote.get("isActive") is False else "active",
                 )
                 self.database.issue_access_key(alias["id"])
+                rotated_session = getattr(client, "session", session)
+                if isinstance(rotated_session, ICloudHmeSession):
+                    self.gateway._persist_rotated_hme_session(session, rotated_session)
                 self.database.update_batch_item(
                     job_id,
                     index,

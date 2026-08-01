@@ -343,6 +343,7 @@ def test_generated_candidate_is_reserved_without_generating_again(
     gateway._ensure_hme_fresh = lambda: None
     gateway.get_hme_session = lambda: object()
     gateway._close_client = lambda _client: None
+    gateway._persist_rotated_hme_session = lambda _original, _candidate: False
     generated = []
     reserved = []
 
@@ -446,6 +447,107 @@ def test_create_job_uses_remote_write_fence_and_key_issue_is_busy(tmp_path) -> N
     gateway.shutdown()
 
 
+def test_successful_item_persists_rotated_session_for_the_next_item(tmp_path) -> None:
+    original = ICloudHmeSession(
+        host="p123-maildomainws.icloud.com.cn",
+        dsid="123",
+        client_id="client",
+        client_build_number="build",
+        client_mastering_number="master",
+        cookie=(
+            "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+            "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+        ),
+        origin="https://www.icloud.com.cn",
+        referer="https://www.icloud.com.cn/icloudplus/",
+    )
+    rotated = ICloudHmeSession.from_mapping(
+        {**original.as_secret_dict(), "cookie": original.cookie.replace("token", "rotated")}
+    )
+    sessions_seen = []
+
+    class Client:
+        def __init__(self, session):
+            self.session = session
+            sessions_seen.append(session)
+
+        def generate_alias(self):
+            return f"new-{len(sessions_seen)}@icloud.com"
+
+        def reserve_alias(self, candidate, *, label, note):
+            self.session = rotated
+            return {"hme": candidate, "anonymousId": candidate, "isActive": True}
+
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=Client,
+        start_maintenance=False,
+    )
+    gateway.database.set_secret("hme_session", original.as_secret_dict())
+    gateway._last_validated_ts = gateway.clock()
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = manager.create_alias_job(
+        count=2,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "completed"
+        assert [session.cookie for session in sessions_seen] == [original.cookie, rotated.cookie]
+        assert gateway.get_hme_session() == rotated
+    finally:
+        gateway.shutdown()
+
+
+def test_stale_client_cookie_cannot_overwrite_a_newer_saved_session(tmp_path) -> None:
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        start_maintenance=False,
+    )
+    original = ICloudHmeSession(
+        host="p123-maildomainws.icloud.com.cn",
+        dsid="123",
+        client_id="client",
+        client_build_number="build",
+        client_mastering_number="master",
+        cookie=(
+            "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+            "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+        ),
+        origin="https://www.icloud.com.cn",
+        referer="https://www.icloud.com.cn/icloudplus/",
+    )
+    stale_rotation = ICloudHmeSession.from_mapping(
+        {**original.as_secret_dict(), "cookie": original.cookie.replace("token", "stale")}
+    )
+    newer = ICloudHmeSession.from_mapping(
+        {**original.as_secret_dict(), "cookie": original.cookie.replace("token", "newer")}
+    )
+    gateway.database.set_secret("hme_session", newer.as_secret_dict())
+    try:
+        assert gateway._persist_rotated_hme_session(original, stale_rotation) is False
+        assert gateway.get_hme_session() == newer
+    finally:
+        gateway.shutdown()
+
+
 def test_reserve_failure_is_unknown_and_stops_replay(database: Database, tmp_path) -> None:
     gateway = _Gateway(database, tmp_path)
     gateway._remote_write_active = False
@@ -455,6 +557,7 @@ def test_reserve_failure_is_unknown_and_stops_replay(database: Database, tmp_pat
     gateway._ensure_hme_fresh = lambda: None
     gateway.get_hme_session = lambda: object()
     gateway._close_client = lambda _client: None
+    gateway._persist_rotated_hme_session = lambda _original, _candidate: False
 
     class Client:
         def generate_alias(self):
@@ -476,6 +579,64 @@ def test_reserve_failure_is_unknown_and_stops_replay(database: Database, tmp_pat
     recovered = database.get_batch_job(job["id"])["items"][0]
     assert recovered["status"] == "unknown"
     assert recovered["result"] == {"candidate": "candidate@icloud.com"}
+
+
+def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(
+    database: Database, tmp_path
+) -> None:
+    gateway = _Gateway(database, tmp_path)
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = manager.create_alias_job(
+        count=10,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    calls = 0
+
+    def run_item(_job, item):
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            database.update_batch_item(
+                job["id"],
+                item["index"],
+                stage="completed",
+                status="success",
+                alias_id=f"alias-{calls}",
+                result={"id": f"alias-{calls}"},
+            )
+            return False
+        database.update_batch_item(
+            job["id"],
+            item["index"],
+            stage="unknown",
+            status="unknown",
+            error="remote write outcome is unknown",
+        )
+        return True
+
+    manager._run_item = run_item
+    manager._run_job(database.get_batch_job(job["id"]))
+
+    current = database.get_batch_job(job["id"])
+    assert current["status"] == "needs_reconcile"
+    assert current["succeeded"] == 5
+    assert current["current"] == 6
+    assert [item["status"] for item in current["items"]] == [
+        "success",
+        "success",
+        "success",
+        "success",
+        "success",
+        "unknown",
+        "queued",
+        "queued",
+        "queued",
+        "queued",
+    ]
+    assert calls == 6
 
 
 def test_shutdown_reports_a_blocked_worker(database: Database, tmp_path) -> None:

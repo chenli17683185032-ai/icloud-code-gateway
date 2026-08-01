@@ -129,6 +129,27 @@ def test_session_mapping_requires_all_core_cookies() -> None:
         ICloudHmeSession.from_mapping(value)
 
 
+def test_client_absorbs_rotated_cookie_for_the_next_request() -> None:
+    calls = []
+
+    def requester(_method, _url, **kwargs):
+        calls.append(kwargs["headers"]["Cookie"])
+        headers = (
+            {"Set-Cookie": "X-APPLE-WEBAUTH-TOKEN=rotated-token; Path=/; Secure"}
+            if len(calls) == 1
+            else {}
+        )
+        return FakeResponse({"success": True, "result": {"hmeEmails": []}}, headers=headers)
+
+    client = HmeClient(session(), requester=requester)
+
+    assert client.list_aliases() == []
+    assert client.list_aliases() == []
+    assert "X-APPLE-WEBAUTH-TOKEN=token-secret" in calls[0]
+    assert "X-APPLE-WEBAUTH-TOKEN=rotated-token" in calls[1]
+    assert "X-APPLE-WEBAUTH-USER=user-secret" in client.session.cookie
+
+
 def test_client_lists_and_creates_alias_using_generate_then_reserve() -> None:
     calls = []
 

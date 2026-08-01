@@ -187,12 +187,23 @@
     "cancelled",
   ]);
 
+  function jobCounts(job) {
+    const counts = { success: 0, failed: 0, unknown: 0, queued: 0, running: 0, cancelled: 0 };
+    (job.results || []).forEach((item) => {
+      if (Object.hasOwn(counts, item.status)) counts[item.status] += 1;
+    });
+    return counts;
+  }
+
   function jobSummary(job) {
-    const base = `请求 ${job.requested} 项，成功 ${job.succeeded} 项，失败 ${job.failed} 项。`;
-    if (job.status !== "needs_reconcile") return base;
-    const unknown = job.results.filter((item) => item.status === "unknown").length;
-    const queued = job.results.filter((item) => item.status === "queued").length;
-    return `${base} ${unknown} 项远端结果不确定，需要人工对账；${queued} 项尚未开始并保持排队。`;
+    const counts = jobCounts(job);
+    const parts = [`请求 ${job.requested} 项`, `成功 ${counts.success} 项`];
+    if (counts.failed) parts.push(`明确失败 ${counts.failed} 项`);
+    if (counts.unknown) parts.push(`远端结果不确定 ${counts.unknown} 项，需人工对账`);
+    if (counts.queued) parts.push(`尚未开始 ${counts.queued} 项`);
+    if (counts.running) parts.push(`处理中 ${counts.running} 项`);
+    if (counts.cancelled) parts.push(`已取消 ${counts.cancelled} 项`);
+    return `${parts.join("；")}。`;
   }
 
   async function pollJob(jobId, messageElement) {
@@ -628,6 +639,6 @@
   if (capture?.dataset.active === "true") refreshCapture();
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { limitedVisibleSelectionCount };
+    module.exports = { jobCounts, jobSummary, limitedVisibleSelectionCount, standardParameters };
   }
 })();

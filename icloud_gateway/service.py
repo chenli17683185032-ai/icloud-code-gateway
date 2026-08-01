@@ -262,6 +262,22 @@ class GatewayService:
             with suppress(Exception):
                 close()
 
+    def _persist_rotated_hme_session(
+        self,
+        original: ICloudHmeSession,
+        candidate: ICloudHmeSession,
+    ) -> bool:
+        if candidate == original:
+            return False
+        with self._hme_lock:
+            current = self.get_hme_session()
+            if current != original:
+                self.database.record_audit_event("hme_cookie_rotation", "discarded_stale")
+                return False
+            self.database.set_secret(HME_SETTING_KEY, candidate.as_secret_dict())
+            self.database.record_audit_event("hme_cookie_rotation", "saved")
+            return True
+
     def _set_hme_state(
         self,
         state: str,

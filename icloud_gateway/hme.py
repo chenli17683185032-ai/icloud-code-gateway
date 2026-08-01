@@ -625,6 +625,11 @@ class HmeClient:
             )
         except (requests.RequestException, OSError, TimeoutError) as exc:
             raise HmeNetworkError("iCloud HME network request failed") from exc
+        rotated_cookie = merge_set_cookie_headers(
+            self.session.cookie, _set_cookie_headers(response)
+        )
+        if rotated_cookie != self.session.cookie:
+            self.session = replace(self.session, cookie=rotated_cookie)
         status_code = int(getattr(response, "status_code", 0) or 0)
         if status_code in {401, 403, 421}:
             raise HmeSessionError("iCloud HME session is expired or rejected")

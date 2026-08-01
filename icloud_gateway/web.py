@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import time
 from contextlib import asynccontextmanager
@@ -42,6 +43,7 @@ from .service import (
 )
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = PACKAGE_DIR / "static"
 ADMIN_COOKIE = "icg_admin"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 NOTICE_MESSAGES = {
@@ -174,6 +176,8 @@ def _apply_security_headers(
     if request.url.path.startswith(("/api/", "/admin")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
+    elif request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
     if settings.cookie_secure:
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
@@ -189,6 +193,11 @@ def create_app(
         settings.master_key, lifetime_seconds=settings.admin_session_seconds
     )
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+    static_versions = {
+        name: hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:16]
+        for name in ("admin.js", "app.css", "favicon.svg", "public.js")
+    }
+    templates.env.globals["static_versions"] = static_versions
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -216,7 +225,7 @@ def create_app(
     app.state.gateway = gateway
     app.state.jobs = jobs
     app.state.settings = settings
-    app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
 
     def _too_large(response_request: Request) -> JSONResponse:
