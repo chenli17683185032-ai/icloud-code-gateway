@@ -92,7 +92,7 @@ class EdgeSyncClient:
         value = str(email or "").strip().casefold()
         if not value or "@" not in value:
             raise EdgeSyncError("email is required")
-        return quote(value, safe="@._+-")
+        return quote(value, safe="")
 
     def upsert_alias(
         self,

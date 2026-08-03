@@ -450,3 +450,11 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 - 回滚目录：`/opt/new-api/icloud-code-gateway/backups/grok-otp-20260803T075144Z-ebd0638`
 - 镜像回滚标签：`icloud-code-gateway-app:rollback-pre-grok-otp-20260803T075144Z`
 
+## 运维记录 · 2026-08-03 云端 edge + 本地 control 落地
+
+- 云端 `ICLOUD_GATEWAY_DEPLOYMENT_MODE=edge`，只负责 IMAP 接码与 `/control/v1` 注册；现有 201 个 keyed alias 保留。
+- 本地 control：`http://127.0.0.1:18081/admin/login`，noVNC `http://127.0.0.1:16080/vnc.html`。
+- 控制面共享 token 与本地密码：`/Users/ethan/Desktop/云贝/服务器相关/icloud-control-plane.env`（0600）。
+- 快捷入口：`/Users/ethan/Desktop/云贝/服务器相关/打开本地iCloud控制台.command`。
+- 已验证：本地 control → 云端 control API upsert/delete 成功；公开接码页仍在 `https://icloud.yunbay.xyz`。
+

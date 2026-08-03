@@ -6,6 +6,7 @@ import hmac
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import unquote
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
@@ -807,6 +808,7 @@ def create_app(
     @app.post("/control/v1/aliases/by-email/{email}/key")
     async def control_issue_key(email: str, request: Request, payload: ControlKeyRequest):
         _require_control_token(request, settings)
+        email = unquote(str(email or "")).strip()
         try:
             access_key = validate_access_key(payload.access_key)
             issued = await asyncio.to_thread(
@@ -825,6 +827,7 @@ def create_app(
     @app.delete("/control/v1/aliases/by-email/{email}/key")
     async def control_revoke_key(email: str, request: Request):
         _require_control_token(request, settings)
+        email = unquote(str(email or "")).strip()
         try:
             alias = await asyncio.to_thread(
                 gateway.register_control_state_by_email,
@@ -839,6 +842,7 @@ def create_app(
     @app.post("/control/v1/aliases/by-email/{email}/state")
     async def control_set_state(email: str, request: Request, payload: ControlStateRequest):
         _require_control_token(request, settings)
+        email = unquote(str(email or "")).strip()
         try:
             alias = await asyncio.to_thread(
                 gateway.register_control_state_by_email,
@@ -852,6 +856,7 @@ def create_app(
     @app.delete("/control/v1/aliases/by-email/{email}")
     async def control_delete_alias(email: str, request: Request):
         _require_control_token(request, settings)
+        email = unquote(str(email or "")).strip()
         try:
             await asyncio.to_thread(gateway.register_control_delete_by_email, email)
         except NotFoundError:

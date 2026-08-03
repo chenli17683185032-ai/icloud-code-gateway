@@ -1000,18 +1000,21 @@ class GatewayService:
     def register_control_delete_by_email(self, email: str) -> None:
         # Upsert-less delete: list and match email.
         target = None
+        needle = str(email or "").strip().casefold()
         for item in self.database.list_aliases():
-            if str(item.get("email") or "").casefold() == str(email or "").strip().casefold():
+            if str(item.get("email") or "").casefold() == needle:
                 target = item
                 break
         if target is None:
             raise NotFoundError("alias not found")
-        self.database.delete_alias(str(target["id"]))
+        alias_id = str(target["id"])
+        # Audit first: aliases.id is a foreign key for audit events.
         self.database.record_audit_event(
             "control_register",
             "deleted",
-            alias_id=str(target["id"]),
+            alias_id=alias_id,
         )
+        self.database.delete_alias(alias_id)
 
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
         if self.settings.is_edge:
