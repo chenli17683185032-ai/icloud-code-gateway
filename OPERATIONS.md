@@ -333,6 +333,18 @@ docker compose ps
 ## 11. 运维记录
 
 - 2026-08-02：复制/导出格式修复提交 `49b2d9b0ecd6cd41a9aeb9b248d90858541f4ec3` 已部署。“一键复制”仅输出邮箱且一行一个，“导出信息”采用“邮箱、网站、密钥”标准字段。生产从 `e9fdc4f` 升级，目标仅变更管理页脚本、模板和测试；候选镜像在隔离临时数据目录中通过健康及 UI 契约断言后，由独立 60 秒 watchdog 只 force-recreate app，`22.668s` 完成 healthy、revision、marker、内外 200 和数据指纹闭环，状态 `accepted`，未触发回滚。新 app 容器 `7dd21948d0820e7be762cd930bfa47439f2c0b34d11c97a9b2f583d22d29c4fe`，镜像 `sha256:2fbc3239f6a803f8dd1e0774400899e40a09eab9d4f3d1718702f398975fb874`，固定为 `prod/release-49b2d9b`；browser `bcef6bba...`、cn-proxy `ed6f331e...` 未重建，共享 Caddy 未改，正式容器均为 `healthy/restart=0/OOM=false`。SQLite `quick_check=ok`，194/176 个 Alias、446 条审计、2 条设置以及 job/item 数据指纹前后完全一致；既有 5 个 `needs_reconcile` 终态任务保持不变，未自动重放，本轮未访问 Apple/HME 或 IMAP。公网健康/首页/登录为 200，未登录 noVNC 为 303，严重日志为 0。审计目录为 `/opt/new-api/icloud-code-gateway/backups/ui-copy-export-20260801T174254Z-49b2d9b`，清单 SHA-256 为 `2d228e321756d9a1885e54ca7780e205dbb662f72c4dd0bbdb6737b3f4c89e6b`；旧镜像 `sha256:b1eeaa894651a696a4485f2d00d448d7085e0a9460b0906f981d1905ad49978f` 保留专用 rollback 标签。普通回滚只恢复源码/marker、重标旧镜像并仅重建 app，不恢复 SQLite，不动 browser/profile、cn-proxy 或 Caddy。
+- 2026-08-01：用户更新 HME Session 后明确要求直接部署，因此本轮未执行额外 setup validate/
+  HME list，也没有任何 HME 写调用。功能提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea`
+  已部署；第一次切换因 Caddy 首个主动健康窗口探针为 503，60 秒 watchdog 自动
+  恢复旧版并重新达到公网 200；第二次切换持续等待入口恢复，10 秒后 app healthy、
+  公网 200、SQLite `ok`、179/161 个 Alias 和空 batch job/item 表通过，watchdog=`accepted`。
+  新 app 容器为 `7357afff94924930b5762e95cca728f2e635994bde50bc0ce2eac984a18b7641`，镜像为
+  `sha256:d4770065d6d8451cbaada12e3c372255466050203631e3abe8de490a22cae7f6`，固定为
+  `latest/prod/release-a954e06`；旧镜像保留 `rollback-pre-a954e06-20260801T044824Z`。browser、
+  cn-proxy 和 Caddy 的 ID 不变，均为 healthy/restart=0/OOM=false；上传包、候选标签、临时
+  发布目录和部署锁已清理。审计目录为
+  `/opt/new-api/icloud-code-gateway/backups/state-machine-retry-20260801T044824Z-a954e06`，最终清单
+  SHA-256 为 `2e2d1eb94eeb6ac8dd98fad431f7d4eb79baf0ff0d14e6ee48765d5d8609a603`。
 - 2026-08-01：状态机修复提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea` 已推送 GitHub
   `main`，但未部署。生产预检、完整备份和隔离迁移均通过；候选数据库保持 179 个 Alias（161
   活动）、54 个 key hash、50 个 key 密文、378 条审计和 2 条设置，三类摘要与生产完全一致，job
@@ -370,3 +382,29 @@ docker compose ps
 - 2026-07-31：HTML 验证码语境距离修复提交 `67968b7d0f79c5b9b981f7ea118fab3ac4d9d57a` 已部署。修复只在语境评分前压缩连续空白，不扩充词表、不调整 80 字符门限，也不改变 IMAP/Alias/sender filter/300 秒窗口；全量 `146 passed`。同三封事故邮件只读复验为旧版 `0/3`、候选 `3/3`，Seen 总数前后不变，未输出身份、正文或验证码。
 - 2026-07-31：新 app 容器 `e28b19bd6c8120235735d6cb31dfc3ad1989e594f9f79b814627cbb3f1f812f1` 使用镜像 `sha256:bdbc7846d2e89b07db0c48acaf7e5bd5cfd4f83475cfba29ccd882e23c4f341a`，固定为 `latest/prod/release-67968b7`。60 秒 watchdog 只替换 app，`14.387` 秒完成 healthy、内外 200、源码与部署标记闭环且未回滚；该时间作为公网不可用保守上界。服务器后续 health `20/20` 为 200，app 严重日志、Caddy 502 和秘密命中为 0；browser、cn-proxy、Caddy 的 ID/restart/OOM 未变。
 - 2026-07-31：生产 SQLite 前后均 `quick_check=ok`，159 条 Alias（148 活动）、41 个 key hash、37 个 key 密文、299 条审计、2 条设置和三类脱敏摘要逐字一致。回滚与审计目录为 `/opt/new-api/icloud-code-gateway/backups/html-whitespace-20260731T042125Z-67968b7`，22 个文件的最终清单 SHA-256 为 `f41a509fd184dbbdad196e2a8d0e97d13066477066b088d9432de5cd1673eb24`；旧镜像只保留 `rollback-pre-67968b7-20260731T042125Z`。候选容器/卷/网络/标签、旧 release、发布目录和部署锁已清理，`.env=0600`，根卷可用 44GB。
+
+## 运维记录 · 2026-08-03 HME 邮箱同步与 Token 签发
+
+- 时间：2026-08-03（UTC 06:40 左右）
+- 目标：云端先同步 iCloud 隐藏邮箱，再给活动 Alias 签发/补齐 access token，供紧急使用。
+- 现象：Apple HME Session 已被拒绝；browser CDP 经 Host 名访问返回 500（Chrome 要求 Host 为 IP/localhost）。重建 browser 后用 IP 解析连接 CDP 成功。
+- 处理：
+  1. 热备份 SQLite。
+  2. 仅重建 `icloud-code-gateway-browser-1`（保留 profile 卷）。
+  3. 重新捕获 HME Session 成功。
+  4. 执行 `sync_aliases`。
+  5. 给所有缺 key 的活动 Alias 签发 token；失败 0。
+- 结果：
+  - 同步前：209 条 Alias（191 活动 / 18 失活），84 个已有 key。
+  - 同步后：217 条 Alias（199 活动 / 18 失活）。
+  - 新签发 token：115 个；活动邮箱无 key 数：0。
+  - 可恢复导出：195 个 token（4 个历史 hash-only key 不可查看）。
+- 产物目录（服务器，0600）：
+  - `/opt/new-api/icloud-code-gateway/backups/hme-sync-token-20260803T064044Z/`
+    - `issued.tsv`：本轮新签发
+    - `tokens.tsv`：全部可恢复 token
+    - `gateway.pre.sqlite3` / `gateway.post.sqlite3`
+  - 早期导出：`/opt/new-api/icloud-code-gateway/backups/token-export-20260803T063843Z/`
+- 服务状态：app/browser/cn-proxy healthy；未替换 app 镜像，未改 `.env`，未做架构改造。
+- 备注：本轮未轮换既有 key；未执行 Apple 停用/删除。后续“本地账号管理 + 云端发码”改造另开。
+
