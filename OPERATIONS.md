@@ -435,3 +435,9 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 
 本地签发 key、轮换 key、停用/删除 Alias 时会调用云端 `/control/v1/*`。云端不执行 Apple HME 写操作。
 
+## 验证码格式支持
+
+- 通用：最近 5 分钟内的 6 位数字，要求验证语境（verification/验证码等）。
+- Grok / xAI：额外支持 `XXX-XXX` 字母数字码（如 `A1B-2C3`），优先识别来自 `x.ai` / `xai` / `grok` 的邮件；HTML 与纯文本均可。
+- 仍支持对 Alias 设置发件人过滤，例如 `@x.ai`。
+

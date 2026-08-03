@@ -723,3 +723,124 @@ def test_lookup_timeout_is_a_total_deadline_across_imap_operations() -> None:
         value.find_latest_code("target@icloud.com", now_ts=NOW, timeout=1)
 
     assert connection.logged_out is True
+
+def test_reader_extracts_grok_alphanumeric_code_from_xai_sender() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="A1B-2C3",
+                    sender="noreply@x.ai",
+                    subject="Your Grok verification code",
+                    body=(
+                        "Use this code to continue signing in to Grok.\n\n"
+                        "A1B-2C3\n\n"
+                        "This code expires soon."
+                    ),
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert result.code == "A1B-2C3"
+
+
+def test_reader_extracts_grok_code_from_html_mail() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="Z9Y-8X7",
+                    sender="security@mail.x.ai",
+                    subject="Grok security code",
+                    body=(
+                        "<html><body>"
+                        "<p>Your Grok login code is:</p>"
+                        "<p style=\"font-size:28px\"><b>z9y-8x7</b></p>"
+                        "</body></html>"
+                    ),
+                    html=True,
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert result.code == "Z9Y-8X7"
+
+
+def test_reader_prefers_grok_code_over_nearby_numeric_noise() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="Q1W-E2R",
+                    sender="no-reply@x.ai",
+                    subject="xAI verification",
+                    body=(
+                        "Ticket 123456 is unrelated.\n"
+                        "Your verification code is Q1W-E2R.\n"
+                        "Reference 654321 also unrelated."
+                    ),
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert result.code == "Q1W-E2R"
+
+
+def test_reader_still_accepts_six_digit_codes_for_non_grok_mail() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="777777",
+                    sender="noreply@service.example",
+                    subject="Verify your email",
+                    body="Your verification code is 777777",
+                ),
+                NOW,
+            )
+        }
+    )
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    assert result.code == "777777"
+
+
+def test_reader_rejects_xxx_xxx_without_context_for_non_grok_mail() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="AAA-BBB",
+                    sender="noreply@other.example",
+                    subject="Package tracking",
+                    body="Tracking update AAA-BBB for your order.",
+                ),
+                NOW,
+            )
+        }
+    )
+
+    assert reader(connection).find_latest_code("target@icloud.com", now_ts=NOW) is None
+

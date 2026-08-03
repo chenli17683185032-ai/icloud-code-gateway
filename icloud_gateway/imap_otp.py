@@ -30,10 +30,20 @@ RECIPIENT_HEADERS = (
     "X-Apple-Original-Recipient",
 )
 _OTP_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+# Grok / xAI commonly emails alphanumeric codes like A1B-2C3.
+_GROK_OTP_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z0-9]{3}-[A-Za-z0-9]{3})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_GROK_SENDER_RE = re.compile(
+    r"(?:^|@|\.)(?:x\.ai|xai\.com|grok\.com|xai)\b|\bgrok\b",
+    re.IGNORECASE,
+)
 _CODE_CONTEXT_RE = re.compile(
     r"\b(?:verification|verify|one[- ]time(?:[- ](?:password|code))?|otp|code|"
     r"passcode|security[- ]code|confirmation(?:[- ]code)?|"
-    r"authentication[- ]code|auth[- ]code|pin)\b|"
+    r"authentication[- ]code|auth[- ]code|pin|login[- ]code|sign[- ]?in[- ]code|"
+    r"sign[- ]?up[- ]code|access[- ]code|grok|xai|x\.ai)\b|"
     r"\u9a8c\u8bc1\u7801|\u6821\u9a8c\u7801|\u52a8\u6001\u7801|"
     r"\u5b89\u5168(?:\u7801|\u4ee3\u7801)|\u8ba4\u8bc1\u7801|"
     r"\u786e\u8ba4\u7801|\u4e34\u65f6\u7801|"
@@ -41,6 +51,7 @@ _CODE_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _CODE_CONTEXT_WINDOW = 80
+_GROK_CONTEXT_WINDOW = 160
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"', re.IGNORECASE)
 _UID_RE = re.compile(rb"\bUID (\d+)", re.IGNORECASE)
 _FETCH_SPECS = ("(UID INTERNALDATE BODY.PEEK[])", "(UID INTERNALDATE RFC822)")
@@ -632,10 +643,21 @@ def _message_matches_sender(message: Message, sender_filter: str) -> bool:
 def _extract_message_code(message: Message) -> str:
     subject = str(message.get("Subject") or "")
     body = _message_body(message)
+    from_header = " ".join(str(value) for value in message.get_all("From", []))
     text = re.sub(r"\s+", " ", f"{subject}\n{body}")
+    grokish = _is_grok_message(from_header=from_header, subject=subject, body=body)
     contexts = tuple(_CODE_CONTEXT_RE.finditer(text))
-    candidates: list[tuple[int, int, int, str]] = []
-    for match in _OTP_RE.finditer(text):
+    candidates: list[tuple[int, int, int, int, str]] = []
+
+    def consider(match: re.Match[str], *, kind_rank: int, window: int, normalize) -> None:
+        value = normalize(match.group(1))
+        if not value:
+            return
+        if not contexts:
+            if grokish and kind_rank == 0:
+                # Grok mail often places the XXX-XXX code on its own with weak wording.
+                candidates.append((window, kind_rank, 0, match.start(), value))
+            return
         for context in contexts:
             if context.end() <= match.start():
                 distance = match.start() - context.end()
@@ -646,11 +668,38 @@ def _extract_message_code(message: Message) -> str:
             else:
                 distance = 0
                 direction = 0
-            if distance <= _CODE_CONTEXT_WINDOW:
-                candidates.append((distance, direction, match.start(), match.group(1)))
+            if distance <= window:
+                candidates.append((distance, kind_rank, direction, match.start(), value))
+
+    for match in _GROK_OTP_RE.finditer(text):
+        consider(
+            match,
+            kind_rank=0 if grokish else 1,
+            window=_GROK_CONTEXT_WINDOW if grokish else _CODE_CONTEXT_WINDOW,
+            normalize=lambda value: value.upper(),
+        )
+    for match in _OTP_RE.finditer(text):
+        consider(
+            match,
+            kind_rank=1 if grokish else 0,
+            window=_CODE_CONTEXT_WINDOW,
+            normalize=str,
+        )
+    if not candidates and grokish:
+        standalone = re.search(
+            r"(?m)^\s*([A-Za-z0-9]{3}-[A-Za-z0-9]{3})\s*$",
+            f"{subject}\n{body}",
+        )
+        if standalone:
+            return standalone.group(1).upper()
     if not candidates:
         return ""
     return min(candidates)[-1]
+
+
+def _is_grok_message(*, from_header: str, subject: str, body: str) -> bool:
+    haystack = f"{from_header}\n{subject}\n{body}"
+    return _GROK_SENDER_RE.search(haystack) is not None
 
 
 def _message_body(message: Message) -> str:
