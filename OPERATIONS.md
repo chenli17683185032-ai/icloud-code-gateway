@@ -408,3 +408,30 @@ docker compose ps
 - 服务状态：app/browser/cn-proxy healthy；未替换 app 镜像，未改 `.env`，未做架构改造。
 - 备注：本轮未轮换既有 key；未执行 Apple 停用/删除。后续“本地账号管理 + 云端发码”改造另开。
 
+## 本地 control + 云端 edge 部署
+
+### 边界
+
+- 本地 `control`：负责浏览器登录、HME Session、创建/停用/删除隐藏邮箱、签发密钥。
+- 云端 `edge`：只接收本地注册的邮箱与密钥映射，负责 IMAP 验证码查询与公开页。
+- 两端共享 `ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN`；token 只放服务器/本地 `.env`（0600），不进 Git。
+
+### 云端 edge
+
+```dotenv
+ICLOUD_GATEWAY_DEPLOYMENT_MODE=edge
+ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<shared-secret>
+# 保留 IMAP 配置与公开页；可不配 CDP/HME session
+```
+
+### 本地 control
+
+```dotenv
+ICLOUD_GATEWAY_DEPLOYMENT_MODE=control
+ICLOUD_GATEWAY_EDGE_BASE_URL=https://icloud.yunbay.xyz
+ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<shared-secret>
+ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
+```
+
+本地签发 key、轮换 key、停用/删除 Alias 时会调用云端 `/control/v1/*`。云端不执行 Apple HME 写操作。
+

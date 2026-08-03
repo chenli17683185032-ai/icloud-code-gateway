@@ -5,6 +5,7 @@ import binascii
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .proxy import ProxyConfigurationError, proxy_from_environment
 
@@ -72,6 +73,11 @@ class Settings:
     hme_freshness_seconds: int = 60 * 60
     hme_retry_max_seconds: int = 60 * 60
     alias_batch_limit: int = 50
+    deployment_mode: Literal["full", "control", "edge"] = "full"
+    control_plane_token: str = ""
+    edge_base_url: str = ""
+    edge_sync_enabled: bool = True
+    edge_timeout_seconds: int = 20
 
     @property
     def database_path(self) -> Path:
@@ -109,6 +115,31 @@ class Settings:
             hme_proxy = proxy_from_environment("ICLOUD_GATEWAY_HME_PROXY")
         except ProxyConfigurationError as exc:
             raise ConfigurationError("ICLOUD_GATEWAY_HME_PROXY is invalid") from exc
+        mode = str(os.environ.get("ICLOUD_GATEWAY_DEPLOYMENT_MODE") or "full").strip().casefold()
+        if mode not in {"full", "control", "edge"}:
+            raise ConfigurationError(
+                "ICLOUD_GATEWAY_DEPLOYMENT_MODE must be full, control, or edge"
+            )
+        control_plane_token = str(
+            os.environ.get("ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN") or ""
+        ).strip()
+        if mode in {"control", "edge"} and len(control_plane_token) < 24:
+            raise ConfigurationError(
+                "ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN must contain at least 24 characters "
+                "when deployment mode is control or edge"
+            )
+        edge_base_url = (
+            str(os.environ.get("ICLOUD_GATEWAY_EDGE_BASE_URL") or "").strip().rstrip("/")
+        )
+        if mode == "control":
+            if not edge_base_url:
+                raise ConfigurationError(
+                    "ICLOUD_GATEWAY_EDGE_BASE_URL is required in control mode"
+                )
+            if not edge_base_url.startswith(("https://", "http://")):
+                raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
+        elif edge_base_url and not edge_base_url.startswith(("https://", "http://")):
+            raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
         return cls(
             data_dir=data_dir,
             master_key=master_key,
@@ -140,7 +171,30 @@ class Settings:
             alias_batch_limit=_integer_environment(
                 "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT", 50, minimum=1, maximum=100
             ),
+            deployment_mode=mode,  # type: ignore[arg-type]
+            control_plane_token=control_plane_token,
+            edge_base_url=edge_base_url,
+            edge_sync_enabled=_boolean_environment("ICLOUD_GATEWAY_EDGE_SYNC_ENABLED", True),
+            edge_timeout_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120
+            ),
         )
+
+    @property
+    def is_edge(self) -> bool:
+        return self.deployment_mode == "edge"
+
+    @property
+    def is_control(self) -> bool:
+        return self.deployment_mode == "control"
+
+    @property
+    def manages_hme(self) -> bool:
+        return self.deployment_mode in {"full", "control"}
+
+    @property
+    def serves_public_otp(self) -> bool:
+        return self.deployment_mode in {"full", "edge"}
 
 
 __all__ = ["ConfigurationError", "Settings", "decode_master_key"]

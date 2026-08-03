@@ -4,6 +4,40 @@
 
 管理员可以导入并管理 Apple 账户中已有的全部隐藏邮箱，再把需要使用的活动 Alias 绑定到高强度访问密钥。使用者只需在公开页输入自己的密钥，系统会从 IMAP 实时读取该隐藏邮箱最近 300 秒内收到的最新 6 位验证码；公开接口不会返回 Alias、邮件正文、Apple Cookie 或 IMAP 凭据。
 
+## 拆分模式（本地 control + 云端 edge）
+
+默认仍是单机 `full`。也可以按你的要求拆开：
+
+| 模式 | 职责 |
+| --- | --- |
+| `control` | 本地：iCloud 邮箱创建、Session 持久化、账号管理，并把 alias/token 注册到云端 |
+| `edge` | 云端：只保存邮箱与访问密钥映射，负责验证码发码/等待（IMAP `/api/code`） |
+| `full` | 兼容现网：管理 + 验证码一体 |
+
+关键配置：
+
+```dotenv
+# 本地 control
+ICLOUD_GATEWAY_DEPLOYMENT_MODE=control
+ICLOUD_GATEWAY_EDGE_BASE_URL=https://icloud.yunbay.xyz
+ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<shared-secret>
+ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
+
+# 云端 edge
+ICLOUD_GATEWAY_DEPLOYMENT_MODE=edge
+ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
+```
+
+控制面同步接口（仅 token 鉴权，不走管理员 Cookie）：
+
+- `POST /control/v1/aliases`
+- `POST /control/v1/aliases/by-email/{email}/key`
+- `DELETE /control/v1/aliases/by-email/{email}/key`
+- `POST /control/v1/aliases/by-email/{email}/state`
+- `DELETE /control/v1/aliases/by-email/{email}`
+
+本地签发或轮换 access key 后，会自动把密钥同步到云端 edge；公开用户仍然只访问云端 `https://icloud.yunbay.xyz/` 输入密钥取码。
+
 ## 架构取舍
 
 本项目复用联动小铺所用的 `mcr.microsoft.com/playwright:v1.61.1-jammy` Chromium 基础镜像层，但不复用它正在运行的浏览器进程、BrowserContext 或 profile。

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from .browser_capture import CaptureManager
 from .config import Settings
 from .database import ConflictError, Database, IssuedAccessKey, NotFoundError
+from .edge_sync import EdgeSyncClient, EdgeSyncError
 from .hme import (
     HmeClient,
     HmeError,
@@ -73,6 +74,14 @@ class GatewayRetryableError(GatewayError):
 
 class GatewayStoppingError(GatewayRetryableError):
     pass
+
+
+class GatewayNotAllowedError(GatewayError):
+    code = "not_allowed"
+
+
+class GatewayEdgeSyncError(GatewayError):
+    code = "edge_sync_error"
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,7 @@ class GatewayService:
         clock: Callable[[], float] = time.time,
         sleeper: Callable[[float], Any] = time.sleep,
         start_maintenance: bool = True,
+        edge_sync_client: EdgeSyncClient | None = None,
     ) -> None:
         self.settings = settings
         self.secret_box = SecretBox(settings.master_key)
@@ -192,6 +202,9 @@ class GatewayService:
         self.rate_limiter = rate_limiter or SlidingWindowRateLimiter()
         self.clock = clock
         self.sleeper = sleeper
+        self.edge_sync_client = edge_sync_client
+        if self.edge_sync_client is None and settings.is_control and settings.edge_sync_enabled:
+            self.edge_sync_client = EdgeSyncClient(settings)
         self._hme_lock = threading.RLock()
         self._remote_write_lock = threading.Lock()
         self._remote_write_active = False
@@ -218,7 +231,7 @@ class GatewayService:
             get_session_template=self.get_hme_session,
             timeout_seconds=settings.capture_timeout_seconds,
         )
-        if start_maintenance:
+        if start_maintenance and settings.manages_hme:
             self._maintenance_thread = threading.Thread(
                 target=self._maintenance_loop,
                 name="icloud-hme-maintenance",
@@ -695,6 +708,9 @@ class GatewayService:
                         synced_at=_timestamp(),
                     )
                     issued = self.database.issue_access_key(alias["id"])
+                    self._push_alias_to_edge(
+                        alias, access_key=issued.access_key, action="issue_key"
+                    )
                     created.append(CreatedAlias(alias=alias, issued_key=issued))
                     results.append(
                         AliasBatchItemResult(
@@ -849,7 +865,157 @@ class GatewayService:
             raise GatewayNotConfiguredError("IMAP is not configured")
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
+
+    def _require_hme_management(self) -> None:
+        if not self.settings.manages_hme:
+            raise GatewayNotAllowedError("HME management is disabled in edge mode")
+
+    def _require_public_otp(self) -> None:
+        if not self.settings.serves_public_otp:
+            raise GatewayNotAllowedError("public OTP is disabled in control mode")
+
+    def _push_alias_to_edge(
+        self,
+        alias: dict[str, Any],
+        *,
+        access_key: str | None = None,
+        action: str = "upsert",
+    ) -> None:
+        if self.edge_sync_client is None or not self.settings.edge_sync_enabled:
+            return
+        try:
+            email = str(alias.get("email") or "").strip()
+            if action == "delete":
+                self.edge_sync_client.delete_alias(email=email)
+                return
+            if action == "revoke_key":
+                self.edge_sync_client.revoke_access_key(email=email)
+                return
+            if action == "issue_key":
+                if not access_key:
+                    raise GatewayEdgeSyncError("access key is required for edge issue")
+                self.edge_sync_client.issue_access_key(
+                    alias_id=str(alias["id"]),
+                    email=email,
+                    access_key=access_key,
+                )
+                return
+            self.edge_sync_client.upsert_alias(
+                alias_id=str(alias["id"]),
+                email=email,
+                label=str(alias.get("label") or email),
+                note=str(alias.get("note") or ""),
+                sender_filter=str(alias.get("sender_filter") or ""),
+                state=str(alias.get("state") or "active"),
+                access_key=access_key,
+            )
+        except EdgeSyncError as exc:
+            self.database.record_audit_event(
+                "edge_sync",
+                "failed",
+                alias_id=str(alias.get("id") or "") or None,
+            )
+            raise GatewayEdgeSyncError(str(exc)) from exc
+        self.database.record_audit_event(
+            "edge_sync",
+            action,
+            alias_id=str(alias.get("id") or "") or None,
+        )
+
+    def register_control_alias(
+        self,
+        *,
+        alias_id: str = "",
+        email: str,
+        label: str = "",
+        note: str = "",
+        sender_filter: str = "",
+        state: str = "active",
+        access_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Edge/control registration path. Does not touch Apple HME."""
+        if state not in {"active", "inactive"}:
+            raise ValueError("alias state is invalid")
+        alias = self.database.upsert_alias(
+            email=email,
+            remote_metadata=None,
+            label=label or email,
+            note=note,
+            sender_filter=sender_filter,
+            state=state,
+        )
+        if access_key and state == "active":
+            self.database.import_access_key(alias["id"], access_key)
+            alias = self.database.get_alias(alias["id"])
+        elif state == "inactive":
+            with suppress(Exception):
+                self.database.revoke_access_key(alias["id"])
+            alias = self.database.get_alias(alias["id"])
+        self.database.record_audit_event(
+            "control_register",
+            "upserted",
+            alias_id=str(alias["id"]),
+        )
+        if alias_id:
+            alias = {**alias, "external_id": str(alias_id)}
+        return alias
+
+    def register_control_access_key_by_email(self, email: str, access_key: str) -> IssuedAccessKey:
+        alias = self.database.upsert_alias(
+            email=email,
+            remote_metadata=None,
+            label=email,
+            note="",
+            sender_filter="",
+            state="active",
+        )
+        issued = self.database.import_access_key(alias["id"], access_key)
+        self.database.record_audit_event(
+            "control_register",
+            "key_imported",
+            alias_id=str(alias["id"]),
+        )
+        return issued
+
+    def register_control_state_by_email(self, email: str, state: str) -> dict[str, Any]:
+        alias = self.database.upsert_alias(
+            email=email,
+            remote_metadata=None,
+            label=email,
+            note="",
+            sender_filter="",
+            state=state,
+        )
+        if state == "inactive":
+            with suppress(Exception):
+                self.database.revoke_access_key(alias["id"])
+        alias = self.database.get_alias(alias["id"])
+        self.database.record_audit_event(
+            "control_register",
+            f"state_{state}",
+            alias_id=str(alias["id"]),
+        )
+        return alias
+
+    def register_control_delete_by_email(self, email: str) -> None:
+        # Upsert-less delete: list and match email.
+        target = None
+        for item in self.database.list_aliases():
+            if str(item.get("email") or "").casefold() == str(email or "").strip().casefold():
+                target = item
+                break
+        if target is None:
+            raise NotFoundError("alias not found")
+        self.database.delete_alias(str(target["id"]))
+        self.database.record_audit_event(
+            "control_register",
+            "deleted",
+            alias_id=str(target["id"]),
+        )
+
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
+        if self.settings.is_edge:
+            raise GatewayNotAllowedError("edge mode only imports keys from the control plane")
         if self._remote_write_active:
             raise GatewayBusyError("alias lifecycle operation is in progress")
         with self._hme_lock:
@@ -857,6 +1023,8 @@ class GatewayService:
                 raise GatewayBusyError("alias lifecycle operation is in progress")
             issued = self.database.issue_access_key(alias_id)
             self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
+            alias = self.database.get_alias(alias_id)
+            self._push_alias_to_edge(alias, access_key=issued.access_key, action="issue_key")
             return issued
 
     def reveal_access_key(self, alias_id: str) -> str:
@@ -866,9 +1034,13 @@ class GatewayService:
             return access_key
 
     def revoke_access_key(self, alias_id: str) -> None:
+        if self.settings.is_edge:
+            raise GatewayNotAllowedError("edge mode only revokes keys via the control plane")
         with self._hme_lock:
+            alias = self.database.get_alias(alias_id)
             self.database.revoke_access_key(alias_id)
             self.database.record_audit_event("access_key", "revoked", alias_id=str(alias_id))
+            self._push_alias_to_edge(alias, action="revoke_key")
 
     def update_alias(
         self,
@@ -910,7 +1082,9 @@ class GatewayService:
                 self.database.record_audit_event(
                     "alias_deactivate", "succeeded", alias_id=str(alias_id)
                 )
-                return self.database.get_alias(alias_id)
+                alias = self.database.get_alias(alias_id)
+                self._push_alias_to_edge(alias)
+                return alias
         finally:
             if client is not None:
                 self._close_client(client)
@@ -939,7 +1113,9 @@ class GatewayService:
                 self.database.record_audit_event(
                     "alias_reactivate", "succeeded", alias_id=str(alias_id)
                 )
-                return self.database.get_alias(alias_id)
+                alias = self.database.get_alias(alias_id)
+                self._push_alias_to_edge(alias)
+                return alias
         finally:
             if client is not None:
                 self._close_client(client)
@@ -966,15 +1142,18 @@ class GatewayService:
             )
             with self._hme_lock:
                 self._reconcile_remote_aliases(remote_aliases)
+                deleted = {"id": alias_id, "email": alias["email"]}
                 self.database.delete_alias(alias_id)
                 self._alias_generation += 1
                 self.database.record_audit_event("alias_delete", "succeeded")
+                self._push_alias_to_edge(deleted, action="delete")
         finally:
             if client is not None:
                 self._close_client(client)
             self._finish_remote_write()
 
     def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
+        self._require_public_otp()
         ip_key = str(client_ip or "unknown")
         ip_decision = self.rate_limiter.check("code-ip", ip_key, limit=30, window_seconds=60)
         if not ip_decision.allowed:
@@ -1035,6 +1214,7 @@ class GatewayService:
         )
 
     def admin_recent_codes(self) -> dict[str, Any]:
+        self._require_public_otp()
         config = self.get_imap_config()
         if config is None:
             self.database.record_audit_event("admin_code_scan", "not_configured")
@@ -1112,6 +1292,13 @@ class GatewayService:
             event["outcome_tone"] = tone
             event["created_at_display"] = _beijing_timestamp(event["created_at"])
         return {
+            "deployment_mode": self.settings.deployment_mode,
+            "edge_sync": {
+                "enabled": bool(
+                    self.settings.edge_sync_enabled and self.edge_sync_client is not None
+                ),
+                "edge_base_url": self.settings.edge_base_url or None,
+            },
             "hme": {
                 **self.hme_status(),
                 "host": None if hme_session is None else hme_session.host,
@@ -1169,6 +1356,8 @@ __all__ = [
     "CodeLookupResult",
     "CreatedAlias",
     "GatewayBusyError",
+    "GatewayEdgeSyncError",
+    "GatewayNotAllowedError",
     "GatewayError",
     "GatewayNotConfiguredError",
     "GatewayRateLimitedError",

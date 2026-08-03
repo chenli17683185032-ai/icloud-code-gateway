@@ -537,6 +537,52 @@ class Database:
         )
         return None if row is None else self._alias_from_row(row)
 
+    def import_access_key(self, alias_id: str, access_key: str) -> IssuedAccessKey:
+        clean_alias_id = str(alias_id)
+        key = validate_access_key(access_key)
+        digest = hash_access_key(key)
+        hint = key[-4:]
+        encrypted = self.secret_box.encrypt(
+            key.encode("ascii"),
+            f"alias-access-key:{clean_alias_id}",
+        )
+        timestamp = _now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT state FROM aliases WHERE id = ?", (clean_alias_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("alias not found")
+            if str(row["state"]) != "active":
+                raise ConflictError("inactive alias cannot receive an access key")
+            conflict = connection.execute(
+                """
+                SELECT id FROM aliases
+                WHERE access_key_hash = ?
+                  AND id != ?
+                """,
+                (sqlite3.Binary(digest), clean_alias_id),
+            ).fetchone()
+            if conflict is not None:
+                raise ConflictError("access key already assigned to another alias")
+            connection.execute(
+                """
+                UPDATE aliases
+                SET access_key_hash = ?, access_key_hint = ?, access_key_blob = ?,
+                    key_issued_at = ?, key_revoked_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    sqlite3.Binary(digest),
+                    hint,
+                    sqlite3.Binary(encrypted),
+                    timestamp,
+                    timestamp,
+                    clean_alias_id,
+                ),
+            )
+        return IssuedAccessKey(alias_id=clean_alias_id, access_key=key, hint=hint)
+
     def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
         clean_alias_id = str(alias_id)
         access_key = generate_access_key()

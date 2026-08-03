@@ -32,11 +32,15 @@ from .security import (
     AdminSession,
     AdminSessionCodec,
     InvalidSessionError,
+    SecurityError,
+    validate_access_key,
     verify_admin_password,
 )
 from .service import (
     GatewayBusyError,
+    GatewayEdgeSyncError,
     GatewayError,
+    GatewayNotAllowedError,
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
     GatewayService,
@@ -145,6 +149,40 @@ def _validate_form_csrf(session: AdminSession, supplied: Any) -> None:
 
 def _redirect_notice(code: str) -> RedirectResponse:
     return RedirectResponse(url=f"/admin?notice={code}", status_code=303)
+
+
+def _require_control_token(request: Request, settings: Settings) -> None:
+    expected = str(settings.control_plane_token or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="control plane is not configured")
+    header = str(request.headers.get("Authorization") or "").strip()
+    token = ""
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+    if not token:
+        token = str(request.headers.get("X-Control-Token") or "").strip()
+    if not token or not hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="control authentication required")
+
+
+class ControlAliasRequest(BaseModel):
+    id: Annotated[str, Field(default="", max_length=64)] = ""
+    email: Annotated[str, Field(min_length=3, max_length=254)]
+    label: Annotated[str, Field(default="", max_length=160)] = ""
+    note: Annotated[str, Field(default="", max_length=500)] = ""
+    sender_filter: Annotated[str, Field(default="", max_length=254)] = ""
+    state: Literal["active", "inactive"] = "active"
+    access_key: Annotated[str, Field(default="", max_length=128)] = ""
+
+
+class ControlKeyRequest(BaseModel):
+    access_key: Annotated[str, Field(min_length=1, max_length=128)]
+    id: Annotated[str, Field(default="", max_length=64)] = ""
+
+
+class ControlStateRequest(BaseModel):
+    state: Literal["active", "inactive"]
+
 
 
 def _capture_view(status: dict[str, Any]) -> dict[str, Any]:
@@ -261,6 +299,8 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def public_page(request: Request):
+        if not settings.serves_public_otp:
+            return RedirectResponse("/admin/login", status_code=303)
         return templates.TemplateResponse(
             request=request,
             name="public.html",
@@ -269,6 +309,8 @@ def create_app(
 
     @app.post("/api/code")
     async def code_lookup(request: Request, payload: CodeRequest):
+        if not settings.serves_public_otp:
+            return JSONResponse({"status": "not_allowed"}, status_code=404)
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -374,6 +416,7 @@ def create_app(
                 "cdp_configured": bool(settings.cdp_url),
                 "alias_batch_limit": settings.alias_batch_limit,
                 "public_base_url": settings.public_base_url,
+                "deployment_mode": settings.deployment_mode,
             }
         )
         return templates.TemplateResponse(
@@ -427,6 +470,8 @@ def create_app(
 
     @app.post("/admin/hme/import")
     async def import_hme(request: Request):
+        if not settings.manages_hme:
+            return _redirect_notice("hme_error")
         session = _admin_session(request, session_codec)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
@@ -442,6 +487,8 @@ def create_app(
 
     @app.post("/admin/hme/capture/start")
     async def start_capture(request: Request):
+        if not settings.manages_hme:
+            return _redirect_notice("hme_error")
         session = _admin_session(request, session_codec)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
@@ -473,6 +520,8 @@ def create_app(
 
     @app.post("/admin/hme/sync")
     async def sync_hme(request: Request):
+        if not settings.manages_hme:
+            return _redirect_notice("sync_error")
         session = _admin_session(request, session_codec)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
@@ -493,6 +542,8 @@ def create_app(
     @app.post("/admin/api/aliases")
     async def create_aliases(request: Request, payload: CreateAliasesRequest):
         _require_admin_json(request, session_codec)
+        if not settings.manages_hme:
+            return JSONResponse({"status": "not_allowed"}, status_code=403)
         try:
             job, created = jobs.create_alias_job(
                 count=payload.count,
@@ -575,6 +626,10 @@ def create_app(
             alias = gateway.database.get_alias(alias_id)
         except ConflictError:
             return JSONResponse({"status": "conflict"}, status_code=409)
+        except GatewayNotAllowedError:
+            return JSONResponse({"status": "not_allowed"}, status_code=403)
+        except GatewayEdgeSyncError:
+            return JSONResponse({"status": "edge_sync_error"}, status_code=502)
         except (NotFoundError, DatabaseError):
             return JSONResponse({"status": "error"}, status_code=404)
         return {
@@ -634,6 +689,10 @@ def create_app(
         _require_admin_json(request, session_codec)
         try:
             await asyncio.to_thread(gateway.revoke_access_key, alias_id)
+        except GatewayNotAllowedError:
+            return JSONResponse({"status": "not_allowed"}, status_code=403)
+        except GatewayEdgeSyncError:
+            return JSONResponse({"status": "edge_sync_error"}, status_code=502)
         except (NotFoundError, DatabaseError):
             return JSONResponse({"status": "error"}, status_code=404)
         return {"status": "revoked"}
@@ -710,6 +769,96 @@ def create_app(
         except (ValueError, NotFoundError, DatabaseError):
             return _redirect_notice("alias_error")
         return _redirect_notice("alias_saved")
+
+
+    @app.post("/control/v1/aliases")
+    async def control_upsert_alias(request: Request, payload: ControlAliasRequest):
+        if settings.deployment_mode == "control":
+            # local control usually pushes out, but accept no-op mirror
+            pass
+        _require_control_token(request, settings)
+        access_key = str(payload.access_key or "").strip() or None
+        if access_key is not None:
+            try:
+                access_key = validate_access_key(access_key)
+            except SecurityError:
+                return JSONResponse({"status": "invalid_request"}, status_code=422)
+        try:
+            alias = await asyncio.to_thread(
+                gateway.register_control_alias,
+                alias_id=payload.id,
+                email=payload.email,
+                label=payload.label,
+                note=payload.note,
+                sender_filter=payload.sender_filter,
+                state=payload.state,
+                access_key=access_key,
+            )
+        except (ValueError, ConflictError, DatabaseError, SecurityError):
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        return {
+            "status": "ok",
+            "id": alias["id"],
+            "email": alias["email"],
+            "state": alias["state"],
+            "has_access_key": bool(alias.get("has_access_key")),
+        }
+
+    @app.post("/control/v1/aliases/by-email/{email}/key")
+    async def control_issue_key(email: str, request: Request, payload: ControlKeyRequest):
+        _require_control_token(request, settings)
+        try:
+            access_key = validate_access_key(payload.access_key)
+            issued = await asyncio.to_thread(
+                gateway.register_control_access_key_by_email,
+                email,
+                access_key,
+            )
+        except (ConflictError, NotFoundError, DatabaseError, SecurityError, ValueError):
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        return {
+            "status": "ok",
+            "alias_id": issued.alias_id,
+            "hint": issued.hint,
+        }
+
+    @app.delete("/control/v1/aliases/by-email/{email}/key")
+    async def control_revoke_key(email: str, request: Request):
+        _require_control_token(request, settings)
+        try:
+            alias = await asyncio.to_thread(
+                gateway.register_control_state_by_email,
+                email,
+                "active",
+            )
+            await asyncio.to_thread(gateway.database.revoke_access_key, alias["id"])
+        except (NotFoundError, DatabaseError, ValueError):
+            return JSONResponse({"status": "not_found"}, status_code=404)
+        return {"status": "ok"}
+
+    @app.post("/control/v1/aliases/by-email/{email}/state")
+    async def control_set_state(email: str, request: Request, payload: ControlStateRequest):
+        _require_control_token(request, settings)
+        try:
+            alias = await asyncio.to_thread(
+                gateway.register_control_state_by_email,
+                email,
+                payload.state,
+            )
+        except (NotFoundError, DatabaseError, ValueError, ConflictError):
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        return {"status": "ok", "email": alias["email"], "state": alias["state"]}
+
+    @app.delete("/control/v1/aliases/by-email/{email}")
+    async def control_delete_alias(email: str, request: Request):
+        _require_control_token(request, settings)
+        try:
+            await asyncio.to_thread(gateway.register_control_delete_by_email, email)
+        except NotFoundError:
+            return JSONResponse({"status": "not_found"}, status_code=404)
+        except DatabaseError:
+            return JSONResponse({"status": "error"}, status_code=500)
+        return {"status": "ok"}
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_request: Request, exc: HTTPException):
