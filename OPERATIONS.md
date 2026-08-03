@@ -441,3 +441,12 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 - Grok / xAI：额外支持 `XXX-XXX` 字母数字码（如 `A1B-2C3`），优先识别来自 `x.ai` / `xai` / `grok` 的邮件；HTML 与纯文本均可。
 - 仍支持对 Alias 设置发件人过滤，例如 `@x.ai`。
 
+## 运维记录 · 2026-08-03 Grok 验证码支持上线
+
+- 提交：`ebd0638 Support Grok xAI alphanumeric OTP extraction`
+- 内容：IMAP 收码支持 Grok/xAI 的 `XXX-XXX` 字母数字码，同时保留 6 位数字通用提取。
+- 生产：仅重建 `icloud-code-gateway-app-1`，browser/cn-proxy 未动；app 约 8 秒恢复 healthy。
+- 服务器验收：容器内提取 `A1B-2C3` 成功，通用 6 位 `777777` 仍成功。
+- 回滚目录：`/opt/new-api/icloud-code-gateway/backups/grok-otp-20260803T075144Z-ebd0638`
+- 镜像回滚标签：`icloud-code-gateway-app:rollback-pre-grok-otp-20260803T075144Z`
+
