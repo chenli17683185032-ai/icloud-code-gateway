@@ -373,6 +373,24 @@ def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
         assert "打开 iCloud 浏览器" in dashboard.text
 
 
+def test_admin_local_profile_capture_enabled_without_cdp(settings, service, tmp_path) -> None:
+    local_settings = replace(
+        settings,
+        cdp_url="",
+        browser_profile_dir=tmp_path / "browser-profile",
+    )
+    app = create_app(local_settings, service=service)
+
+    with TestClient(app, base_url="http://testserver") as client:
+        _login(client, local_settings)
+        dashboard = client.get("/admin")
+        assert dashboard.status_code == 200
+        assert "本机持久 Chromium" in dashboard.text
+        assert "/admin/browser/vnc.html?" not in dashboard.text
+        assert 'action="/admin/hme/capture/start"' in dashboard.text
+        assert "disabled" not in dashboard.text.split('action="/admin/hme/capture/start"', 1)[1][:220]
+
+
 def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, service) -> None:
     alias = service.database.upsert_alias(
         email="queried@icloud.com",
@@ -1234,3 +1252,25 @@ def test_every_template_icon_exists() -> None:
         if not (package / "static/icons" / f"{name}.svg").is_file()
     ]
     assert missing == []
+
+
+def test_admin_open_mode_skips_password(settings, service) -> None:
+    open_settings = replace(settings, admin_open=True, admin_password="")
+    app = create_app(open_settings, service=service)
+    with TestClient(app, base_url="http://testserver") as client:
+        login = client.get("/admin/login", follow_redirects=False)
+        assert login.status_code == 303
+        assert login.headers["location"] == "/admin"
+        assert client.cookies.get(ADMIN_COOKIE)
+
+        dashboard = client.get("/admin")
+        assert dashboard.status_code == 200
+        assert "iCloud 验证码网关" in dashboard.text
+
+        # form posts should not require a real CSRF token in open mode
+        resp = client.post(
+            "/admin/hme/capture/cancel",
+            data={"csrf_token": "anything"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303

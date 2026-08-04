@@ -60,6 +60,7 @@ class Settings:
     admin_password: str
     cookie_secure: bool = True
     cdp_url: str = ""
+    browser_profile_dir: Path | None = None
     hme_proxy: str = ""
     public_base_url: str = ""
     trusted_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
@@ -78,10 +79,18 @@ class Settings:
     edge_base_url: str = ""
     edge_sync_enabled: bool = True
     edge_timeout_seconds: int = 20
+    # Local-only convenience: skip admin password UI/auth. Must never be enabled on
+    # public edge/full deployments.
+    admin_open: bool = False
 
     @property
     def database_path(self) -> Path:
         return self.data_dir / "gateway.sqlite3"
+
+    @property
+    def capture_configured(self) -> bool:
+        """True when capture can run via remote CDP or a local persistent profile."""
+        return bool(self.cdp_url) or self.browser_profile_dir is not None
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -89,11 +98,18 @@ class Settings:
             str(os.environ.get("ICLOUD_GATEWAY_DATA_DIR") or "./data").strip()
         ).expanduser()
         master_key = decode_master_key(_required_environment("ICLOUD_GATEWAY_MASTER_KEY"))
-        admin_password = _required_environment("ICLOUD_GATEWAY_ADMIN_PASSWORD")
-        if len(admin_password) < 16:
-            raise ConfigurationError(
-                "ICLOUD_GATEWAY_ADMIN_PASSWORD must contain at least 16 characters"
-            )
+        admin_open = _boolean_environment("ICLOUD_GATEWAY_ADMIN_OPEN", False)
+        admin_password = str(os.environ.get("ICLOUD_GATEWAY_ADMIN_PASSWORD") or "").strip()
+        if admin_open:
+            # Password is unused in open-local mode; keep empty or pass-through for tests.
+            pass
+        else:
+            if not admin_password:
+                raise ConfigurationError("ICLOUD_GATEWAY_ADMIN_PASSWORD is required")
+            if len(admin_password) < 16:
+                raise ConfigurationError(
+                    "ICLOUD_GATEWAY_ADMIN_PASSWORD must contain at least 16 characters"
+                )
         trusted_hosts = tuple(
             value.strip()
             for value in str(
@@ -140,12 +156,15 @@ class Settings:
                 raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
         elif edge_base_url and not edge_base_url.startswith(("https://", "http://")):
             raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
+        profile_raw = str(os.environ.get("ICLOUD_GATEWAY_BROWSER_PROFILE_DIR") or "").strip()
+        browser_profile_dir = Path(profile_raw).expanduser() if profile_raw else None
         return cls(
             data_dir=data_dir,
             master_key=master_key,
             admin_password=admin_password,
             cookie_secure=_boolean_environment("ICLOUD_GATEWAY_COOKIE_SECURE", True),
             cdp_url=str(os.environ.get("ICLOUD_GATEWAY_CDP_URL") or "").strip(),
+            browser_profile_dir=browser_profile_dir,
             hme_proxy="" if hme_proxy is None else hme_proxy.requests_url,
             public_base_url=public_base_url,
             trusted_hosts=trusted_hosts,
@@ -178,6 +197,7 @@ class Settings:
             edge_timeout_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120
             ),
+            admin_open=admin_open,
         )
 
     @property

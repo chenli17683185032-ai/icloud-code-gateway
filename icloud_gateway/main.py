@@ -25,4 +25,8 @@ def run() -> None:
     )
 
 
+if __name__ == "__main__":
+    run()
+
+
 __all__ = ["create_default_app", "run"]

@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     HTMLResponse,
@@ -56,7 +56,7 @@ NOTICE_MESSAGES = {
     "imap_error": "IMAP 配置未保存，请检查连接信息。",
     "hme_saved": "HME Session 已验证并保存，历史 Alias 已导入。",
     "hme_error": "HME Session 未更新，原有会话保持不变。",
-    "capture_started": "已连接持久浏览器，请打开 iCloud 浏览器完成 Apple 登录。",
+    "capture_started": "已启动 HME Session 捕获，请在 iCloud 浏览器中完成 Apple 登录。",
     "capture_busy": "HME Session 捕获正在进行。",
     "capture_cancelled": "已请求取消 HME Session 捕获。",
     "sync_done": "Alias 已与 Apple HME 列表完成对账。",
@@ -76,13 +76,13 @@ CAPTURE_STATE_LABELS = {
 }
 CAPTURE_STATE_MESSAGES = {
     "idle": "未启动捕获。",
-    "starting": "正在连接持久浏览器。",
-    "waiting_login": "请打开 iCloud 浏览器完成 Apple 登录。",
+    "starting": "正在连接/启动持久浏览器。",
+    "waiting_login": "请在 iCloud 浏览器窗口完成 Apple 登录。",
     "verifying": "已发现会话，正在只读验证。",
     "cancelling": "正在停止捕获。",
     "captured": "HME Session 已更新。",
     "cancelled": "捕获已取消。",
-    "failed": "捕获失败，请检查浏览器连接或会话状态。",
+    "failed": "捕获失败，请检查浏览器连接、本机 Chromium 或会话状态。",
 }
 
 
@@ -118,14 +118,37 @@ def _client_ip(request: Request) -> str:
     return "unknown" if request.client is None else str(request.client.host or "unknown")
 
 
-def _admin_session(request: Request, codec: AdminSessionCodec) -> AdminSession | None:
+def _admin_session(
+    request: Request,
+    codec: AdminSessionCodec,
+    *,
+    settings: Settings | None = None,
+) -> AdminSession | None:
+    if settings is not None and settings.admin_open:
+        cached = getattr(request.state, "open_admin_session", None)
+        if isinstance(cached, AdminSession):
+            return cached
+        cookie = str(request.cookies.get(ADMIN_COOKIE) or "").strip()
+        if cookie:
+            try:
+                session = codec.decode(cookie)
+                request.state.open_admin_session = session
+                return session
+            except InvalidSessionError:
+                pass
+        token, session = codec.issue()
+        request.state.open_admin_token = token
+        request.state.open_admin_session = session
+        return session
     try:
         return codec.decode(request.cookies.get(ADMIN_COOKIE, ""))
     except InvalidSessionError:
         return None
 
 
-def _csrf_matches(expected: str, supplied: Any) -> bool:
+def _csrf_matches(expected: str, supplied: Any, *, open_mode: bool = False) -> bool:
+    if open_mode:
+        return True
     # compare_digest rejects str operands that are not pure ASCII, so a token
     # carrying any non-ASCII byte has to be compared as bytes or it raises.
     token = str(supplied or "")
@@ -134,17 +157,32 @@ def _csrf_matches(expected: str, supplied: Any) -> bool:
     return hmac.compare_digest(str(expected).encode("utf-8"), token.encode("utf-8"))
 
 
-def _require_admin_json(request: Request, codec: AdminSessionCodec) -> AdminSession:
-    session = _admin_session(request, codec)
+def _require_admin_json(
+    request: Request,
+    codec: AdminSessionCodec,
+    *,
+    settings: Settings | None = None,
+) -> AdminSession:
+    session = _admin_session(request, codec, settings=settings)
     if session is None:
         raise HTTPException(status_code=401, detail="admin authentication required")
-    if not _csrf_matches(session.csrf_token, request.headers.get("X-CSRF-Token")):
+    open_mode = bool(settings is not None and settings.admin_open)
+    if not _csrf_matches(
+        session.csrf_token,
+        request.headers.get("X-CSRF-Token"),
+        open_mode=open_mode,
+    ):
         raise HTTPException(status_code=403, detail="CSRF validation failed")
     return session
 
 
-def _validate_form_csrf(session: AdminSession, supplied: Any) -> None:
-    if not _csrf_matches(session.csrf_token, supplied):
+def _validate_form_csrf(
+    session: AdminSession,
+    supplied: Any,
+    *,
+    open_mode: bool = False,
+) -> None:
+    if not _csrf_matches(session.csrf_token, supplied, open_mode=open_mode):
         raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
@@ -357,9 +395,42 @@ def create_app(
     async def robots():
         return "User-agent: *\nDisallow: /\n"
 
+    def _issue_admin_cookie(response: Response) -> AdminSession:
+        token, session = session_codec.issue()
+        response.set_cookie(
+            ADMIN_COOKIE,
+            token,
+            max_age=settings.admin_session_seconds,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="strict",
+            path="/admin",
+        )
+        return session
+
+    def _ensure_open_admin_cookie(request: Request, response: Response) -> None:
+        token = getattr(request.state, "open_admin_token", None)
+        if token:
+            response.set_cookie(
+                ADMIN_COOKIE,
+                token,
+                max_age=settings.admin_session_seconds,
+                httponly=True,
+                secure=settings.cookie_secure,
+                samesite="strict",
+                path="/admin",
+            )
+
     @app.get("/admin/login", response_class=HTMLResponse)
     async def admin_login_page(request: Request):
-        if _admin_session(request, session_codec) is not None:
+        if settings.admin_open:
+            response = RedirectResponse("/admin", status_code=303)
+            if _admin_session(request, session_codec, settings=settings) is None:
+                _issue_admin_cookie(response)
+            else:
+                _ensure_open_admin_cookie(request, response)
+            return response
+        if _admin_session(request, session_codec, settings=settings) is not None:
             return RedirectResponse("/admin", status_code=303)
         return templates.TemplateResponse(
             request=request,
@@ -369,6 +440,11 @@ def create_app(
 
     @app.post("/admin/login")
     async def admin_login(request: Request):
+        if settings.admin_open:
+            response = RedirectResponse("/admin", status_code=303)
+            _issue_admin_cookie(response)
+            gateway.database.record_audit_event("admin_login", "succeeded")
+            return response
         ip = _client_ip(request)
         decision = gateway.rate_limiter.check("admin-login", ip, limit=10, window_seconds=600)
         if not decision.allowed:
@@ -387,23 +463,14 @@ def create_app(
                 context={"page_title": "管理员登录", "error": True},
                 status_code=401,
             )
-        token, _session = session_codec.issue()
         response = RedirectResponse("/admin", status_code=303)
-        response.set_cookie(
-            ADMIN_COOKIE,
-            token,
-            max_age=settings.admin_session_seconds,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="strict",
-            path="/admin",
-        )
+        _issue_admin_cookie(response)
         gateway.database.record_audit_event("admin_login", "succeeded")
         return response
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin_dashboard(request: Request, notice: str = ""):
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         context = gateway.dashboard()
@@ -415,41 +482,46 @@ def create_app(
                 "notice": NOTICE_MESSAGES.get(notice, ""),
                 "notice_kind": "error" if notice.endswith("error") else "success",
                 "cdp_configured": bool(settings.cdp_url),
+                "capture_configured": settings.capture_configured,
                 "alias_batch_limit": settings.alias_batch_limit,
                 "public_base_url": settings.public_base_url,
                 "deployment_mode": settings.deployment_mode,
             }
         )
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             request=request,
             name="admin.html",
             context=context,
         )
+        _ensure_open_admin_cookie(request, response)
+        return response
 
     @app.get("/admin/api/browser/auth")
     async def admin_browser_auth(request: Request):
-        if _admin_session(request, session_codec) is None:
+        if _admin_session(request, session_codec, settings=settings) is None:
             return RedirectResponse("/admin/login", status_code=303)
-        return Response(status_code=204)
+        response = Response(status_code=204)
+        _ensure_open_admin_cookie(request, response)
+        return response
 
     @app.post("/admin/logout")
     async def admin_logout(request: Request):
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         response = RedirectResponse("/admin/login", status_code=303)
         response.delete_cookie(ADMIN_COOKIE, path="/admin")
         return response
 
     @app.post("/admin/imap")
     async def save_imap(request: Request):
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         try:
             await asyncio.to_thread(
                 gateway.configure_imap,
@@ -473,11 +545,11 @@ def create_app(
     async def import_hme(request: Request):
         if not settings.manages_hme:
             return _redirect_notice("hme_error")
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         try:
             await asyncio.to_thread(
                 gateway.import_hme_session, str(form.get("session_import") or "")
@@ -490,12 +562,12 @@ def create_app(
     async def start_capture(request: Request):
         if not settings.manages_hme:
             return _redirect_notice("hme_error")
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
-        if not settings.cdp_url:
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
+        if not settings.capture_configured:
             return _redirect_notice("hme_error")
         try:
             gateway.capture_manager.start()
@@ -505,17 +577,17 @@ def create_app(
 
     @app.post("/admin/hme/capture/cancel")
     async def cancel_capture(request: Request):
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         gateway.capture_manager.cancel()
         return _redirect_notice("capture_cancelled")
 
     @app.get("/admin/api/capture/status")
     async def capture_status(request: Request):
-        if _admin_session(request, session_codec) is None:
+        if _admin_session(request, session_codec, settings=settings) is None:
             raise HTTPException(status_code=401, detail="admin authentication required")
         return _capture_view(gateway.capture_manager.status())
 
@@ -523,11 +595,11 @@ def create_app(
     async def sync_hme(request: Request):
         if not settings.manages_hme:
             return _redirect_notice("sync_error")
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         try:
             await asyncio.to_thread(gateway.sync_aliases)
         except (GatewayError, HmeError, HmeSessionError, DatabaseError):
@@ -542,7 +614,7 @@ def create_app(
 
     @app.post("/admin/api/aliases")
     async def create_aliases(request: Request, payload: CreateAliasesRequest):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         if not settings.manages_hme:
             return JSONResponse({"status": "not_allowed"}, status_code=403)
         try:
@@ -569,7 +641,7 @@ def create_app(
 
     @app.post("/admin/api/aliases/bulk")
     async def bulk_aliases(request: Request, payload: BulkAliasesRequest):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         if len(payload.alias_ids) > settings.alias_batch_limit:
             return JSONResponse({"status": "invalid_request"}, status_code=422)
         try:
@@ -595,13 +667,13 @@ def create_app(
 
     @app.get("/admin/api/jobs")
     async def active_batch_jobs(request: Request):
-        if _admin_session(request, session_codec) is None:
+        if _admin_session(request, session_codec, settings=settings) is None:
             raise HTTPException(status_code=401, detail="admin authentication required")
         return {"jobs": jobs.active_jobs()}
 
     @app.get("/admin/api/jobs/{job_id}")
     async def batch_job_status(job_id: str, request: Request):
-        if _admin_session(request, session_codec) is None:
+        if _admin_session(request, session_codec, settings=settings) is None:
             raise HTTPException(status_code=401, detail="admin authentication required")
         try:
             return jobs.public_job(job_id, reveal_keys=False)
@@ -610,7 +682,7 @@ def create_app(
 
     @app.post("/admin/api/jobs/{job_id}/results")
     async def batch_job_results(job_id: str, request: Request):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             job = jobs.public_job(job_id, reveal_keys=True)
         except NotFoundError:
@@ -621,7 +693,7 @@ def create_app(
 
     @app.post("/admin/api/aliases/{alias_id}/key")
     async def issue_alias_key(alias_id: str, request: Request):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             issued = await asyncio.to_thread(gateway.issue_access_key, alias_id)
             alias = gateway.database.get_alias(alias_id)
@@ -644,7 +716,7 @@ def create_app(
 
     @app.post("/admin/api/aliases/{alias_id}/key/reveal")
     async def reveal_alias_key(alias_id: str, request: Request):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             access_key = await asyncio.to_thread(gateway.reveal_access_key, alias_id)
             alias = gateway.database.get_alias(alias_id)
@@ -665,7 +737,7 @@ def create_app(
 
     @app.post("/admin/api/codes/recent")
     async def recent_admin_codes(request: Request):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(gateway.admin_recent_codes),
@@ -687,7 +759,7 @@ def create_app(
 
     @app.delete("/admin/api/aliases/{alias_id}/key")
     async def revoke_alias_key(alias_id: str, request: Request):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             await asyncio.to_thread(gateway.revoke_access_key, alias_id)
         except GatewayNotAllowedError:
@@ -704,7 +776,7 @@ def create_app(
         request: Request,
         _payload: ConfirmedAliasAction,
     ):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             alias = await asyncio.to_thread(gateway.deactivate_alias, alias_id)
         except ConflictError:
@@ -721,7 +793,7 @@ def create_app(
         request: Request,
         _payload: ConfirmedAliasAction,
     ):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             alias = await asyncio.to_thread(gateway.reactivate_alias, alias_id)
         except ConflictError:
@@ -738,7 +810,7 @@ def create_app(
         request: Request,
         payload: DeleteAliasRequest,
     ):
-        _require_admin_json(request, session_codec)
+        _require_admin_json(request, session_codec, settings=settings)
         try:
             await asyncio.to_thread(
                 gateway.delete_alias,
@@ -755,11 +827,11 @@ def create_app(
 
     @app.post("/admin/aliases/{alias_id}")
     async def update_alias(alias_id: str, request: Request):
-        session = _admin_session(request, session_codec)
+        session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
         form = await request.form()
-        _validate_form_csrf(session, form.get("csrf_token"))
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         try:
             gateway.update_alias(
                 alias_id,

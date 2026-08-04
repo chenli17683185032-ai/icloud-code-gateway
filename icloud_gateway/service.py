@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -230,6 +232,7 @@ class GatewayService:
             on_status=self._capture_status_changed,
             get_session_template=self.get_hme_session,
             timeout_seconds=settings.capture_timeout_seconds,
+            profile_dir=settings.browser_profile_dir,
         )
         if start_maintenance and settings.manages_hme:
             self._maintenance_thread = threading.Thread(
@@ -317,14 +320,92 @@ class GatewayService:
 
     def hme_status(self) -> dict[str, Any]:
         try:
-            configured = self.get_hme_session() is not None
+            session = self.get_hme_session()
+            configured = session is not None
         except (HmeSessionError, SecurityError):
+            session = None
             configured = False
         with self._state_lock:
             status = dict(self._hme_state)
+            last_validated = self._last_validated_ts
         status["configured"] = configured
         if not configured:
             status["state"] = "not_configured"
+
+        now = float(self.clock())
+        freshness = max(300, int(self.settings.hme_freshness_seconds))
+        maintenance = max(300, int(self.settings.hme_maintenance_interval_seconds))
+        state = str(status.get("state") or "not_configured")
+
+        # Disk persistence is independent of Apple validity.
+        db_path = self.settings.database_path
+        profile_dir = self.settings.browser_profile_dir
+        status["persisted_on_disk"] = bool(configured and db_path.is_file())
+        status["database_path"] = str(db_path)
+        status["browser_profile_dir"] = None if profile_dir is None else str(profile_dir)
+        status["browser_profile_persisted"] = bool(
+            profile_dir is not None and Path(profile_dir).exists()
+        )
+        status["capture_mode"] = (
+            "cdp"
+            if self.settings.cdp_url
+            else ("local_profile" if profile_dir is not None else "unavailable")
+        )
+        status["freshness_seconds"] = freshness
+        status["maintenance_interval_seconds"] = maintenance
+        status["last_validated_at_display"] = (
+            None
+            if not status.get("last_validated_at")
+            else _beijing_timestamp(str(status["last_validated_at"]))
+        )
+        status["next_attempt_at_display"] = (
+            None
+            if not status.get("next_attempt_at")
+            else _beijing_timestamp(str(status["next_attempt_at"]))
+        )
+
+        age_seconds = None if last_validated is None else max(0, int(now - float(last_validated)))
+        status["seconds_since_validated"] = age_seconds
+        if last_validated is None:
+            status["fresh_until_at"] = None
+            status["fresh_until_at_display"] = None
+            status["seconds_until_freshness_check"] = None
+        else:
+            remaining = max(0, int(float(last_validated) + freshness - now))
+            status["seconds_until_freshness_check"] = remaining
+            fresh_until = float(last_validated) + freshness
+            status["fresh_until_at"] = _iso_timestamp(fresh_until)
+            status["fresh_until_at_display"] = _beijing_timestamp(status["fresh_until_at"])
+
+        # What the operator should do next. "refreshing" alone is NOT re-login.
+        if state == "not_configured":
+            status["health_level"] = "warn"
+            status["operator_action"] = "login_required"
+            status["operator_hint"] = "尚未保存 Session，请点“登录更新”完成 Apple 登录。"
+        elif state == "reauth_required":
+            status["health_level"] = "error"
+            status["operator_action"] = "login_required"
+            status["operator_hint"] = "Apple 已拒绝当前 Session，需要重新点“登录更新”。"
+        elif state == "refreshing":
+            status["health_level"] = "info"
+            status["operator_action"] = "wait"
+            status["operator_hint"] = "后台正在刷新/校验 Session，通常无需你操作；不是已丢失。"
+        elif state == "degraded":
+            status["health_level"] = "warn"
+            status["operator_action"] = "retry_later"
+            status["operator_hint"] = "网络或代理暂时异常；磁盘上的 Session 还在，可稍后再试。"
+        elif state == "ready" and status.get("persisted_on_disk"):
+            status["health_level"] = "good"
+            status["operator_action"] = "none"
+            status["operator_hint"] = "Session 已落盘，可直接创建；看到“正在刷新”不等于要重登。"
+        else:
+            status["health_level"] = "warn"
+            status["operator_action"] = "check"
+            status["operator_hint"] = "Session 状态异常，请检查本地数据目录或重新登录更新。"
+
+        # keep host handy when configured
+        if session is not None and not status.get("host"):
+            status["host"] = session.host
         return status
 
     def _capture_status_changed(self, status: dict[str, Any]) -> None:
@@ -441,7 +522,7 @@ class GatewayService:
         except HmeSessionError as exc:
             error = exc
             self._set_hme_state("reauth_required", error_kind="authentication")
-            if self.settings.cdp_url:
+            if self.settings.capture_configured:
                 with suppress(Exception):
                     self.capture_manager.start()
         except (HmeNetworkError, HmeError, OSError, TimeoutError) as exc:
@@ -1030,6 +1111,47 @@ class GatewayService:
             self._push_alias_to_edge(alias, access_key=issued.access_key, action="issue_key")
             return issued
 
+    def push_all_access_keys_to_edge(self) -> dict[str, int]:
+        """Backfill local keyed aliases to the cloud edge control plane."""
+        if self.edge_sync_client is None or not self.settings.edge_sync_enabled:
+            raise GatewayNotAllowedError("edge sync is not enabled")
+        if self.settings.is_edge:
+            raise GatewayNotAllowedError("edge mode cannot push to itself")
+        succeeded = 0
+        failed = 0
+        skipped = 0
+        for alias in self.database.list_aliases():
+            if str(alias.get("state") or "") != "active":
+                skipped += 1
+                continue
+            if not bool(alias.get("has_access_key")):
+                skipped += 1
+                continue
+            alias_id = str(alias["id"])
+            try:
+                access_key = self.database.reveal_access_key(alias_id)
+                # Prefer upsert with key so missing emails are created on edge.
+                self._push_alias_to_edge(alias, access_key=access_key, action="upsert")
+                succeeded += 1
+            except Exception:
+                failed += 1
+                self.database.record_audit_event(
+                    "edge_sync",
+                    "backfill_failed",
+                    alias_id=alias_id,
+                )
+        self.database.record_audit_event(
+            "edge_sync",
+            "backfill_done",
+        )
+        return {
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "total": succeeded + failed + skipped,
+        }
+
+
     def reveal_access_key(self, alias_id: str) -> str:
         with self._hme_lock:
             access_key = self.database.reveal_access_key(alias_id)
@@ -1306,6 +1428,17 @@ class GatewayService:
                 **self.hme_status(),
                 "host": None if hme_session is None else hme_session.host,
                 "error": hme_error,
+            },
+            "local_runtime": {
+                "data_dir": str(self.settings.data_dir),
+                "database_path": str(self.settings.database_path),
+                "browser_profile_dir": (
+                    None
+                    if self.settings.browser_profile_dir is None
+                    else str(self.settings.browser_profile_dir)
+                ),
+                "admin_open": bool(self.settings.admin_open),
+                "capture_configured": bool(self.settings.capture_configured),
             },
             "imap": {
                 "configured": imap_config is not None,

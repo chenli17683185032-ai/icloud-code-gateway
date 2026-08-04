@@ -321,10 +321,12 @@
               <img src="/static/icons/cloud.svg" alt="" aria-hidden="true">
               <span>打开 iCloud 浏览器</span>
             </a>
+            {% elif capture_configured %}
+            <p class="muted-text">本机持久 Chromium：点击“登录更新”后会弹出浏览器窗口，请在其中完成 Apple 登录。</p>
             {% endif %}
             <form method="post" action="/admin/hme/capture/start">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button class="primary-button" type="submit" {% if not cdp_configured or capture.active %}disabled{% endif %}>
+              <button class="primary-button" type="submit" {% if not capture_configured or capture.active %}disabled{% endif %}>
                 <img src="/static/icons/radio-tower.svg" alt="" aria-hidden="true">
                 <span>登录更新</span>
               </button>

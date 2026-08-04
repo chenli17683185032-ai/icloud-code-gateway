@@ -27,10 +27,18 @@ class EdgeSyncClient:
         settings: Settings,
         *,
         session: requests.Session | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.settings = settings
         self.session = session or requests.Session()
+        # Local macOS often cannot TLS-direct to Cloudflare; force explicit proxy
+        # and ignore ambient HTTP(S)_PROXY so control plane routing is deterministic.
         self.session.trust_env = False
+        proxy_url = str(proxy if proxy is not None else settings.hme_proxy or "").strip()
+        if proxy_url:
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+        else:
+            self.session.proxies.clear()
 
     def _headers(self) -> dict[str, str]:
         token = str(self.settings.control_plane_token or "").strip()

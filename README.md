@@ -38,6 +38,36 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 
 本地签发或轮换 access key 后，会自动把密钥同步到云端 edge；公开用户仍然只访问云端 `https://icloud.yunbay.xyz/` 输入密钥取码。
 
+### 本地 control（无 Docker）
+
+本地控制台推荐直接跑 Python 进程，不依赖 Docker / OrbStack：
+
+```bash
+# 一键启动（桌面/鲨鱼工具库也可双击）
+./scripts/run-local-control.sh
+```
+
+固定持久目录（重启不丢）：
+
+- `~/.icloud-code-gateway/data`：SQLite + 加密 HME Session
+- `~/.icloud-code-gateway/browser-profile`：本机持久 Chromium 登录态
+
+无 Docker 时不配 `ICLOUD_GATEWAY_CDP_URL`，改为：
+
+```dotenv
+ICLOUD_GATEWAY_BROWSER_PROFILE_DIR=~/.icloud-code-gateway/browser-profile
+```
+
+管理页点击「登录更新」后会弹出本机 Chromium；完成 Apple 登录后自动捕获 Session。创建仍在本地完成，并同步到云端 edge。
+
+本地脚本默认开启：
+
+```dotenv
+ICLOUD_GATEWAY_ADMIN_OPEN=1
+```
+
+即**本机管理页免管理员密码**。线上 edge 不设置该开关，生产管理员密码保持原样。无 Docker 本地也不再使用 noVNC，因此**没有 VNC 密码**。
+
 ## 架构取舍
 
 本项目复用联动小铺所用的 `mcr.microsoft.com/playwright:v1.61.1-jammy` Chromium 基础镜像层，但不复用它正在运行的浏览器进程、BrowserContext 或 profile。
