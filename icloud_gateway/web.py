@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import asyncio
 import hashlib
 import hmac
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -63,7 +65,46 @@ NOTICE_MESSAGES = {
     "sync_error": "Alias 对账失败，本地数据未被清空。",
     "alias_saved": "Alias 配置已保存。",
     "alias_error": "Alias 配置未保存。",
+    "edge_sync_empty": "云端同步完成：没有可推送的已签发密钥。",
+    "edge_sync_error": "云端同步失败：请确认 edge sync 已启用且 Clash 代理可用。",
 }
+
+
+def _notice_int(value: str | None, default: int = 0) -> int:
+    try:
+        return max(0, int(str(value or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """Return (message, kind) for admin flash notices."""
+    params = params or {}
+    if notice == "edge_sync_ok":
+        ok = _notice_int(params.get("ok"))
+        skip = _notice_int(params.get("skip"))
+        return (
+            f"云端同步成功：已推送 {ok} 个密钥，跳过 {skip} 个。",
+            "success",
+        )
+    if notice == "edge_sync_partial":
+        ok = _notice_int(params.get("ok"))
+        fail = _notice_int(params.get("fail"))
+        skip = _notice_int(params.get("skip"))
+        return (
+            f"云端同步部分失败：成功 {ok} 个，失败 {fail} 个，跳过 {skip} 个。请检查 Clash 代理后重试。",
+            "error",
+        )
+    if notice == "edge_sync_failed":
+        fail = _notice_int(params.get("fail"))
+        skip = _notice_int(params.get("skip"))
+        return (
+            f"云端同步失败：{fail} 个密钥推送失败，跳过 {skip} 个。请检查 Clash 代理与 control token。",
+            "error",
+        )
+    message = NOTICE_MESSAGES.get(notice, "")
+    kind = "error" if notice.endswith("error") or notice.endswith("failed") else "success"
+    return message, kind
 CAPTURE_STATE_LABELS = {
     "idle": "待机",
     "starting": "连接中",
@@ -186,8 +227,13 @@ def _validate_form_csrf(
         raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
-def _redirect_notice(code: str) -> RedirectResponse:
-    return RedirectResponse(url=f"/admin?notice={code}", status_code=303)
+def _redirect_notice(code: str, **params: object) -> RedirectResponse:
+    query: dict[str, str] = {"notice": code}
+    for key, value in params.items():
+        if value is None:
+            continue
+        query[str(key)] = str(value)
+    return RedirectResponse(url=f"/admin?{urlencode(query)}", status_code=303)
 
 
 def _require_control_token(request: Request, settings: Settings) -> None:
@@ -475,17 +521,22 @@ def create_app(
             return RedirectResponse("/admin/login", status_code=303)
         context = gateway.dashboard()
         context["capture"] = _capture_view(context["capture"])
+        notice_params = {key: str(value) for key, value in request.query_params.multi_items()}
+        notice_message, notice_kind = _build_admin_notice(notice, notice_params)
         context.update(
             {
                 "page_title": "iCloud 验证码网关",
                 "csrf_token": session.csrf_token,
-                "notice": NOTICE_MESSAGES.get(notice, ""),
-                "notice_kind": "error" if notice.endswith("error") else "success",
+                "notice": notice_message,
+                "notice_kind": notice_kind,
                 "cdp_configured": bool(settings.cdp_url),
                 "capture_configured": settings.capture_configured,
                 "alias_batch_limit": settings.alias_batch_limit,
                 "public_base_url": settings.public_base_url,
                 "deployment_mode": settings.deployment_mode,
+                "edge_sync_enabled": bool(
+                    context.get("edge_sync", {}).get("enabled")
+                ),
             }
         )
         response = templates.TemplateResponse(
@@ -605,6 +656,39 @@ def create_app(
         except (GatewayError, HmeError, HmeSessionError, DatabaseError):
             return _redirect_notice("sync_error")
         return _redirect_notice("sync_done")
+
+    @app.post("/admin/edge/sync")
+    async def sync_edge(request: Request):
+        """One-click backfill of local keyed aliases/tokens to the cloud edge."""
+        session = _admin_session(request, session_codec, settings=settings)
+        if session is None:
+            return RedirectResponse("/admin/login", status_code=303)
+        form = await request.form()
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
+        if not settings.is_control or not settings.edge_sync_enabled:
+            return _redirect_notice("edge_sync_error")
+        try:
+            result = await asyncio.to_thread(gateway.push_all_access_keys_to_edge)
+        except GatewayNotAllowedError:
+            return _redirect_notice("edge_sync_error")
+        except Exception:
+            return _redirect_notice("edge_sync_error")
+
+        ok = int(result.get("succeeded") or 0)
+        fail = int(result.get("failed") or 0)
+        skip = int(result.get("skipped") or 0)
+        if ok == 0 and fail == 0:
+            return _redirect_notice("edge_sync_empty")
+        if fail > 0 and ok == 0:
+            return _redirect_notice("edge_sync_failed", fail=fail, skip=skip)
+        if fail > 0:
+            return _redirect_notice(
+                "edge_sync_partial",
+                ok=ok,
+                fail=fail,
+                skip=skip,
+            )
+        return _redirect_notice("edge_sync_ok", ok=ok, skip=skip)
 
     def _idempotency_key(request: Request) -> str | None:
         value = request.headers.get("Idempotency-Key")

@@ -114,6 +114,21 @@
             <span>导入 / 刷新</span>
           </button>
         </form>
+        {% if deployment_mode == 'control' %}
+        <form method="post" action="/admin/edge/sync">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button
+            class="primary-button"
+            type="submit"
+            aria-label="一键同步到云端"
+            title="把本地已签发的 token 同步到云端 edge"
+            {% if not edge_sync_enabled %}disabled{% endif %}
+          >
+            <img src="/static/icons/cloud.svg" alt="" aria-hidden="true">
+            <span>同步到云端</span>
+          </button>
+        </form>
+        {% endif %}
       </div>
     </div>
 

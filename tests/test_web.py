@@ -1274,3 +1274,92 @@ def test_admin_open_mode_skips_password(settings, service) -> None:
             follow_redirects=False,
         )
         assert resp.status_code == 303
+
+
+def test_admin_one_click_edge_sync_feedback(settings, service) -> None:
+    class FakeEdge:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def upsert_alias(self, **kwargs):
+            self.calls.append(str(kwargs.get("email") or ""))
+            return {"status": "ok"}
+
+    control_settings = replace(
+        settings,
+        deployment_mode="control",
+        control_plane_token="control-token-control-token-123456",
+        edge_base_url="https://icloud.example.test",
+        edge_sync_enabled=True,
+    )
+    edge = FakeEdge()
+    control_service = GatewayService(
+        control_settings,
+        hme_client_factory=FakeHmeClient,
+        imap_reader_factory=FakeImapReader,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+        start_maintenance=False,
+        edge_sync_client=edge,
+    )
+    alias = control_service.database.upsert_alias(
+        email="user1@icloud.com",
+        remote_metadata={
+            "anonymousId": "anon-1",
+            "hme": "user1@icloud.com",
+            "isActive": True,
+        },
+        label="demo",
+        state="active",
+    )
+    issued = control_service.database.issue_access_key(alias["id"])
+    assert issued.access_key
+
+    app = create_app(control_settings, service=control_service)
+    with TestClient(app, base_url="http://testserver") as client:
+        _login(client, control_settings)
+        page = client.get("/admin")
+        assert page.status_code == 200
+        assert "同步到云端" in page.text
+        assert 'action="/admin/edge/sync"' in page.text
+        csrf = page.text.split('name="csrf_token" value="', 1)[1].split('"', 1)[0]
+
+        resp = client.post(
+            "/admin/edge/sync",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert "notice=edge_sync_ok" in location
+        assert "ok=1" in location
+
+        done = client.get(location)
+        assert done.status_code == 200
+        assert "云端同步成功" in done.text
+        assert "已推送 1 个密钥" in done.text
+        assert edge.calls == ["user1@icloud.com"]
+
+
+def test_admin_one_click_edge_sync_disabled_reports_error(settings, service) -> None:
+    disabled = replace(
+        settings,
+        deployment_mode="control",
+        edge_sync_enabled=False,
+        control_plane_token="control-token-control-token-123456",
+        edge_base_url="https://icloud.example.test",
+    )
+    app = create_app(disabled, service=service)
+    with TestClient(app, base_url="http://testserver") as client:
+        _login(client, disabled)
+        page = client.get("/admin")
+        csrf = page.text.split('name="csrf_token" value="', 1)[1].split('"', 1)[0]
+        resp = client.post(
+            "/admin/edge/sync",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "notice=edge_sync_error" in resp.headers["location"]
+        body = client.get(resp.headers["location"])
+        assert "云端同步失败" in body.text
