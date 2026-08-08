@@ -114,6 +114,10 @@ class DeleteAliasRequest(BaseModel):
     confirmation: Annotated[str, Field(min_length=3, max_length=254)]
 
 
+class AliasUsageRequest(BaseModel):
+    usage_label: Annotated[str, Field(default="", max_length=80)] = ""
+
+
 def _client_ip(request: Request) -> str:
     return "unknown" if request.client is None else str(request.client.host or "unknown")
 
@@ -640,6 +644,31 @@ def create_app(
             "label": alias["label"],
             "access_key": issued.access_key,
             "public_url": settings.public_base_url,
+        }
+
+    @app.post("/admin/api/aliases/{alias_id}/usage")
+    async def update_alias_usage(
+        alias_id: str,
+        request: Request,
+        payload: AliasUsageRequest,
+    ):
+        _require_admin_json(request, session_codec, settings=settings)
+        try:
+            alias = await asyncio.to_thread(
+                gateway.update_alias_usage,
+                alias_id,
+                payload.usage_label,
+            )
+        except ValueError:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        except NotFoundError:
+            return JSONResponse({"status": "not_found"}, status_code=404)
+        except DatabaseError:
+            return JSONResponse({"status": "error"}, status_code=500)
+        return {
+            "status": "updated",
+            "id": alias_id,
+            "usage_label": alias["usage_label"],
         }
 
     @app.post("/admin/api/aliases/{alias_id}/key/reveal")

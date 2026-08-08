@@ -136,11 +136,74 @@
         <span role="columnheader">操作</span>
       </div>
       {% for alias in aliases %}
-      <article class="alias-row" role="row" data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}">
+      {% set custom_usage = alias.usage_label if alias.usage_label not in ['', 'gpt', 'grok'] else '' %}
+      <article
+        class="alias-row"
+        role="row"
+        data-alias-base-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}"
+        data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }} {{ alias.usage_label }}"
+      >
         <label class="alias-select checkbox-control" role="cell"><input class="alias-checkbox" type="checkbox" value="{{ alias.id }}" data-alias-state="{{ alias.state }}" aria-label="选择 {{ alias.email }}"><span class="sr-only">选择 {{ alias.email }}</span></label>
         <div class="alias-identity" role="cell">
-          <strong>{{ alias.email }}</strong>
+          <button
+            class="alias-email-copy"
+            type="button"
+            data-copy-email="{{ alias.email }}"
+            aria-label="复制邮箱 {{ alias.email }}"
+            title="点击复制邮箱"
+          >
+            <strong>{{ alias.email }}</strong>
+            <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
+          </button>
+          <span class="alias-copy-feedback" aria-live="polite"></span>
           {% if alias.sender_filter %}<span>发件人 {{ alias.sender_filter }}</span>{% endif %}
+          <div
+            class="alias-usage"
+            data-alias-id="{{ alias.id }}"
+            data-usage-label="{{ alias.usage_label }}"
+          >
+            <span class="usage-caption">用途</span>
+            <div class="usage-choices" role="group" aria-label="{{ alias.email }} 的用途">
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-value="gpt"
+                aria-pressed="{{ 'true' if alias.usage_label == 'gpt' else 'false' }}"
+              >GPT</button>
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-value="grok"
+                aria-pressed="{{ 'true' if alias.usage_label == 'grok' else 'false' }}"
+              >Grok</button>
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-custom
+                aria-pressed="{{ 'true' if custom_usage else 'false' }}"
+              >其他</button>
+              <button
+                class="usage-clear"
+                type="button"
+                {% if not alias.usage_label %}disabled{% endif %}
+              >清除</button>
+            </div>
+            <span class="usage-current" {% if not custom_usage %}hidden{% endif %}>{{ custom_usage }}</span>
+            <form class="usage-custom-form" hidden>
+              <label class="sr-only" for="usage-custom-{{ alias.id }}">自定义用途</label>
+              <input
+                id="usage-custom-{{ alias.id }}"
+                class="usage-custom-input"
+                type="text"
+                maxlength="80"
+                value="{{ custom_usage }}"
+                autocomplete="off"
+              >
+              <button class="primary-button small-button" type="submit">保存</button>
+              <button class="secondary-button small-button usage-custom-cancel" type="button">取消</button>
+            </form>
+            <span class="usage-feedback" aria-live="polite"></span>
+          </div>
         </div>
         <div class="alias-label" role="cell">{{ alias.label }}</div>
         <div class="alias-key" role="cell">

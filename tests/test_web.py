@@ -761,8 +761,8 @@ def test_dashboard_exports_effective_alias_batch_limit(client, settings, service
     response = client.get("/admin")
 
     assert response.status_code == 200
-    assert '<meta name="alias-batch-limit" content="50">' in response.text
-    assert 'data-alias-batch-limit="50"' in response.text
+    assert '<meta name="alias-batch-limit" content="100">' in response.text
+    assert 'data-alias-batch-limit="100"' in response.text
     assert 'data-alias-state="active"' in response.text
 
 
@@ -784,11 +784,11 @@ def test_bulk_delete_rejects_active_aliases_before_job_creation(client, settings
     assert service.database.list_active_batch_jobs() == []
 
 
-def test_bulk_alias_api_enforces_configured_limit(client, settings, service) -> None:
+def test_bulk_alias_api_enforces_hard_limit(client, settings, service) -> None:
     csrf = _login(client, settings)
     response = client.post(
         "/admin/api/aliases/bulk",
-        json={"action": "issue_keys", "alias_ids": [f"alias-{index}" for index in range(51)]},
+        json={"action": "issue_keys", "alias_ids": [f"alias-{index}" for index in range(101)]},
         headers={"X-CSRF-Token": csrf},
     )
 
@@ -831,11 +831,11 @@ def test_batch_job_api_idempotency_conflict_and_poll_csrf_no_store(
     assert "Idempotency-Key" not in str(service.database.get_batch_job(first.json()["job_id"]))
 
 
-def test_create_alias_api_enforces_configured_and_hard_limits(client, settings, service) -> None:
+def test_create_alias_api_accepts_one_hundred_and_rejects_more(client, settings, service) -> None:
     csrf = _login(client, settings)
-    configured = client.post(
+    accepted = client.post(
         "/admin/api/aliases",
-        json={"count": 51, "label_prefix": "Person"},
+        json={"count": 100, "label_prefix": "Person"},
         headers={"X-CSRF-Token": csrf},
     )
     hard = client.post(
@@ -843,9 +843,83 @@ def test_create_alias_api_enforces_configured_and_hard_limits(client, settings, 
         json={"count": 101, "label_prefix": "Person"},
         headers={"X-CSRF-Token": csrf},
     )
-    assert configured.status_code == 422
+    assert accepted.status_code == 202
+    assert accepted.json()["requested"] == 100
+    assert len(service.database.get_batch_job(accepted.json()["job_id"])["items"]) == 100
     assert hard.status_code == 422
     assert FakeHmeClient.created == []
+
+
+def test_alias_usage_api_requires_admin_csrf_and_escapes_custom_values(
+    client, settings, service
+) -> None:
+    alias = service.database.upsert_alias(
+        email="usage@icloud.com",
+        remote_metadata={"anonymousId": "usage", "isActive": True},
+        label="Usage",
+    )
+    csrf = _login(client, settings)
+
+    missing_csrf = client.post(
+        f"/admin/api/aliases/{alias['id']}/usage",
+        json={"usage_label": "gpt"},
+    )
+    assert missing_csrf.status_code == 403
+
+    fixed = client.post(
+        f"/admin/api/aliases/{alias['id']}/usage",
+        json={"usage_label": "GPT"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert fixed.status_code == 200
+    assert fixed.json()["usage_label"] == "gpt"
+
+    custom_value = '<script>alert("usage")</script>'
+    custom = client.post(
+        f"/admin/api/aliases/{alias['id']}/usage",
+        json={"usage_label": custom_value},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert custom.status_code == 200
+    assert custom.json()["usage_label"] == custom_value
+
+    dashboard = client.get("/admin")
+    assert custom_value not in dashboard.text
+    assert "&lt;script&gt;alert" in dashboard.text
+    assert "alias-email-copy" in dashboard.text
+    assert "usage-choice" in dashboard.text
+
+    for invalid in ("line\nbreak", "nul\x00byte", "x" * 81):
+        response = client.post(
+            f"/admin/api/aliases/{alias['id']}/usage",
+            json={"usage_label": invalid},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 422
+    assert service.database.get_alias(alias["id"])["usage_label"] == custom_value
+
+    cleared = client.post(
+        f"/admin/api/aliases/{alias['id']}/usage",
+        json={"usage_label": ""},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["usage_label"] == ""
+
+    missing = client.post(
+        "/admin/api/aliases/missing/usage",
+        json={"usage_label": "grok"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert missing.status_code == 404
+
+    client.cookies.clear()
+    unauthorized = client.post(
+        f"/admin/api/aliases/{alias['id']}/usage",
+        json={"usage_label": "gpt"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert unauthorized.status_code == 401
 
 
 def test_failed_hme_and_imap_updates_preserve_previous_values(client, settings, service) -> None:
@@ -1078,6 +1152,12 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "明确失败 ${counts.failed} 项" in script
     assert "远端结果不确定 ${counts.unknown} 项" in script
     assert "尚未开始 ${counts.queued} 项" in script
+    assert "async function writeClipboard" in script
+    assert 'document.execCommand("copy")' in script
+    assert 'querySelectorAll(".alias-email-copy")' in script
+    assert "/usage`" in script
+    assert "usageCurrent.textContent" in script
+    assert "innerHTML" not in script
 
 
 def test_admin_static_assets_are_versioned_and_revalidated(client, settings) -> None:
@@ -1193,6 +1273,24 @@ const {limitedVisibleSelectionCount} = require(process.argv[1]);
 if (limitedVisibleSelectionCount(0, 159, 50) !== 50) process.exit(1);
 if (limitedVisibleSelectionCount(48, 20, 50) !== 2) process.exit(2);
 if (limitedVisibleSelectionCount(50, 20, 50) !== 0) process.exit(3);
+"""
+    subprocess.run([node, "-e", harness, str(script)], check=True)
+
+
+def test_admin_script_classifies_usage_values() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "icloud_gateway" / "static" / "admin.js"
+    harness = """
+const noop = () => {};
+global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
+global.window = {location: {origin: "https://example.test"}, addEventListener: noop};
+const {usageKind} = require(process.argv[1]);
+if (usageKind("") !== "empty") process.exit(1);
+if (usageKind("gpt") !== "gpt") process.exit(2);
+if (usageKind("grok") !== "grok") process.exit(3);
+if (usageKind("内部工具") !== "custom") process.exit(4);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 

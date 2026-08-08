@@ -64,6 +64,7 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 - 停用、恢复和永久删除均在 Apple 写入后再次读取 HME 列表确认；确认前不改变本地状态，永久删除只允许失活 Alias 且需要输入完整邮箱。
 - 管理页“查询记录”展示最近 7 天内最新 100 次验证码查询；Alias 邮箱快照加密保存，来源只保留不可逆指纹，不保存验证码、访问密钥或原始 IP。
 - 管理员可手动刷新最近 5 分钟验证码，范围覆盖全部已导入 Alias，包括未签发访问密钥的 Alias；一次刷新最多扫描/返回 500 条，验证码只存在于当前响应和页面 DOM。
+- Alias 邮箱文本可直接点击复制；每条 Alias 可在本地管理页标记为 GPT、Grok 或最多 80 字符的自定义用途。用途只是管理元数据，不参与 Apple、公开取码或 access key 校验。
 - 管理端采用 HttpOnly/Secure/Strict Cookie 和 CSRF；noVNC 页面、静态资源与 WebSocket 均经过管理员会话认证。
 - CDP 仅在 Docker 内网可达；原始 noVNC 只绑定服务器 `127.0.0.1`。
 - 浏览器或 Apple/IMAP 上游异常均有界失败，不让公网请求无限等待。
@@ -96,7 +97,7 @@ ICLOUD_GATEWAY_COOKIE_SECURE=1
 ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS=21600
 ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS=3600
 ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS=3600
-ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=50
+ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=100
 CN_PROXY_REQUIRED=1
 ```
 
@@ -116,7 +117,7 @@ docker compose ps
 3. 点击“开始捕获”，在 iCloud+ 隐藏邮件页面触发一次真实 HME list 请求。
 4. 配置转发邮箱 IMAP 和 App 专用密码；如需覆盖垃圾邮件，填写服务端显示的准确文件夹
    名称。保存动作会只读测试所有已配置文件夹。
-5. Session 捕获成功后会自动导入已有 Alias；也可点击“导入 / 刷新”重新对账，随后为需要使用的活动 Alias 签发访问密钥。新签发/轮换的密钥可由管理员随时显式查看和复制；升级前只有哈希的旧密钥需先轮换。
+5. Session 捕获成功后会自动导入已有 Alias；也可点击“导入 / 刷新”重新对账，随后为需要使用的活动 Alias 签发访问密钥。新签发/轮换的密钥可由管理员随时显式查看和复制；升级前只有哈希的旧密钥需先轮换。点击 Alias 邮箱可直接复制，并可用 GPT、Grok 或自定义用途按钮做本地标记。
 6. 在“验证码”栏目手动读取全部 Alias 最近 5 分钟的验证码；该操作不要求 Alias 已配置访问密钥，也不会保存验证码。
 7. 在“查询记录”查看哪些 Alias 被公开查询、查询结果、脱敏来源指纹和北京时间；已删除 Alias 的既有记录仍保留当时邮箱快照。
 
@@ -146,6 +147,6 @@ uv run python -m compileall -q icloud_gateway tests
 - 不保存或自动填写 Apple ID 密码、2FA 码、恢复密钥。
 - 不向普通使用者开放收件箱、邮件正文、Alias 列表或 iCloud 管理能力。
 - 不自动执行真实 HME Alias 生命周期操作；仅支持管理员显式选择最多 100 条后批量停用或永久删除。网关严格串行写入、逐条读取 Apple 状态确认并返回逐项结果；永久删除仅允许失活项且需要二次确认。
-- 批量创建默认网关上限为 50（可配置，硬上限 100），这不是 Apple 配额；普通 Alias 没有公开批量端点，仍逐项 generate→reserve 并遵守间隔、私有 API 限流与账户真实配额，状态不确定时不会盲目重试。
+- 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve，并遵守间隔、私有 API 限流与账户真实配额，状态不确定时不会盲目重试。
 - 不共享联动小铺正在运行的 Chromium 进程/profile。
 - 不保证 Apple Session 永不过期；过期后管理员通过网站中的同一个浏览器重新登录维护。

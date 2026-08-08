@@ -12,7 +12,7 @@
   const aliasBatchLimit =
     Number.isSafeInteger(configuredAliasBatchLimit) && configuredAliasBatchLimit > 0
       ? configuredAliasBatchLimit
-      : 50;
+      : 100;
   const modal = document.querySelector("#key-modal");
   const modalMessage = document.querySelector("#key-modal-message");
   const issuedList = document.querySelector("#issued-key-list");
@@ -73,6 +73,37 @@
     return items.map(standardParameters).join("\n");
   }
 
+  async function writeClipboard(value) {
+    const text = String(value ?? "");
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (_error) {
+        // Fall through to the selection-based copy path for older/insecure contexts.
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.append(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("copy_failed");
+  }
+
+  function usageKind(value) {
+    const normalized = String(value || "").trim().toLocaleLowerCase();
+    if (!normalized) return "empty";
+    if (normalized === "gpt" || normalized === "grok") return normalized;
+    return "custom";
+  }
+
   function createCopyButton(value, label = "复制") {
     const copy = document.createElement("button");
     copy.type = "button";
@@ -86,7 +117,7 @@
     copy.append(icon, copyText);
     copy.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(value);
+        await writeClipboard(value);
         copyText.textContent = "已复制";
       } catch (_error) {
         copyText.textContent = "复制失败";
@@ -273,6 +304,128 @@
       createButton.disabled = false;
       createButton.classList.remove("is-busy");
     }
+  });
+
+  document.querySelectorAll(".alias-email-copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const feedback = button.parentElement.querySelector(".alias-copy-feedback");
+      try {
+        await writeClipboard(button.dataset.copyEmail || "");
+        feedback.textContent = "已复制";
+      } catch (_error) {
+        feedback.textContent = "复制失败";
+      }
+      window.setTimeout(() => {
+        feedback.textContent = "";
+      }, 1600);
+    });
+  });
+
+  function applyUsageState(control, usageLabel) {
+    const value = String(usageLabel || "").trim();
+    const kind = usageKind(value);
+    control.dataset.usageLabel = value;
+    control.querySelectorAll(".usage-choice").forEach((choice) => {
+      const selected =
+        choice.dataset.usageValue === kind ||
+        (choice.hasAttribute("data-usage-custom") && kind === "custom");
+      choice.setAttribute("aria-pressed", selected ? "true" : "false");
+    });
+    const usageCurrent = control.querySelector(".usage-current");
+    usageCurrent.textContent = kind === "custom" ? value : "";
+    usageCurrent.hidden = kind !== "custom";
+    const customInput = control.querySelector(".usage-custom-input");
+    customInput.value = kind === "custom" ? value : "";
+    control.querySelector(".usage-clear").disabled = !value;
+    const row = control.closest(".alias-row");
+    if (row) {
+      row.dataset.aliasSearch = `${row.dataset.aliasBaseSearch || ""} ${value}`.trim();
+    }
+  }
+
+  function setUsageBusy(control, busy) {
+    control.querySelectorAll("button, input").forEach((element) => {
+      element.disabled = busy;
+    });
+    if (!busy) {
+      control.querySelector(".usage-clear").disabled = !control.dataset.usageLabel;
+    }
+  }
+
+  async function persistUsage(control, value, successMessage) {
+    const feedback = control.querySelector(".usage-feedback");
+    setUsageBusy(control, true);
+    try {
+      const data = await api(
+        `/admin/api/aliases/${encodeURIComponent(control.dataset.aliasId)}/usage`,
+        {
+          method: "POST",
+          body: JSON.stringify({ usage_label: value }),
+        },
+      );
+      applyUsageState(control, data.usage_label);
+      feedback.textContent = successMessage;
+      window.setTimeout(() => {
+        feedback.textContent = "";
+      }, 1800);
+      return true;
+    } catch (error) {
+      if (error instanceof AuthenticationRequiredError) return false;
+      feedback.textContent = "用途保存失败。";
+      return false;
+    } finally {
+      setUsageBusy(control, false);
+    }
+  }
+
+  document.querySelectorAll(".alias-usage").forEach((control) => {
+    applyUsageState(control, control.dataset.usageLabel || "");
+    const customForm = control.querySelector(".usage-custom-form");
+    const customInput = control.querySelector(".usage-custom-input");
+    const feedback = control.querySelector(".usage-feedback");
+
+    control.querySelectorAll(".usage-choice[data-usage-value]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const value = button.dataset.usageValue;
+        if (control.dataset.usageLabel === value) {
+          feedback.textContent = `已标记 ${button.textContent.trim()}。`;
+          return;
+        }
+        customForm.hidden = true;
+        await persistUsage(control, value, `已标记 ${button.textContent.trim()}。`);
+      });
+    });
+
+    control.querySelector("[data-usage-custom]").addEventListener("click", () => {
+      customForm.hidden = false;
+      feedback.textContent = "";
+      customInput.focus();
+      customInput.select();
+    });
+
+    control.querySelector(".usage-custom-cancel").addEventListener("click", () => {
+      customForm.hidden = true;
+      applyUsageState(control, control.dataset.usageLabel || "");
+      feedback.textContent = "";
+    });
+
+    customForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = customInput.value.trim();
+      if (!value || value.length > 80 || /[\r\n\u0000]/u.test(value)) {
+        feedback.textContent = "请输入 1–80 个字符且不含换行的用途。";
+        customInput.focus();
+        return;
+      }
+      if (await persistUsage(control, value, "自定义用途已保存。")) {
+        customForm.hidden = true;
+      }
+    });
+
+    control.querySelector(".usage-clear").addEventListener("click", async () => {
+      customForm.hidden = true;
+      await persistUsage(control, "", "用途已清除。");
+    });
   });
 
   document.querySelectorAll(".issue-key-button").forEach((button) => {
@@ -669,6 +822,7 @@
       limitedVisibleSelectionCount,
       standardParameterList,
       standardParameters,
+      usageKind,
     };
   }
 })();

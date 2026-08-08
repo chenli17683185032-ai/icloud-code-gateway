@@ -68,6 +68,16 @@ def _clean_text(value: Any, *, limit: int) -> str:
     return text
 
 
+def _clean_usage_label(value: Any) -> str:
+    text = _clean_text(value, limit=80)
+    if "\x00" in text:
+        raise ValueError("usage label is invalid")
+    canonical = text.casefold()
+    if canonical in {"gpt", "grok"}:
+        return canonical
+    return text
+
+
 @dataclass(frozen=True)
 class IssuedAccessKey:
     alias_id: str
@@ -109,6 +119,7 @@ class Database:
                     label TEXT NOT NULL,
                     note TEXT NOT NULL,
                     sender_filter TEXT NOT NULL,
+                    usage_label TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL CHECK (state IN ('active', 'inactive')),
                     access_key_hash BLOB UNIQUE,
                     access_key_hint TEXT,
@@ -199,6 +210,10 @@ class Database:
             }
             if "access_key_blob" not in alias_columns:
                 connection.execute("ALTER TABLE aliases ADD COLUMN access_key_blob BLOB")
+            if "usage_label" not in alias_columns:
+                connection.execute(
+                    "ALTER TABLE aliases ADD COLUMN usage_label TEXT NOT NULL DEFAULT ''"
+                )
             audit_columns = {
                 str(row["name"]) for row in connection.execute("PRAGMA table_info(audit_events)")
             }
@@ -699,6 +714,21 @@ class Database:
                 raise NotFoundError("alias not found")
         return self.get_alias(alias_id)
 
+    def update_alias_usage(self, alias_id: str, usage_label: str) -> dict[str, Any]:
+        clean_usage = _clean_usage_label(usage_label)
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE aliases
+                SET usage_label = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (clean_usage, _now(), str(alias_id)),
+            )
+            if cursor.rowcount != 1:
+                raise NotFoundError("alias not found")
+        return self.get_alias(alias_id)
+
     def set_alias_state(self, alias_id: str, state: str) -> None:
         clean_state = str(state or "").strip()
         if clean_state not in {"active", "inactive"}:
@@ -1149,6 +1179,7 @@ class Database:
             "label": str(row["label"]),
             "note": str(row["note"]),
             "sender_filter": str(row["sender_filter"]),
+            "usage_label": str(row["usage_label"]),
             "state": str(row["state"]),
             "has_access_key": row["access_key_hash"] is not None,
             "access_key_recoverable": (
