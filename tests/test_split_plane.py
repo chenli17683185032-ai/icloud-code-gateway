@@ -132,6 +132,7 @@ class _FakeSession:
     def __init__(self):
         self.calls = []
         self.trust_env = True
+        self.proxies = {}
 
     def request(self, method, url, headers=None, json=None, timeout=None):
         self.calls.append(
@@ -168,7 +169,7 @@ def test_control_plane_pushes_issued_key_to_edge(tmp_path: Path):
     assert fake.calls
     call = fake.calls[-1]
     assert call["method"] == "POST"
-    assert call["url"].endswith("/control/v1/aliases/by-email/local.hidden@icloud.com/key")
+    assert call["url"].endswith("/control/v1/aliases/by-email/local.hidden%40icloud.com/key")
     assert call["json"]["access_key"] == issued.access_key
     assert call["headers"]["Authorization"].startswith("Bearer ")
 

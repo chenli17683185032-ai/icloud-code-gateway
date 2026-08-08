@@ -388,7 +388,8 @@ def test_admin_local_profile_capture_enabled_without_cdp(settings, service, tmp_
         assert "本机持久 Chromium" in dashboard.text
         assert "/admin/browser/vnc.html?" not in dashboard.text
         assert 'action="/admin/hme/capture/start"' in dashboard.text
-        assert "disabled" not in dashboard.text.split('action="/admin/hme/capture/start"', 1)[1][:220]
+        capture_form = dashboard.text.split('action="/admin/hme/capture/start"', 1)[1][:220]
+        assert "disabled" not in capture_form
 
 
 def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, service) -> None:

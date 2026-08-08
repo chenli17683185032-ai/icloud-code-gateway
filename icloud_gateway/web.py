@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import asyncio
 import hashlib
 import hmac
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import unquote, urlencode
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -18,7 +17,6 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
-    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -92,19 +90,23 @@ def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) ->
         fail = _notice_int(params.get("fail"))
         skip = _notice_int(params.get("skip"))
         return (
-            f"云端同步部分失败：成功 {ok} 个，失败 {fail} 个，跳过 {skip} 个。请检查 Clash 代理后重试。",
+            f"云端同步部分失败：成功 {ok} 个，失败 {fail} 个，"
+            f"跳过 {skip} 个。请检查 Clash 代理后重试。",
             "error",
         )
     if notice == "edge_sync_failed":
         fail = _notice_int(params.get("fail"))
         skip = _notice_int(params.get("skip"))
         return (
-            f"云端同步失败：{fail} 个密钥推送失败，跳过 {skip} 个。请检查 Clash 代理与 control token。",
+            f"云端同步失败：{fail} 个密钥推送失败，跳过 {skip} 个。"
+            "请检查 Clash 代理与 control token。",
             "error",
         )
     message = NOTICE_MESSAGES.get(notice, "")
     kind = "error" if notice.endswith("error") or notice.endswith("failed") else "success"
     return message, kind
+
+
 CAPTURE_STATE_LABELS = {
     "idle": "待机",
     "starting": "连接中",
@@ -267,7 +269,6 @@ class ControlKeyRequest(BaseModel):
 
 class ControlStateRequest(BaseModel):
     state: Literal["active", "inactive"]
-
 
 
 def _capture_view(status: dict[str, Any]) -> dict[str, Any]:
@@ -534,9 +535,7 @@ def create_app(
                 "alias_batch_limit": settings.alias_batch_limit,
                 "public_base_url": settings.public_base_url,
                 "deployment_mode": settings.deployment_mode,
-                "edge_sync_enabled": bool(
-                    context.get("edge_sync", {}).get("enabled")
-                ),
+                "edge_sync_enabled": bool(context.get("edge_sync", {}).get("enabled")),
             }
         )
         response = templates.TemplateResponse(
@@ -926,7 +925,6 @@ def create_app(
         except (ValueError, NotFoundError, DatabaseError):
             return _redirect_notice("alias_error")
         return _redirect_notice("alias_saved")
-
 
     @app.post("/control/v1/aliases")
     async def control_upsert_alias(request: Request, payload: ControlAliasRequest):

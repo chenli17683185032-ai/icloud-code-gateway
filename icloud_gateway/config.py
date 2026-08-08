@@ -149,9 +149,7 @@ class Settings:
         )
         if mode == "control":
             if not edge_base_url:
-                raise ConfigurationError(
-                    "ICLOUD_GATEWAY_EDGE_BASE_URL is required in control mode"
-                )
+                raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is required in control mode")
             if not edge_base_url.startswith(("https://", "http://")):
                 raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
         elif edge_base_url and not edge_base_url.startswith(("https://", "http://")):

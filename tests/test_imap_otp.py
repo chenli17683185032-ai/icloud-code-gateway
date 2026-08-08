@@ -404,6 +404,7 @@ def test_reader_prefers_the_candidate_nearest_to_verification_context() -> None:
         ("您的认证码为 333333，请勿泄露。", "333333"),
         ("444444 是您的确认码，请在五分钟内使用。", "444444"),
         ("<p>一次性密码：<strong>555555</strong></p>", "555555"),
+        ("<p>您的临时代码：<strong>666777</strong></p>", "666777"),
     ),
 )
 def test_reader_accepts_chinese_and_html_verification_context(body: str, code: str) -> None:
@@ -724,6 +725,7 @@ def test_lookup_timeout_is_a_total_deadline_across_imap_operations() -> None:
 
     assert connection.logged_out is True
 
+
 def test_reader_extracts_grok_alphanumeric_code_from_xai_sender() -> None:
     connection = FakeImap(
         {
@@ -762,7 +764,7 @@ def test_reader_extracts_grok_code_from_html_mail() -> None:
                     body=(
                         "<html><body>"
                         "<p>Your Grok login code is:</p>"
-                        "<p style=\"font-size:28px\"><b>z9y-8x7</b></p>"
+                        '<p style="font-size:28px"><b>z9y-8x7</b></p>'
                         "</body></html>"
                     ),
                     html=True,
@@ -843,4 +845,3 @@ def test_reader_rejects_xxx_xxx_without_context_for_non_grok_mail() -> None:
     )
 
     assert reader(connection).find_latest_code("target@icloud.com", now_ts=NOW) is None
-

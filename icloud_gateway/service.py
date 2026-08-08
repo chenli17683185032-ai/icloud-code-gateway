@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -946,7 +945,6 @@ class GatewayService:
             raise GatewayNotConfiguredError("IMAP is not configured")
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
-
     def _require_hme_management(self) -> None:
         if not self.settings.manages_hme:
             raise GatewayNotAllowedError("HME management is disabled in edge mode")
@@ -1150,7 +1148,6 @@ class GatewayService:
             "skipped": skipped,
             "total": succeeded + failed + skipped,
         }
-
 
     def reveal_access_key(self, alias_id: str) -> str:
         with self._hme_lock:

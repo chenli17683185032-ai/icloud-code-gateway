@@ -46,7 +46,7 @@ _CODE_CONTEXT_RE = re.compile(
     r"sign[- ]?up[- ]code|access[- ]code|grok|xai|x\.ai)\b|"
     r"\u9a8c\u8bc1\u7801|\u6821\u9a8c\u7801|\u52a8\u6001\u7801|"
     r"\u5b89\u5168(?:\u7801|\u4ee3\u7801)|\u8ba4\u8bc1\u7801|"
-    r"\u786e\u8ba4\u7801|\u4e34\u65f6\u7801|"
+    r"\u786e\u8ba4\u7801|\u4e34\u65f6(?:\u7801|\u4ee3\u7801)|"
     r"\u4e00\u6b21\u6027(?:\u5bc6\u7801|\u4ee3\u7801|\u9a8c\u8bc1\u7801)?",
     re.IGNORECASE,
 )
