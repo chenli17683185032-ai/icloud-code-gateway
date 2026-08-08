@@ -308,8 +308,8 @@ def test_create_aliases_issues_one_unique_key_per_alias(tmp_path) -> None:
     assert delays == [2.0]
 
 
-def test_create_aliases_enforces_configured_limit_without_truncation(tmp_path) -> None:
-    configured = replace(settings(tmp_path), alias_batch_limit=50)
+def test_create_aliases_accepts_hard_limit_without_truncation(tmp_path) -> None:
+    configured = replace(settings(tmp_path), alias_batch_limit=100)
     value = GatewayService(
         configured,
         hme_client_factory=FakeHmeClient,
@@ -320,8 +320,6 @@ def test_create_aliases_enforces_configured_limit_without_truncation(tmp_path) -
     value.save_hme_session(hme_session())
 
     with pytest.raises(ValueError):
-        value.create_aliases(count=51, label_prefix="Person")
-    with pytest.raises(ValueError):
         value.create_aliases(count=101, label_prefix="Person")
     assert FakeHmeClient.created == []
 
@@ -331,13 +329,31 @@ def test_create_aliases_enforces_configured_limit_without_truncation(tmp_path) -
             "anonymousId": f"person{index}",
             "isActive": True,
         }
-        for index in range(50)
+        for index in range(100)
     ]
-    batch = value.create_aliases(count=50, label_prefix="Person")
-    assert batch.requested_count == 50
-    assert batch.succeeded_count == 50
+    batch = value.create_aliases(count=100, label_prefix="Person")
+    assert batch.requested_count == 100
+    assert batch.succeeded_count == 100
     assert batch.failed_count == 0
-    assert len(batch.results) == 50
+    assert len(batch.results) == 100
+
+
+def test_update_alias_usage_is_audited_and_validated(tmp_path) -> None:
+    value = service(tmp_path)
+    alias = value.database.upsert_alias(
+        email="usage@icloud.com",
+        remote_metadata={"anonymousId": "usage", "isActive": True},
+    )
+
+    updated = value.update_alias_usage(alias["id"], " Grok ")
+
+    assert updated["usage_label"] == "grok"
+    event = value.database.list_audit_events(limit=1)[0]
+    assert event["event_type"] == "alias_usage"
+    assert event["outcome"] == "updated"
+    with pytest.raises(ValueError):
+        value.update_alias_usage(alias["id"], "x" * 81)
+    assert value.database.get_alias(alias["id"])["usage_label"] == "grok"
 
 
 def test_create_aliases_only_marks_network_failures_as_unknown(tmp_path) -> None:

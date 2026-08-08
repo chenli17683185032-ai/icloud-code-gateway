@@ -247,6 +247,8 @@ def test_initialize_migrates_and_backfills_legacy_lookup_history(tmp_path) -> No
             str(row["name"]) for row in database._connect().execute("PRAGMA table_info(aliases)")
         }
         assert "access_key_blob" in alias_columns
+        assert "usage_label" in alias_columns
+        assert database.get_alias(alias_id)["usage_label"] == ""
         assert "audit_events_type_id_idx" in indexes
         assert event["alias_email"] == email
         assert event["outcome"] == "found"
@@ -367,6 +369,36 @@ def test_aliases_are_listed_active_first(database) -> None:
     )
 
     assert [item["state"] for item in database.list_aliases()] == ["active", "inactive"]
+
+
+def test_alias_usage_is_canonicalized_and_survives_remote_refresh(database) -> None:
+    alias = database.upsert_alias(
+        email="usage@icloud.com",
+        remote_metadata={"anonymousId": "usage", "isActive": True},
+        label="Usage",
+    )
+
+    assert alias["usage_label"] == ""
+    assert database.update_alias_usage(alias["id"], " GPT ")["usage_label"] == "gpt"
+
+    refreshed = database.sync_remote_alias(
+        email="usage@icloud.com",
+        remote_metadata={"anonymousId": "usage", "isActive": True, "label": "Remote"},
+        synced_at="2026-08-08T12:00:00.000Z",
+    )
+    assert refreshed["usage_label"] == "gpt"
+
+    assert database.update_alias_usage(alias["id"], "内部工具")["usage_label"] == "内部工具"
+    database.issue_access_key(alias["id"])
+    database.set_alias_state(alias["id"], "inactive")
+    assert database.get_alias(alias["id"])["usage_label"] == "内部工具"
+    database.set_alias_state(alias["id"], "active")
+    assert database.get_alias(alias["id"])["usage_label"] == "内部工具"
+    for invalid in ("line\nbreak", "nul\x00byte", "x" * 81):
+        with pytest.raises(ValueError):
+            database.update_alias_usage(alias["id"], invalid)
+    assert database.get_alias(alias["id"])["usage_label"] == "内部工具"
+    assert database.update_alias_usage(alias["id"], "")["usage_label"] == ""
 
 
 def test_audit_retention_is_enforced_during_long_lived_operation(database, monkeypatch) -> None:

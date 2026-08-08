@@ -19,6 +19,7 @@
 
 - 管理页 JS/CSS 使用内容哈希查询参数，`/static/*` 响应要求浏览器每次重新验证；部署后不得继续使用无版本号的旧 `admin.js`。
 - 创建和批量操作均返回持久任务，前端必须持续轮询普通状态接口，并只通过管理员 Cookie + CSRF 的 POST results 显式读取成功项密钥。
+- 单次创建默认与硬上限均为 100；任务仍逐项串行调用 Apple，不得把 100 项改成并发 HME 写入，也不得用真实 Apple 批量创建作为发布测试。
 - `needs_reconcile` 不是整批失败：页面须分别显示成功、明确失败、远端结果不确定和尚未开始数量；已成功项仍可输出标准字段。
 - Apple generate/reserve 等写操作的远端结果不确定时禁止自动重放。先人工或只读对账，再决定后续操作。
 - HME API 响应 Cookie 轮换会在原 Session 仍是当前版本时安全保存；若人工登录或后台刷新已写入更新 Session，则丢弃旧客户端的轮换结果。
@@ -162,6 +163,8 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy
 ### 4.1 Alias 生命周期管理
 
 - 活动 Alias 可以签发/轮换访问密钥，也可以远端停用。新签发或轮换的密钥同时保存 SHA-256 哈希与 AES-GCM 密文，管理员可点击眼睛图标显式查看；管理页初始 HTML 只包含末 4 位提示。
+- 点击 Alias 邮箱文本会复制完整邮箱；Clipboard API 不可用时页面使用临时选区回退，不把邮箱写入浏览器存储。
+- 每条 Alias 可标记 GPT、Grok 或自定义用途。用途值最多 80 字符，空值表示未标记；Apple 对账、密钥轮换和状态变化不得清空该字段。用途目前只保存在当前管理平面的 SQLite 中，不进入 control→edge 协议。
 - 升级前已经存在的访问密钥只有不可逆哈希，页面显示“轮换后可查看”。系统不会自动轮换；管理员明确轮换后旧密钥立即失效。
 - Apple 列表确认 `isActive=false` 后，本地才标记失活并清除该 Alias 的密钥哈希、提示和密文。
 - 失活 Alias 可以恢复；Apple 列表确认 `isActive=true` 后，本地才恢复活动状态，恢复后仍需按需重新签发访问密钥。
@@ -295,7 +298,7 @@ docker compose ps browser
 
 ## 8. 更新与回滚
 
-更新前完成 SQLite 在线备份。升级到本版本时，先把新增的 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT` 从 `.env.example` 合并到服务器 `.env`，再按顺序构建，验证新镜像后只替换需要更新的服务：
+更新前完成 SQLite 在线备份。升级到本版本时，先把新增的 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT` 从 `.env.example` 合并到服务器 `.env`；批量上限应设为 `100`。本版本对 `aliases` 增加 `usage_label TEXT NOT NULL DEFAULT ''`，属于可向后忽略的加法迁移。再按顺序构建，验证新镜像后只替换需要更新的服务：
 
 ```bash
 git pull --ff-only origin main
@@ -457,4 +460,3 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 - 控制面共享 token 与本地密码：`/Users/ethan/Desktop/云贝/服务器相关/icloud-control-plane.env`（0600）。
 - 快捷入口：`/Users/ethan/Desktop/云贝/服务器相关/打开本地iCloud控制台.command`。
 - 已验证：本地 control → 云端 control API upsert/delete 成功；公开接码页仍在 `https://icloud.yunbay.xyz`。
-

@@ -180,7 +180,7 @@ export ICLOUD_GATEWAY_TRUSTED_HOSTS="localhost,127.0.0.1"
 export ICLOUD_GATEWAY_HOST="$APP_HOST"
 export ICLOUD_GATEWAY_PORT="$APP_PORT"
 export ICLOUD_GATEWAY_LOG_LEVEL=INFO
-export ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=50
+export ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=100
 # 无 Docker 不走远程 CDP；清空避免误连 docker 主机名
 export ICLOUD_GATEWAY_CDP_URL=""
 # 本机 Clash 回国代理（HME + 云端 edge 同步共用；本机直连 Cloudflare 常失败）

@@ -59,7 +59,7 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
         "ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS": "21600",
         "ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS": "3600",
         "ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS": "3600",
-        "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT": "50",
+        "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT": "100",
     }
 
     for name, default in expected.items():

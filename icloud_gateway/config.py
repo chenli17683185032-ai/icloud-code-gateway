@@ -73,7 +73,7 @@ class Settings:
     hme_maintenance_interval_seconds: int = 6 * 60 * 60
     hme_freshness_seconds: int = 60 * 60
     hme_retry_max_seconds: int = 60 * 60
-    alias_batch_limit: int = 50
+    alias_batch_limit: int = 100
     deployment_mode: Literal["full", "control", "edge"] = "full"
     control_plane_token: str = ""
     edge_base_url: str = ""
@@ -186,7 +186,7 @@ class Settings:
                 maximum=24 * 60 * 60,
             ),
             alias_batch_limit=_integer_environment(
-                "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT", 50, minimum=1, maximum=100
+                "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT", 100, minimum=1, maximum=100
             ),
             deployment_mode=mode,  # type: ignore[arg-type]
             control_plane_token=control_plane_token,

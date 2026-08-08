@@ -62,6 +62,34 @@ def test_job_creation_and_idempotency_conflict(database: Database) -> None:
         )
 
 
+def test_create_alias_job_accepts_one_hundred_serial_items(database: Database, tmp_path) -> None:
+    manager = BatchJobManager(_Gateway(database, tmp_path), throttle_seconds=0)
+
+    job, created = manager.create_alias_job(
+        count=100,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+
+    assert created is True
+    assert job["requested"] == 100
+    stored = database.get_batch_job(job["id"])
+    assert len(stored["items"]) == 100
+    assert stored["items"][0]["input"]["label"] == "Team 1"
+    assert stored["items"][-1]["input"]["label"] == "Team 100"
+    assert {item["status"] for item in stored["items"]} == {"queued"}
+    with pytest.raises(ValueError):
+        manager.create_alias_job(
+            count=101,
+            label_prefix="Team",
+            note="",
+            sender_filter="",
+            idempotency_key=None,
+        )
+
+
 def test_interrupted_running_item_requires_reconciliation_and_is_not_requeued(
     database: Database,
 ) -> None:

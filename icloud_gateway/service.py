@@ -1181,6 +1181,12 @@ class GatewayService:
         self.database.record_audit_event("alias_config", "updated", alias_id=str(alias_id))
         return alias
 
+    def update_alias_usage(self, alias_id: str, usage_label: str) -> dict[str, Any]:
+        alias = self.database.update_alias_usage(alias_id, usage_label)
+        outcome = "cleared" if not alias["usage_label"] else "updated"
+        self.database.record_audit_event("alias_usage", outcome, alias_id=str(alias_id))
+        return alias
+
     def deactivate_alias(self, alias_id: str) -> dict[str, Any]:
         self._ensure_hme_fresh()
         self._begin_remote_write()
