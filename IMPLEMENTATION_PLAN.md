@@ -2042,9 +2042,9 @@ cloud_key_still_active_after_backfill=True
 - [x] D：在服务器内部执行脱敏 IMAP 只读探针，确认 auth、目录、最近候选、精确收件、时间窗、sender filter 和提取器结果；校验 Seen 不变。
 - [x] E：用生产脱敏证据锁定 `临时代码` 中文语境缺失；等价 HTML 邮件回归在修复前稳定失败，最小词表修改后通过。
 - [x] F：最小修复、分平面测试替身修正和全量 217 项测试通过；Ruff 全仓检查与格式、compileall、启动脚本语法、两套 Compose 配置、diff 与新增秘密模式扫描均通过。
-- [ ] G：提交并推送功能提交到 GitHub `main`；服务器只同步该提交的 Git 跟踪文件，不覆盖 `.env`、数据卷或 profile。
-- [ ] H：建立受限回滚目录和旧镜像标签；隔离候选通过 SQLite/IMAP/页面契约后，由独立 60 秒 watchdog app-only 切换。
-- [ ] I：生产内外闭环、近期失败邮件只读复验、数据守恒和无关容器不变；失败自动回滚。
+- [x] G：生产真实构建输入确认精确对应 `5a5d49b` 后，从该基线建立最小热修复提交 `07a3534`；该提交已作为父提交合并进 GitHub `main`（合并提交 `d7c48c7`）。
+- [x] H：建立受限回滚目录、SQLite/源码/marker/旧镜像备份和唯一回滚标签；隔离候选证明旧镜像对事故邮件返回空、新镜像成功提取后，由独立 60 秒 watchdog app-only 切换。
+- [x] I：生产内外闭环、真实事故邮件只读复验、数据守恒和无关容器不变均通过；两次错误发布门禁均在 11–13 秒切换后自动回滚，修正门禁后最终切换 10 秒成功。
 - [ ] J：更新本计划、`OPERATIONS.md` 与云贝唯一连接手册，推送最终记录，清理候选资源和本地临时件。
 
 ### 26.6 停止与回滚条件
@@ -2065,6 +2065,9 @@ cloud_key_still_active_after_backfill=True
 - 2026-08-08：节点 E 完成。新增 HTML 等价样本“临时代码 + 独立六位数字”，旧实现稳定返回空；正则从 `临时码` 收敛为 `临时(?:码|代码)` 后，定向测试与 54 项 IMAP 测试通过。生产内存影子解析对原始事故邮件从 `old_extract=false` 变为 `candidate_extract=true`，且结果等于唯一六位候选、Seen 不变。
 - 2026-08-08：全量 216 项测试已通过。为恢复发布门禁，只修正既有 split-plane fake session 的 `.proxies` 与已采用的 `%40` URL 编码断言；未改变 edge 同步业务逻辑。Ruff 自动整理执行到一半时被既有 4 项需人工换行的问题停止，已产生的导入排序修改需在下一步复核后完成。
 - 2026-08-08：节点 F 完成。人工消除重复 `Response` 导入和三处超长行，格式器机械收敛一处既有配置换行；最终全量 217 项测试、Ruff 全仓检查与格式、compileall、`zsh -n`、base/server Compose dummy-env 配置解析、`git diff --check` 和新增秘密模式扫描全部通过。
+- 2026-08-08：节点 G 完成。逐文件 Git blob 指纹证明生产镜像的 47 个构建输入与 `5a5d49b` 完全一致；直接上线当时的 `main` 会夹带 7 个尚未部署的运行时文件。因此从真实生产基线建立只含 OTP 规则、回归测试和旧 URL 测试断言修正的 `07a3534`，其生产基线全量为 `213 passed`；再以无树差异 merge `d7c48c7` 把该生产谱系纳入 GitHub `main`。
+- 2026-08-08：节点 H/I 完成。候选在生产 SQLite 副本上固定得到 `historical-old=false / historical-candidate=true`，并以 `BODY.PEEK` 路径保持只读。第一次切换后因启动按既有策略清除 7 天前审计，而发布门禁错误要求审计总数不下降，13 秒 watchdog 成功后主动回滚；ID 级对账证明 6 天内审计零丢失。第二次切换后因脚本误把既有无效 Key 合同写成 HTTP 200，而真实合同为 HTTP 404 + `{"status":"invalid_key"}`，11 秒后再次自动回滚。两次均恢复旧镜像 `7613b76…`、旧 marker 和 healthy 公网，不等待人工介入。
+- 2026-08-08：修正为“固定 cutoff/max-id 的 6 天审计摘要守恒、允许 7 天外过期清理”及正确 404 合同后，第三次 app-only 切换在 10 秒内成功。最终镜像 `5defdf1…` 固定为 `latest/prod/release-07a3534`，唯一回滚标签指向旧镜像 `7613b76…`；marker、镜像 revision 和 `imap_otp.py` blob 均与 `07a3534` 一致。生产真实事故邮件复验成功，SQLite `quick_check=ok`，352/334/334 个 Alias/active/keyed、2 个 setting、22 个 job、156 个 item 守恒；browser、cn-proxy、Caddy ID 不变且四容器均 `healthy/restart=0/OOM=false`。成功审计目录为 `/opt/new-api/icloud-code-gateway/backups/otp-temporary-code-20260808T202633Z-07a3534`，最终清单 SHA-256 为 `74052850fc46352441d57d86e2db907c96b8c82e2710478268da40eef6686920`；候选和临时资源为 0。
 
 ---
 
@@ -2126,12 +2129,12 @@ Alias 邮箱按钮
 ### 27.4 当前边界与实现节点
 
 - [x] K：建立本节计划。当前代码硬上限已是 100，但本地启动器和默认配置为 50；并非只能生成 5 个。
-- [ ] L：增加旧库迁移、用途读写和验证的数据库/service/Web 失败测试。
-- [ ] M：实现 `usage_label` 加法迁移、管理员 CSRF API 和 dashboard 字段。
-- [ ] N：实现 GPT/Grok/其他/清除交互与点击邮箱复制，补 JS/模板/响应式测试。
-- [ ] O：把本地 batch 配置统一为 100，验证持久 job 可接受 100 项且仍串行、有界停机。
-- [ ] P：运行全量本地门禁，提交并推送独立功能提交。
-- [ ] Q：建立第二阶段回滚点与隔离候选，app-only 部署并验证 schema、页面、公开取码和无关容器不变。
+- [x] L：增加旧库迁移、用途读写和验证的 database/service/Web 失败测试，并先证明旧实现缺列、缺方法、缺 API、默认 50 的失败。
+- [x] M：实现 `usage_label` 加法迁移、规范化数据库写入、管理员 Cookie+CSRF API、审计事件和 dashboard 字段。
+- [x] N：实现 GPT/Grok/其他/清除交互、点击邮箱复制和 Clipboard 回退；完成真实页面刷新持久化与桌面/390px 响应式测试。
+- [x] O：把 Settings、Compose、`.env.example`、本地启动器和前端 fallback 统一为 100；持久 job 测试确认一次建模 100 个串行 queued item，101 被拒绝。
+- [ ] P：GitHub `main` 已包含功能提交 `e38c708`；生产基线适配分支固定从当前线上谱系 `07a3534` 建立，只收敛旧 `_require_admin_json` 签名与机械格式差异，并重新通过该基线全量门禁。
+- [ ] Q：通过当前 Clash `jp22` 节点建立严格主机校验 SSH；建立第二阶段回滚点与隔离候选，app-only 部署并验证 schema、页面、公开取码和无关容器不变。
 - [ ] R：更新 README、`OPERATIONS.md`、本计划和云贝唯一连接手册；推送最终记录并清理工作树。
 
 ### 27.5 停止与回滚条件
@@ -2141,3 +2144,11 @@ Alias 邮箱按钮
 - 用途迁移后 Alias/key/settings/audit/job 计数或 SQLite `quick_check` 异常时停止部署。
 - 第二阶段页面或 API 异常只恢复第 26 节 app 镜像；保留新加法列，不恢复 SQLite。
 - 不借本节顺手修改第 25 节已发现的 edge outbox/HME 隔离问题；这些保持独立后续闭环。
+
+### 27.6 当前实施记录
+
+- 2026-08-08：节点 L-O 完成。`aliases` 增加 `usage_label TEXT NOT NULL DEFAULT ''`，旧库初始化幂等加列；`gpt`/`grok` 规范化为固定小写，自定义值保留首尾清理后的原文并拒绝换行、NUL 和超过 80 字符。Apple 对账、key 轮换及 inactive/active 状态切换的回归测试均证明用途不丢失。
+- 2026-08-08：新增 `POST /admin/api/aliases/{id}/usage`，要求管理员会话和 CSRF；缺 CSRF 为 403、未登录为 401、无效值为 422、未知 Alias 为 404。自定义 HTML 字符串在模板中转义，前端只用 `textContent` 更新。
+- 2026-08-08：管理页每条 Alias 显示 GPT/Grok/其他/清除按钮，选中项有显式勾选；其他用途展开 80 字符输入。点击邮箱直接复制并显示“已复制”，Clipboard API 失败时使用临时 textarea 选区回退，不写浏览器存储。
+- 2026-08-08：本机 control 已重启为新代码，PID `55651` 仅监听 `127.0.0.1:18081`；SQLite `quick_check=ok`，369 个 Alias，`usage_label` 列存在，页面导出批量上限 100。真实浏览器在第一条 Alias 上完成复制、GPT、自定义、刷新持久化并恢复原空值；1440px 与 390px 的 `scrollWidth == innerWidth`，移动端自定义表单与操作按钮均可达，未调用 Apple 创建或生命周期写。
+- 2026-08-08：用户将本机 Clash 出口切换为 `jp22`；`127.0.0.1:7897 -> 13.140.180.223:2222` 已在严格 known_hosts、固定私钥和 `BatchMode` 下只读连通，远端主机为既有生产机。服务器地址、SSH 用户和端口未变。
