@@ -865,7 +865,6 @@ class GatewayService:
             raise GatewayNotConfiguredError("IMAP is not configured")
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
-
     def _require_hme_management(self) -> None:
         if not self.settings.manages_hme:
             raise GatewayNotAllowedError("HME management is disabled in edge mode")

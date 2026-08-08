@@ -6,8 +6,8 @@ import hmac
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import unquote
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -187,7 +187,6 @@ class ControlKeyRequest(BaseModel):
 
 class ControlStateRequest(BaseModel):
     state: Literal["active", "inactive"]
-
 
 
 def _capture_view(status: dict[str, Any]) -> dict[str, Any]:
@@ -652,7 +651,7 @@ def create_app(
         request: Request,
         payload: AliasUsageRequest,
     ):
-        _require_admin_json(request, session_codec, settings=settings)
+        _require_admin_json(request, session_codec)
         try:
             alias = await asyncio.to_thread(
                 gateway.update_alias_usage,
@@ -799,7 +798,6 @@ def create_app(
         except (ValueError, NotFoundError, DatabaseError):
             return _redirect_notice("alias_error")
         return _redirect_notice("alias_saved")
-
 
     @app.post("/control/v1/aliases")
     async def control_upsert_alias(request: Request, payload: ControlAliasRequest):
