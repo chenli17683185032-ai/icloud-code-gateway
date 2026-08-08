@@ -119,6 +119,34 @@ health_ok() {
   curl -fsS --noproxy '*' "http://${APP_HOST}:${APP_PORT}/healthz" >/dev/null 2>&1
 }
 
+stop_control_process() {
+  local pid="$1"
+
+  if ! is_running "$pid"; then
+    return 0
+  fi
+
+  kill "$pid" 2>/dev/null || true
+  for _ in {1..20}; do
+    if ! is_running "$pid"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "旧进程未在 5 秒内退出，强制停止 (pid=${pid})..."
+  kill -KILL "$pid" 2>/dev/null || true
+  for _ in {1..8}; do
+    if ! is_running "$pid"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "错误：旧 control 进程仍未退出 (pid=${pid})。"
+  return 1
+}
+
 ensure_venv
 ensure_playwright
 
@@ -171,8 +199,9 @@ if [[ -f "$PID_FILE" ]]; then
       exit 0
     fi
     echo "旧进程无响应，正在重启 (pid=${OLD_PID})..."
-    kill "$OLD_PID" 2>/dev/null || true
-    sleep 1
+    if ! stop_control_process "$OLD_PID"; then
+      exit 1
+    fi
   fi
   rm -f "$PID_FILE"
 fi
@@ -258,6 +287,11 @@ if (( ok == 0 )); then
   if [[ -f "$PID_FILE" ]]; then
     tail -n 80 "$LOG_FILE" || true
   fi
+  if [[ -n "${NEW_PID:-}" ]] && is_running "$NEW_PID"; then
+    echo "清理未就绪的 control 进程 (pid=${NEW_PID})..."
+    stop_control_process "$NEW_PID" || true
+  fi
+  rm -f "$PID_FILE"
   exit 1
 fi
 

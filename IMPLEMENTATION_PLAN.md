@@ -1589,3 +1589,555 @@ P2，当前禁止部署到生产：
   未修改。新镜像为 `sha256:2fbc3239f6a803f8dd1e0774400899e40a09eab9d4f3d1718702f398975fb874`，
   审计目录 `/opt/new-api/icloud-code-gateway/backups/ui-copy-export-20260801T174254Z-49b2d9b`，清单
   SHA-256 为 `2d228e321756d9a1885e54ca7780e205dbb662f72c4dd0bbdb6737b3f4c89e6b`。
+
+---
+
+## 24. 本地 iCloud 控制台无法打开：2026-08-08 排查与修复闭环
+
+### 24.1 目标、稳定性边界与验收
+
+**目标**：从桌面入口 `启动本地iCloud控制台.command` 启动后，在不访问 Apple/HME 写接口、不改动云端 edge 与不暴露任何凭据的前提下，使本机管理页 `http://127.0.0.1:18081/admin` 可稳定打开。
+
+**最小验收闭环**：
+
+```text
+双击桌面启动器
+  -> 两层 zsh 转发均解析到项目启动脚本
+  -> 守护 Python 进程写入受限 PID/日志
+  -> /healthz 在 20 秒内返回 HTTP 200
+  -> 18081 仅监听 127.0.0.1
+  -> 浏览器可打开 /admin，且关闭启动终端后服务仍可用
+```
+
+稳定性优先级：不杀死未确认归属的进程；不打印 `.env`、控制面 token 或主密钥；不执行真实 Apple、HME、IMAP 写操作；若现有进程健康则复用，不做重启。
+
+### 24.2 现有证据与最小充分模型
+
+| 控制元素 | 本次对象 |
+| --- | --- |
+| 被控对象 | 本机 FastAPI control 进程、端口 `127.0.0.1:18081`、持久 PID/日志文件 |
+| 控制器 | 两层 `.command` 启动器和 `scripts/run-local-control.sh` |
+| 测量 | 脚本退出码、`~/.icloud-code-gateway/logs/control.log`、PID 存活性、端口监听、`/healthz` HTTP 响应 |
+| 执行器 | 受控启动/停止、虚拟环境与 Playwright 依赖检查、浏览器 `open` 调用 |
+| 扰动 | 缺失配置、损坏 venv、Chromium 缺失、旧 PID、端口冲突、进程启动后异常退出、macOS `open` 失败 |
+| 反馈策略 | 每次只验证一个故障分支；先收集日志和健康状态，再做最小、可逆改动 |
+
+已确认：
+
+- 桌面入口 `/Users/ethan/Desktop/鲨鱼工具库/启动本地iCloud控制台.command` 可执行，并转发到 `icloud 工具/启动本地iCloud控制台.command`。
+- 第二层启动器可执行，固定调用 `/Users/ethan/Documents/plus 项目/scripts/run-local-control.sh`；该脚本当前存在且可执行。
+- 项目本地 Git `HEAD` 为 `8cefa8e`（2026-08-04）；配置的 GitHub `origin` 为 `chenli17683185032-ai/icloud-code-gateway`。2026-08-08 的 `git ls-remote origin main` 未能访问远端，此项仅记录为交付同步阻塞，不作为本地启动故障的推断依据。
+
+### 24.3 实施节点
+
+- [x] A：只读确认桌面转发链、目标脚本、项目路径、现有计划和 GitHub 参考状态；不读取或输出秘密值。
+- [x] B：在交互终端复现一次启动；记录退出码、PID、端口、`/healthz` 和日志尾部，定位到单一失败分支。
+- [x] C：针对已证实分支执行最小修复或恢复操作；若需改代码，先保留原行为、补充明确错误信息和有限等待。
+- [x] D：从干净状态验证“启动 → 健康 → 浏览器 URL → 终端退出后仍可访问”的闭环；确认监听不外泄。
+- [ ] E：运行受影响的自动化/语法检查，更新本节的实际结果；若产生代码改动则创建最小提交、尝试同步 `main`，并如实记录远端不可达情况。
+
+### 24.4 回滚与停止条件
+
+- 如果 `18081` 已被未知进程占用，只报告 PID/命令，不自动终止。
+- 如果现有 control 进程健康，只验证网页，不重启。
+- 如果问题需要新增依赖、系统权限、重装浏览器或修改凭据，先以可诊断错误停止，不猜测或覆盖用户设置。
+- 所有临时诊断文件仅置于项目现有运行目录或 `/tmp`，验证后清理；不提交日志、数据库、profile 或环境文件。
+
+### 24.5 实施记录
+
+- 2026-08-08：节点 A 完成。下一步以一次交互式启动和健康检查作为唯一输入，避免根据脚本静态阅读猜测失败原因。
+- 2026-08-08：节点 B 完成。PID 文件中的 `1724` 仍存活但 `18081` 无监听、`/healthz` 为连接失败；其日志尾部已显示旧 Uvicorn 正常关闭。首次恢复仅发送 SIGTERM 并等待 1 秒，残留进程未完全退出，随后新进程在同一 SQLite 运行目录中无法在 20 秒内就绪，形成“进程存在但网页打不开”的循环。
+- 2026-08-08：节点 C 完成。`scripts/run-local-control.sh` 对失活 control PID 改为最多等待 5 秒、仍存活才强制停止，并在新进程未就绪时清理该进程和 PID 文件，避免继续遗留无监听进程。桌面第二层启动器还修复了 zsh 保留只读变量 `status`：原先即使服务已启动也会以 `read-only variable: status` 失败结束，现改用 `exit_status`。该桌面启动器位于项目 Git 工作树外，已在原路径直接修复。
+- 2026-08-08：节点 D 完成。已仅停止精确匹配本项目模块的失活 PID 后重新启动；新 PID `2496` 监听 `127.0.0.1:18081`，`/healthz` 返回 `{"status":"ok"}`、HTTP 200。随后以输入一个换行的方式完整执行桌面两层入口，输出“本地 control 已在运行”和“服务会继续在后台运行”，健康检查仍为 200。
+- 2026-08-08：节点 E 的运行时门禁已通过：三个 zsh 文件均通过 `zsh -n`，完整桌面入口与本机 HTTP 健康检查通过。Git 提交未强行执行：该工作树已存在 2026-08-03 的 `.git/REBASE_HEAD`，且 `git diff --no-ext-diff --check` 在 8 秒内无输出超时（无 `index.lock`）；为避免破坏用户既有 rebase 状态，本轮不 reset/continue/rebase、不提交、不推送。后续需先单独恢复 Git 工作树后再同步本次两个项目内文件。
+
+---
+
+## 25. 云上 / 云下项目全景摸底计划（2026-08-08）
+
+### 25.1 目标与可验证交付
+
+本轮只做只读摸底和架构复核，不修改业务逻辑、不调用 Apple/HME 写接口、不改变本地或生产运行状态。目标不是按目录复述代码，而是建立一份能够解释系统实际行为的最小充分模型：
+
+1. 明确 `control`（云下）、`edge`（云上）与兼容 `full` 三种模式各自拥有的职责、入口、状态和秘密。
+2. 追踪三条完整闭环：
+   - 本地创建/导入 Alias → 签发或轮换 key → 同步云端；
+   - 公网输入 key → 云端定位 Alias → IMAP 读取验证码；
+   - 本地 Session 失效或云端同步失败 → 可观测错误 → 有界恢复。
+3. 区分“设计文档声称的边界”和“代码、测试、Compose、运行实例实际执行的边界”。
+4. 输出当前版本、部署拓扑、配置矩阵、数据库归属、接口权限、故障模式、已知风险和后续修改入口。
+
+验收指标：
+
+- 每个 HTTP 路由都能归属到 `control / edge / full / shared` 中的一类，并指出认证方式。
+- 每个关键状态都能说明事实来源：本地 SQLite、云端 SQLite、Apple HME、IMAP、持久 Chromium 或环境配置。
+- 每个跨平面动作都能说明请求方向、鉴权、幂等/重试语义、超时、失败后的状态。
+- 至少用现有测试或安全的只读探针验证上述三条闭环中的关键控制点。
+- 生产只读核查不得输出 `.env`、token、主密钥、Cookie、邮箱授权码、完整 Alias、验证码或私钥内容。
+- 最终给出一张系统图、一张云上/云下职责表、一份关键风险与建议清单；所有结论附本地文件、测试或脱敏运行证据。
+
+### 25.2 工程控制抽象
+
+| 控制元素 | 本轮摸底对象 |
+| --- | --- |
+| 目标 | 让云下管理能力与云上验证码数据面在可解释、可恢复、失败关闭的边界内协同 |
+| 被控对象 | Apple HME Alias 集、本地 control SQLite/Chromium、云端 edge SQLite/IMAP、公网 API |
+| 控制器 | deployment mode 门控、管理员服务、edge sync 客户端、control API、访问 key 映射、任务状态机 |
+| 测量 | 配置展开、路由表、数据库 schema、审计事件、测试、健康端点、容器 revision/restart、脱敏计数 |
+| 执行器 | HME list/generate/reserve、Alias/key 同步、IMAP scan、容器启动与 app-only 部署 |
+| 环境与扰动 | Apple Session 过期、家庭网络变化、云端不可达、token 不一致、代理故障、IMAP 延迟、部分同步、进程残留 |
+| 稳定性策略 | 先恢复测量再写入；写操作不盲重放；跨平面请求有界；状态不确定保持可见；云下故障不拖垮公网取码 |
+
+最小充分闭环：
+
+```text
+云下 control 取得一份经 HME list 验证的 Session
+  -> 创建或对账一个 Alias
+  -> 本地签发 key
+  -> 通过受 token 保护的 control API 同步云上 edge
+  -> 云上持久化 Alias/key 映射
+  -> 公网以 key 查询
+  -> 云上只读 IMAP 并返回该 Alias 时间窗内验证码
+  -> 本地轮换/撤销 key
+  -> 云上旧 key 立即失效
+```
+
+### 25.3 GitHub 经验检索范围
+
+正式代码分析前复核以下公开项目/模式，吸收其已验证经验但不照搬实现：
+
+- iCloud Hide My Email 管理器：会话寿命、Alias list 事实来源、写后对账与 Cookie 高权限边界。
+- 控制平面 / 数据平面拆分项目：单向配置下发、共享 token、幂等 upsert/delete、控制面离线时数据面继续服务。
+- SQLite 持久任务与 outbox/sync 模式：跨进程领取、失败可见、重试上界和“本地成功但远端未知”的处理。
+- FastAPI 路由/生命周期按部署模式裁剪：确认未启用能力是不可达，而不只是前端隐藏。
+
+采用标准：只保留能够由本项目代码或测试验证、且直接降低错误同步、状态漂移或恢复不确定性的经验。
+
+### 25.4 实施节点
+
+- [x] 节点 A：确认仓库、当前提交、工作树、已有计划、README 与两套 Compose；识别现有未提交修改并保持不覆盖。
+- [x] 节点 B：检索 GitHub 同类经验，记录与本项目云上/云下拆分直接相关的采用或拒绝结论。
+- [x] 节点 C：建立静态系统清单：入口点、模块依赖、路由、deployment mode 门控、后台任务、配置项和数据表。
+- [x] 节点 D：逐行追踪云下 control：本机启动链、浏览器/HME Session、Alias 生命周期、key 生命周期、edge sync 和失败恢复。
+- [x] 节点 E：逐行追踪云上 edge：Compose/Caddy/代理、control API、公开查询、IMAP、限流、审计、健康检查和部署边界。
+- [x] 节点 F：建立跨平面协议矩阵：请求/响应、鉴权、状态变化、幂等性、超时、重试、错误分类和敏感数据暴露面。
+- [x] 节点 G：运行定向测试与只读运行探针；本机与公网证据已取得，生产 SSH 因当前 Clash 出口不在服务器白名单而在 banner 前超时，服务器未执行任何命令，当前生产 revision/SQLite 精确计数保留为未独立复核项。
+- [x] 节点 H：对比“文档设计、代码实现、测试保证、实际运行”四层，列出一致项、漂移、P0/P1/P2 风险和最小后续动作。
+- [x] 节点 I：把最终证据和结论回写本节，交付系统图、职责表、关键流程、故障恢复图和代码导航。
+
+### 25.5 重点核查问题
+
+1. `edge` 模式是否真的无法触达 HME/浏览器管理写路径，`control` 模式是否真的不承担公网验证码读取。
+2. 本地 key 签发成功而云端同步失败时，本地 UI、审计和重试状态是否足够明确；重启后是否会丢失待同步意图。
+3. 云端通过邮箱定位记录的 control API 是否可能因大小写、重复邮箱、删除/重建或并发轮换产生漂移。
+4. control-plane token 的比较、日志脱敏、代理继承与超时是否形成完整边界。
+5. 本地和云端是否意外共享同一 master key、管理员密码、Apple Session、浏览器 profile 或不必要的数据。
+6. `full` 兼容模式是否与 split-plane 逻辑分叉，导致测试只覆盖其中一套行为。
+7. 云端 edge 在本地离线、Apple Session 过期或家庭机器关闭时，已同步 key 的公网取码是否仍独立可用。
+8. 云端 IMAP 凭据、Alias/key 映射、审计记录和本地 Apple Session 的备份/恢复责任是否清晰。
+9. 本机脚本、服务器 Compose 与 README/OPERATIONS 的默认值是否一致，是否存在“文档可启动、实际缺变量”的配置漂移。
+10. 当前 Git rebase/未提交修改是否影响版本判断和后续安全合并；本轮只记录，不擅自处理。
+
+### 25.6 停止条件与安全边界
+
+- 发现真实凭据时只记录“存在、来源、权限/是否配置”，不输出值或写入计划。
+- 生产核查只执行只读命令和无副作用 HTTP GET；不 reload、不 restart、不 build、不部署、不修改数据库。
+- 不以真实创建、轮换、撤销、删除、验证码发送或 Apple 写请求作为摸底探针。
+- 若 SSH 主机指纹、目标服务器或项目目录与唯一连接手册不一致，停止远程核查并报告，不猜测连接。
+- 若现有本地进程健康，不重启；若不健康，本轮只记录状态，不继续修复，除非用户另行要求。
+- 保留 `IMPLEMENTATION_PLAN.md` 和 `scripts/run-local-control.sh` 的既有未提交修改；本轮不会提交、推送或清理用户工作树。
+
+### 25.7 当前记录
+
+- 2026-08-08：节点 A 完成。仓库为 `icloud-code-gateway`，本地 `main` 与记录到的 `origin/main` 均指向 `8cefa8e`；工作树已有 `IMPLEMENTATION_PLAN.md` 与 `scripts/run-local-control.sh` 两处未提交修改。本轮将在同一计划文件继续维护，不覆盖或回滚既有修改。
+- 2026-08-08：README 与 Compose 已明确存在 `control / edge / full` 三种模式：本地 control 使用无 Docker Python + 本机持久 Chromium，云端 edge 默认由 server Compose 运行，公开用户继续访问 `icloud.yunbay.xyz`。以上只是初始文档证据，尚待代码、测试与运行状态交叉验证。
+
+### 25.8 GitHub 对照结论
+
+- [Yimikami/icloud-hme-manager](https://github.com/Yimikami/icloud-hme-manager) 与其他 HME 管理器均把 Apple Cookie / Session 视为可执行 Alias 写操作的高权限秘密，并以实际 HME 请求验证会话。本项目“浏览器长期登录态 + API Session 验证后保存”的方向正确，但 cloud edge 仍保留 browser/HME 执行条件，与“Apple 秘密只在云下”的目标不一致。
+- [tomorrow-one/transactional-outbox](https://github.com/tomorrow-one/transactional-outbox) 把本地业务提交与远端发布拆成同一事务内的持久 outbox，再以至少一次发送和接收端幂等完成恢复。本项目当前是本地提交后同步 HTTP 双写，失败只写审计，没有待同步实体；撤销、停用和删除因此无法可靠补偿。
+- [litements/litequeue](https://github.com/litements/litequeue) 证明 SQLite 可承担小规模持久队列与原子领取。本项目已经在 Apple `batch_jobs` 上实现单 owner、重启恢复和 `needs_reconcile`，说明不需要引入大型消息系统；最小方案是把同样思想扩展到 edge outbox/tombstone。
+- 拒绝采用“每次操作后 best-effort 调一个远端 API、失败后靠人工全量补推”的方案。它只能补正向 active+keyed 状态，不能表达撤销、失活、删除和因果顺序。
+
+### 25.9 实际系统模型
+
+```text
+云下（本机）
+  桌面启动器 / scripts/run-local-control.sh
+    -> FastAPI control（127.0.0.1:18081，ADMIN_OPEN）
+       -> 本机 SQLite
+          - 加密 HME Session
+          - Apple remote metadata
+          - Alias 本地配置
+          - access key hash + 可恢复密文
+          - Apple 批任务 / 审计
+       -> 本机持久 Chromium profile
+       -> Apple HME API（显式 SOCKS 代理）
+       -> EdgeSyncClient（共享 bearer token，HTTPS）
+
+云上
+  Cloudflare
+    -> 共享 Caddy
+       -> FastAPI edge
+          -> 云端 SQLite
+             - Alias / access key 映射
+             - 加密 IMAP 配置
+             - 查询审计
+             - 同一套 HME / job schema 与可能的历史数据
+          -> IMAP TLS（公开取码）
+       -> 管理员认证后的 noVNC
+          -> 云端 browser profile
+  独立 cn-proxy 与 browser 仍由 Compose 启动
+```
+
+核心判断：当前不是两个独立程序，而是同一套 FastAPI、service 和 SQLite schema 通过 `deployment_mode` 做运行时分流。公开 OTP 数据面已经可以脱离本机持续工作；Apple 管理能力、秘密和任务模型尚未从 edge 物理移除。
+
+### 25.10 能力矩阵
+
+| 能力 | `control` | `edge` | `full` | 实际边界 |
+| --- | --- | --- | --- | --- |
+| 公开页与 `/api/code` | 禁用 | 启用 | 启用 | 路由和 service 双重限制，成立 |
+| HME maintenance | 启用 | 不启动 | 启用 | 后台线程门控成立 |
+| HME import/capture/sync/create | 启用 | handler 大多拒绝 | 启用 | UI 仍显示大部分控件 |
+| HME deactivate/reactivate/delete | 启用 | **仍可执行** | 启用 | Web 和 service 均缺 mode guard |
+| Batch worker | 启用 | **启用** | 启用 | 所有模式 lifespan 无条件启动 |
+| 管理端签发/撤销 key | 启用 | service 拒绝 | 启用 | 单项门控成立 |
+| reveal key / 编辑 Alias | 启用 | 启用 | 启用 | edge 管理员可取得完整 key |
+| 接收 `/control/v1/*` | 启用 | 启用 | token 存在时启用 | 路由未限定 edge-only |
+| 向 edge 推送 | 启用 | 禁用 | 默认禁用 | 仅 control 自动创建客户端 |
+| IMAP 保存与取码 | 可保存；取码禁用 | 启用 | 启用 | control UI 仍显示 IMAP/验证码栏目 |
+
+关键代码：
+
+- mode 定义：`icloud_gateway/config.py:203-217`
+- app lifespan / worker：`icloud_gateway/web.py:325-339`
+- 公开取码门控：`icloud_gateway/web.py:385-432`
+- control API：`icloud_gateway/web.py:931-1022`
+- 未被调用的 HME guard：`icloud_gateway/service.py:950-956`
+- edge 可达生命周期写：`icloud_gateway/web.py:857-910`、`icloud_gateway/service.py:1187-1278`
+
+### 25.11 三条关键闭环的实际行为
+
+#### A. 创建 Alias → key → edge
+
+```text
+POST /admin/api/aliases
+  -> 持久 batch job
+  -> Apple generate / reserve
+  -> 本地 upsert Alias
+  -> 本地 issue key
+  -> job = completed
+  -X-> 没有 edge 请求
+```
+
+Web 使用 `jobs.py:327-400`，没有调用 `_push_alias_to_edge`。临时探针得到：
+
+```text
+create_job_status=completed
+create_job_keyed_aliases=1
+create_job_edge_calls=0
+```
+
+因此 README 与启动器中的“创建后自动同步云端”不成立；当前必须另点“一键同步”。
+
+#### B. 签发 / 撤销 / 停用 / 删除
+
+| 操作 | 当前顺序 | edge 失败后的稳定状态 |
+| --- | --- | --- |
+| 签发/轮换 | 本地新 key 提交 → edge | 本地新 key、edge 旧 key；可人工正向补推 |
+| 撤销 | 本地清 key → edge | edge 旧 key 仍可能有效；一键同步会跳过 |
+| 停用 | Apple 确认 → 本地 inactive/清 key → edge | edge 仍可能 active 且旧 key 有效 |
+| 恢复 | Apple 确认 → 本地 active → edge | edge 可能仍 inactive |
+| 删除 | Apple 确认 → 本地删除 → edge | edge 留下孤儿 Alias/key；本地已无重试实体 |
+
+临时双库故障注入已经证明：
+
+```text
+revoke_after_edge_failure_local_key_active=False
+revoke_after_edge_failure_cloud_key_active=True
+backfill_after_failed_revoke={'succeeded': 0, 'failed': 0, 'skipped': 1, 'total': 1}
+backfill_edge_calls=0
+cloud_key_still_active_after_backfill=True
+```
+
+#### C. Apple list / Session 对账
+
+`save_hme_session()` 和 `sync_aliases()` 以 Apple list 为事实源，在本地把失活或缺失 Alias 置 inactive 并清 key；该对账不会生成 edge state/revoke/delete 请求。Apple 外部变更、重新登录后的全量同步或远端删除均可能只在本地收敛，云端旧 key 保持有效。
+
+### 25.12 跨平面协议与数据风险
+
+- 没有 edge outbox、tombstone、revision、sync epoch、attempt、next retry 或最后远端确认字段；数据库 schema 仍只有 settings/aliases/audit/jobs。
+- control API 以规范化 email 为跨端主键；本地 UUID 只随请求发送，不在 edge 持久化。重复正向 upsert 基本幂等，但乱序旧请求可覆盖新状态。
+- 单项 key 接口在 edge 先以 `label=email, note="", sender_filter=""` upsert，再导入 key。实测轮换后自定义 label、note 与 sender filter 全部被清空，扩大 OTP 来源匹配范围。
+- 对未知 email 调用 key revoke 会先 upsert 一个 active Alias，再清 key，形成 ghost 记录。
+- Alias 配置编辑只改本地；只有后续 active+keyed 全量补推才会把 sender filter 带到 edge。
+- 一键同步逐 Alias 串行，每项默认 20 秒、最高 120 秒，无总 deadline、进度持久化或取消。按约 200 项估算，故障时默认最坏超过一小时。
+- `/control/v1/*` 由公网 Caddy 全量反代，仅共享 bearer token；无 edge-only mode、IP allowlist、mTLS、请求签名、时间戳或速率限制。
+- edge URL 允许 `http://`；误配会明文发送 token、Alias 和完整 access key。
+- email 放在 control API URL path，可能进入 Caddy/Uvicorn access log。
+- `ADMIN_OPEN=1` 只靠运维约定限制为本机 control，Settings 没有禁止它出现在公网 edge/full。
+
+### 25.13 云上能力并未物理移除
+
+- server Compose 虽默认 `edge`，仍启动 `cn-proxy -> browser -> app`；app 保留 `CDP=http://browser:9222`，冷启动依赖 browser 和 cn-proxy。
+- edge 与 full 使用同一 `gateway-data` schema；切 mode 没有删除旧 `hme_session`、Apple `remote_blob`、batch jobs 或 browser profile 的迁移。
+- control 注册时 `remote_metadata=None` 使用 `COALESCE`，不会清掉旧 Apple remote metadata。
+- 管理模板除“一键同步”外基本没有 mode 裁剪；edge 页面仍展示 HME、创建和生命周期控件。
+- 临时 edge-mode + fake HME 探针通过真实 service 路径成功执行一次 deactivate，证明 mode 本身不能阻止 Apple 写。
+- 运维记录显示 2026-08-03 从原 full 数据卷切 edge 时保留已有 201 个 keyed Alias，并继续保留 browser/cn-proxy。结合代码可推断高概率仍有历史 HME/remote/profile 数据；因本轮 SSH 未建立，当前生产精确内容未读取，不能把这一推断冒充实时数据库事实。
+
+### 25.14 当前运行证据
+
+#### 本机 control
+
+- `127.0.0.1:18081` 正在监听，`/healthz` HTTP 200；管理页显示 HME Session“连接正常”、IMAP“未配置”、Capture“待机”。
+- 本机 SQLite：`quick_check=ok`、schema v1、351 个 Alias、333 个 active、126 个 keyed、1 个 setting（仅 `hme_session`）、1212 条 audit。
+- batch jobs：22 个 completed、12 个 `needs_reconcile`；12 个 unknown item，另有 48 个尚未开始的 queued item。
+- edge sync 审计：20 次 `backfill_done`、915 次 `upsert`；最近一次为 `2026-08-07T16:50:10.172Z`。没有持久的 revoke/delete tombstone。
+- 本地主密钥与项目 `.env` 中的主密钥当前相同；control token 按设计相同。两端共享 master key 并非协议所需，扩大任一主机失陷后的解密半径。
+
+#### 公网 edge
+
+- 2026-08-08 公网 `/healthz`、`/`、`/admin/login` 均为 HTTP 200，Cloudflare 动态回源；管理员页面 `Cache-Control: no-store`。
+- 本轮 SSH 在 banner 前因当前 Clash 出口未进入服务器白名单而超时，服务器没有执行任何命令，也未切换用户代理。因此生产 revision、容器 restart/OOM、当前 mode 与 SQLite 计数没有独立复核。
+- 最后可用的仓库运维记录为：2026-08-03 edge 已切换并保留 201 个 keyed Alias。由于本机当前只有 126 个 keyed，必须通过生产只读 inventory 核对是否存在旧 key；仅凭本机 backfill 机制无法证明云端已删除多余 key。
+
+#### Git / 工作树
+
+- `HEAD == origin/main == 8cefa8e4970edc9fbfec541233091b6d234d221b`。
+- 既有未提交修改：`IMPLEMENTATION_PLAN.md` 与 `scripts/run-local-control.sh`；本轮未覆盖、回滚、提交或推送。
+- `.git/REBASE_HEAD` 指向旧提交但没有活动 `rebase-merge` / `rebase-apply` 状态，是遗留引用；不要在未确认前清理。
+- `git diff --check` 通过。
+
+### 25.15 测试与静态门禁
+
+- 共收集 216 项测试；214 项通过，2 项失败。
+- 两项失败均来自 `tests/test_split_plane.py` 的 fake session 没有 `.proxies`，被 `EdgeSyncClient` 新代理逻辑提前打断；当前最关键的 split-plane 协议断言没有实际执行。
+- Ruff 当前有 6 个问题：2 个 import 排序、1 个 `Response` 重复导入、3 个超长行；这些均属于现有 `main`，本轮未修。
+- `zsh -n scripts/run-local-control.sh`、Python `compileall` 与 `git diff --check` 通过。
+- 现有 split-plane 测试没有覆盖：edge HME 写阻断、Web create 自动同步、撤销/停用/删除失败后的旧 key、Session 对账传播、metadata 保持、重启恢复、乱序版本控制和 edge Compose 去 browser 化。
+
+### 25.16 风险分级
+
+#### P0：先稳定再扩展
+
+1. edge mode 仍能执行 Apple deactivate/reactivate/delete；云上不是强制只读数据面。
+2. revoke/deactivate/delete 或 Apple list 对账只要 edge 同步失败，云端旧 key 可继续有效，现有一键同步不能修复。
+3. 当前云端 key inventory 未独立核对；最后记录为 201 keyed、本机当前为 126 keyed，存在遗留有效 key 的高风险，必须先做只读差集。
+
+#### P1：下一轮最小综合
+
+1. Web 创建任务完成但没有 edge 调用，文档和 UI 成功语义错误。
+2. 单 key 签发/轮换会清空 edge sender filter、label 和 note。
+3. cloud 仍保留 browser/cn-proxy/CDP、统一 schema、可能的 HME Session/remote metadata；两端当前还共用 master key。
+4. 没有持久 edge outbox/tombstone、版本/CAS 和全量 inventory/reconcile；同步失败或乱序不可收敛。
+5. edge 全量补推无总上界；删除同步失败还可能因已删除 Alias 的审计外键掩盖原始错误。
+6. Session list Cookie 轮换多数路径不持久化；generation fence 丢弃保存时 Capture 仍可能显示成功。
+7. 本机 `ADMIN_OPEN` 完全跳过密码与 CSRF，虽绑定 loopback，仍应限制可触发动作并防浏览器跨站表单。
+
+#### P2：可在主闭环后处理
+
+- edge/control 管理模板按 mode 裁剪，清理 noVNC 与本地无 Docker 文档漂移。
+- `/healthz` 增加分层 readiness，而非只证明 SQLite 可读。
+- 修复 split fake、Ruff 基线和缺失测试矩阵。
+- 避免 control URL 记录完整邮箱，修复 unknown revoke 创建 ghost Alias。
+- 启动器校验 PID 身份、对齐 10 秒应用关闭预算、避免无条件删除 browser profile 锁。
+
+### 25.17 后续最小闭环建议
+
+在继续增加 Alias 数量或功能之前，只实现并证明一条可重复的跨平面闭环：
+
+```text
+本地事务：
+  更新期望 Alias/key 状态
+  + 写入带 revision 的 edge_outbox（同一 SQLite 事务）
+    -> worker 有界重试
+    -> edge 以 email + revision 幂等/CAS 应用
+    -> 保存确认 revision
+
+全量对账：
+  control 读取“期望集合”
+  <-> edge 返回脱敏 inventory（email digest/state/key digest/revision）
+  -> upsert / revoke / inactive / delete tombstone 全部可表达
+  -> 差集为 0 才显示“已同步”
+```
+
+第一阶段同时做两个稳定性门禁：
+
+1. edge 在 Web、service、worker 和 Compose 四层禁止 HME 管理，移除云端 browser/CDP/HME Session 与 remote metadata。
+2. 先对生产做一次只读 key inventory 差集；确认并处理孤儿 key 后，才能宣称“轮换后旧 key 立即失效”在 split-plane 中成立。
+
+本轮只完成摸底与证据固化，没有修改业务代码、没有调用 Apple/HME/IMAP 业务接口、没有部署或推送。
+
+---
+
+## 26. 线上邮件验证码无法领取事故闭环（2026-08-08）
+
+### 26.1 目标与验收指标
+
+用户反馈公网存在“收不到邮件验证码”。本轮目标是先区分入口、key 映射、IMAP、时间窗、收件人匹配、发件人过滤和验证码提取中的真实故障点；只有在代码缺陷被稳定复现后才修改和部署。
+
+验收指标：
+
+- 公网、源站、app、SQLite、IMAP 和最近查询审计形成同一条可复核时间线。
+- 对最近失败请求按 `invalid_key / no_code / imap_invalid / imap_error / busy / rate_limited` 分类，不读取或输出 access key、验证码、邮件正文、完整 Alias 或原始 IP。
+- IMAP 只读探针使用 `readonly SELECT` 与 `BODY.PEEK[]`，验证主目录/垃圾目录、最近时间窗、精确收件人、sender filter 和提取器；探针前后不增加 Seen。
+- 若是代码问题，增加一个修复前稳定失败、修复后稳定通过的回归测试，并证明旧行为与其他验证码格式不回退。
+- 部署前建立 SQLite、源码、marker、旧镜像和容器状态回滚点；构建期间旧 app 持续服务。
+- 正式切换只替换 app，browser、cn-proxy、共享 Caddy 不重启；独立 watchdog 在 60 秒内接受新版本或自动恢复旧版本。
+- 部署后公网 `/healthz`、首页、管理员登录、公开查询错误合同、SQLite `quick_check`、IMAP 只读探针和脱敏日志全部通过。
+- 最终修复提交与运维记录进入 GitHub `main`，本地工作树清理；既有用户修改不得丢失。
+
+### 26.2 工程控制结构
+
+| 控制元素 | 本次事故对象 |
+| --- | --- |
+| 目标 | 公网 key 对应 Alias 的有效邮件验证码在有界时间内可领取 |
+| 被控对象 | Cloudflare/Caddy、edge app、key 映射、IMAP 邮箱、邮件解析器、时间窗口 |
+| 测量 | HTTP 状态、audit outcome、SQLite 映射计数、IMAP auth/select/search/fetch、INTERNALDATE、提取结果 |
+| 控制器 | mode 门控、限流、Alias 精确匹配、sender filter、时间窗、验证码语境提取 |
+| 执行器 | 配置恢复、最小代码修复、app-only 容器替换、旧镜像回滚 |
+| 扰动 | key 漂移、IMAP 凭据/文件夹变化、邮件延迟、HTML 模板变化、新验证码格式、时钟偏差、代理/网络抖动 |
+| 稳定性策略 | 先只读恢复测量；不以真实 Apple 写或批量发信做探针；候选先隔离验证；切换失败自动回滚 |
+
+最小闭环：
+
+```text
+一条近期失败查询
+  -> edge 中命中 active key/Alias
+  -> IMAP 最近窗口存在精确投递邮件
+  -> 当前提取器不能返回 / 候选能返回
+  -> 回归测试固定邮件结构
+  -> 最小修复
+  -> 隔离候选验证
+  -> app-only 切换
+  -> 同类近期邮件只读复验成功
+```
+
+### 26.3 初始假设与判别顺序
+
+1. key/edge 映射漂移：表现为大量 `invalid_key`，本机有 key 而云端不存在或仍保留旧 key。
+2. 邮件到达但提取失败：表现为 `no_code`，IMAP 时间窗内有精确收件邮件，但当前解析器返回空。
+3. sender filter 漂移：key 轮换可能清空云端过滤；反方向也可能配置过严而拒绝真实发件人。
+4. IMAP 配置、凭据或目录异常：集中出现 `imap_invalid` / `imap_error`。
+5. 时间/NTP/INTERNALDATE 边界：邮件存在但落在 300 秒窗口外或未来偏差外。
+6. 限流/并发：集中出现 429、busy 或 Cloudflare/Caddy 入口异常。
+7. 用户没有提供具体 key、邮箱或时间，因此先用最近 24 小时脱敏聚合定位；如仍有多个等价根因，再请求最小事故时间信息。
+
+### 26.4 GitHub 经验检索
+
+正式修改前复核：
+
+- `Redmig110/ic-veilmail` 等 iCloud/IMAP 项目的收件头、文件夹编码和验证码语境处理。
+- `axllent/mailpit` 等邮件调试项目对 HTML/plain text、MIME、时间与有界读取的处理。
+- Python `imaplib` / 邮件解析相关项目中 `BODY.PEEK[]`、`INTERNALDATE` 与只读文件夹的兼容经验。
+
+采用标准：只吸收能由本次真实失败邮件结构或确定性测试证明必要的最小规则，不扩充无证据词表或无界扫描。
+
+### 26.5 实施节点
+
+- [x] A：建立本节计划、目标、假设、部署与回滚边界；尚未连接服务器或修改业务代码。
+- [x] B：检索 GitHub 同类经验；只读核对本地/远端 Git、生产 revision、容器健康、restart/OOM、NTP、磁盘、SQLite 和公网入口。
+- [x] C：聚合最近 24 小时查询审计与 app/Caddy 日志，定位故障类别和起止时间。
+- [x] D：在服务器内部执行脱敏 IMAP 只读探针，确认 auth、目录、最近候选、精确收件、时间窗、sender filter 和提取器结果；校验 Seen 不变。
+- [x] E：用生产脱敏证据锁定 `临时代码` 中文语境缺失；等价 HTML 邮件回归在修复前稳定失败，最小词表修改后通过。
+- [x] F：最小修复、分平面测试替身修正和全量 217 项测试通过；Ruff 全仓检查与格式、compileall、启动脚本语法、两套 Compose 配置、diff 与新增秘密模式扫描均通过。
+- [ ] G：提交并推送功能提交到 GitHub `main`；服务器只同步该提交的 Git 跟踪文件，不覆盖 `.env`、数据卷或 profile。
+- [ ] H：建立受限回滚目录和旧镜像标签；隔离候选通过 SQLite/IMAP/页面契约后，由独立 60 秒 watchdog app-only 切换。
+- [ ] I：生产内外闭环、近期失败邮件只读复验、数据守恒和无关容器不变；失败自动回滚。
+- [ ] J：更新本计划、`OPERATIONS.md` 与云贝唯一连接手册，推送最终记录，清理候选资源和本地临时件。
+
+### 26.6 停止与回滚条件
+
+- 生产数据库、IMAP 凭据解密、NTP 或当前 revision 无法建立可信基线时，不修改服务。
+- IMAP 探针不得输出正文、验证码、完整邮箱或发件人；无法脱敏时停止该探针。
+- 不自动发送真实验证码邮件，不调用 Apple generate/reserve/deactivate/reactivate/delete。
+- 如果问题只影响单个未提供标识的 key，聚合证据不足时停止修改并请求事故时间或 key 末四位。
+- 候选与旧版对同一脱敏邮件样本没有稳定差异时，不部署猜测性解析规则。
+- app 在 60 秒内未恢复 healthy、revision/SQLite/公网反馈任一失败时，watchdog 自动恢复旧镜像和源码；不恢复 SQLite，除非 `quick_check` 或数据守恒失败。
+
+### 26.7 当前记录
+
+- 2026-08-08：用户确认当前 IP 已可连接服务器，并报告有人在公网收不到邮件验证码。本轮从节点 B 开始，先核对生产真实状态，不沿用上一次 SSH 超时结论。
+- 2026-08-08：节点 B 完成。生产 marker 为 `cd70dbe`，app 运行 `edge` 模式；app/browser/cn-proxy/Caddy 均 healthy、restart=0、OOM=false，NTP 同步，根卷约 30GB 可用。生产 `imap_otp.py` SHA-256 与本地 `main` 完全相同，排除“服务器仍运行旧提取器”。SQLite `quick_check=ok`，327 个 Alias、309 个 active/keyed、2 个 setting（HME/IMAP）、2078 条审计；公网和内部健康均为 200。
+- 2026-08-08：节点 C 完成。最近 24 小时共有 80 次公开查询：18 次 `found`、62 次 `no_code`，没有 `invalid_key`、`imap_invalid` 或 `imap_error`。按 10 分钟间隔分组后，9 个会话最终成功，只有一个 Alias 在 `08:59:42Z` 至 `09:12:28Z` 连续 36 次 `no_code` 且未成功，故障从全局入口/IMAP 收敛到单封邮件解析。
+- 2026-08-08：节点 D 完成。只读 IMAP 探针在故障窗口找到一封早于首次查询约 68 秒的精确投递邮件：时间窗正确、Alias 精确匹配、sender filter 为空且通过，邮件为 quoted-printable 的 HTML-only，只有一个独立六位数字；Seen 前后均为 694。当前 reader 对该窗口返回空。脱敏词法检查确认验证码前 6 个字符存在精确短语 `临时代码`，其中 `临时` 距数字 6 个字符、`代码` 距数字 4 个字符；当前中文语境正则只有 `临时码`，没有 `临时代码`，因此根因已经建立。
+- 2026-08-08：节点 E 完成。新增 HTML 等价样本“临时代码 + 独立六位数字”，旧实现稳定返回空；正则从 `临时码` 收敛为 `临时(?:码|代码)` 后，定向测试与 54 项 IMAP 测试通过。生产内存影子解析对原始事故邮件从 `old_extract=false` 变为 `candidate_extract=true`，且结果等于唯一六位候选、Seen 不变。
+- 2026-08-08：全量 216 项测试已通过。为恢复发布门禁，只修正既有 split-plane fake session 的 `.proxies` 与已采用的 `%40` URL 编码断言；未改变 edge 同步业务逻辑。Ruff 自动整理执行到一半时被既有 4 项需人工换行的问题停止，已产生的导入排序修改需在下一步复核后完成。
+- 2026-08-08：节点 F 完成。人工消除重复 `Response` 导入和三处超长行，格式器机械收敛一处既有配置换行；最终全量 217 项测试、Ruff 全仓检查与格式、compileall、`zsh -n`、base/server Compose dummy-env 配置解析、`git diff --check` 和新增秘密模式扫描全部通过。
+
+---
+
+## 27. 批量创建、Alias 用途状态与点击复制（2026-08-08）
+
+### 27.1 目标与验收指标
+
+在第 26 节验证码热修复独立上线并稳定后，增强本地管理工作台：
+
+1. 单次创建数量从当前配置上限 50 提升到硬上限 100；仍由持久队列串行调用 Apple，不并发轰击 HME。
+2. 每条 Alias 增加“用途状态”：`GPT`、`Grok`、自定义。自定义值由管理员手动输入。
+3. 点击 Alias 邮箱文本即可复制完整邮箱，并显示明确的成功/失败反馈。
+
+验收指标：
+
+- UI、Pydantic、Settings 和本地启动配置统一允许 `1..100`；超过 100 返回 422，不能绕过服务上限。
+- 创建 100 条只通过 fake HME/临时 SQLite 验证队列与计数，不对真实 Apple 创建 100 条测试 Alias。
+- 用途字段使用 SQLite 加法迁移，旧库默认空值；旧镜像可以忽略新列，普通回滚不恢复数据库。
+- 用途值最大 80 字符，首尾空白清理，禁止换行/NUL；`gpt` 和 `grok` 使用固定规范值，自定义显示原文但通过模板转义和 `textContent` 渲染。
+- 用途更新接口要求管理员会话和 CSRF；公开 API、control token 协议和 OTP 查询合同不增加该字段。
+- 刷新页面后用途状态保持；Apple list 对账、key 轮换和 Alias 状态变化不得清空用途。
+- 点击邮箱不触发生命周期、选择框或编辑菜单；Clipboard API 失败时使用现有安全回退，并在当前行显示“已复制”。
+- 桌面和 390px 移动端无横向溢出、按钮重叠或不可达输入。
+- 功能提交全量测试、Ruff、格式、compileall、JS 语法、两套 Compose、diff 和秘密扫描通过。
+- 第二次部署仍只替换 app，60 秒内失败自动恢复第 26 节热修复镜像；browser/cn-proxy/Caddy 不重启。
+
+### 27.2 最小数据模型
+
+`aliases` 增加：
+
+- `usage_label TEXT NOT NULL DEFAULT ''`
+
+规范：
+
+- 空字符串：未标记。
+- `gpt`：固定 GPT 状态。
+- `grok`：固定 Grok 状态。
+- 其他非空字符串：管理员自定义用途，最大 80 字符。
+
+该字段仅是管理元数据，不参与 Apple HME、sender filter、公开取码或 access key 校验。首版不把它加入 control→edge 协议，避免在尚未修复的跨平面同步链上扩大状态面；本地 control 是该字段的事实来源。
+
+### 27.3 交互模型
+
+```text
+Alias 邮箱按钮
+  -> click
+  -> copy(email)
+  -> 当前行短暂显示“已复制”
+
+用途状态
+  [GPT] [Grok] [其他]
+    -> GPT/Grok：单击立即保存
+    -> 其他：展开输入框，输入自定义用途后保存
+    -> 再点已选固定按钮可保持当前值，不隐式清空
+```
+
+“未标记”通过显式清除按钮完成，防止误点把已有用途丢失。
+
+### 27.4 当前边界与实现节点
+
+- [x] K：建立本节计划。当前代码硬上限已是 100，但本地启动器和默认配置为 50；并非只能生成 5 个。
+- [ ] L：增加旧库迁移、用途读写和验证的数据库/service/Web 失败测试。
+- [ ] M：实现 `usage_label` 加法迁移、管理员 CSRF API 和 dashboard 字段。
+- [ ] N：实现 GPT/Grok/其他/清除交互与点击邮箱复制，补 JS/模板/响应式测试。
+- [ ] O：把本地 batch 配置统一为 100，验证持久 job 可接受 100 项且仍串行、有界停机。
+- [ ] P：运行全量本地门禁，提交并推送独立功能提交。
+- [ ] Q：建立第二阶段回滚点与隔离候选，app-only 部署并验证 schema、页面、公开取码和无关容器不变。
+- [ ] R：更新 README、`OPERATIONS.md`、本计划和云贝唯一连接手册；推送最终记录并清理工作树。
+
+### 27.5 停止与回滚条件
+
+- 第 26 节热修复没有先独立部署并通过生产闭环时，不把本节功能一起切换。
+- 不使用真实 Apple 批量创建作为 100 项验收；只验证 job 建模、领取和 fake HME 串行调用。
+- 用途迁移后 Alias/key/settings/audit/job 计数或 SQLite `quick_check` 异常时停止部署。
+- 第二阶段页面或 API 异常只恢复第 26 节 app 镜像；保留新加法列，不恢复 SQLite。
+- 不借本节顺手修改第 25 节已发现的 edge outbox/HME 隔离问题；这些保持独立后续闭环。
