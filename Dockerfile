@@ -23,6 +23,6 @@ EXPOSE 8080
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=5s --timeout=8s --start-period=10s --retries=8 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"]
+  CMD ["python", "-c", "import os,urllib.parse,urllib.request; host=urllib.parse.urlsplit(os.environ['ICLOUD_GATEWAY_PUBLIC_BASE_URL']).hostname or 'localhost'; request=urllib.request.Request('http://127.0.0.1:8080/healthz', headers={'Host':host}); urllib.request.urlopen(request, timeout=5).read()"]
 
 CMD ["icloud-code-gateway"]
