@@ -5,6 +5,14 @@ from pathlib import Path
 CLOUDFLARE_RANGE_COUNT = 22
 
 
+def test_app_healthcheck_uses_public_host_header() -> None:
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+
+    assert "ICLOUD_GATEWAY_PUBLIC_BASE_URL" in dockerfile
+    assert "headers={'Host':host}" in dockerfile
+    assert "http://127.0.0.1:8080/healthz" in dockerfile
+
+
 def test_browser_forward_auth_does_not_forward_websocket_upgrade_headers() -> None:
     caddyfile = (Path(__file__).resolve().parents[1] / "Caddyfile").read_text()
 
