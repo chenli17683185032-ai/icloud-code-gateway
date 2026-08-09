@@ -298,7 +298,7 @@ docker compose ps browser
 
 ## 8. 更新与回滚
 
-更新前完成 SQLite 在线备份。升级到本版本时，先把新增的 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT` 从 `.env.example` 合并到服务器 `.env`；批量上限应设为 `100`。本版本对 `aliases` 增加 `usage_label TEXT NOT NULL DEFAULT ''`，属于可向后忽略的加法迁移。再按顺序构建，验证新镜像后只替换需要更新的服务：
+更新前完成 SQLite 在线备份。升级到本版本时，先把新增的 `ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS`、`ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS`、`ICLOUD_GATEWAY_HME_RETRY_MAX_SECONDS` 和 `ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT` 从 `.env.example` 合并到服务器 `.env`。本地 `control` 的批量上限设为 `100`；不负责生成 Alias 的云端 `edge` 当前显式保持 `50`，避免在生命周期门控尚未独立收敛前扩大破坏半径。本版本对 `aliases` 增加 `usage_label TEXT NOT NULL DEFAULT ''`，属于可向后忽略的加法迁移。再按顺序构建，验证新镜像后只替换需要更新的服务：
 
 ```bash
 git pull --ff-only origin main
@@ -311,6 +311,8 @@ docker compose ps
 ```
 
 数据库和 profile 卷不得随容器替换删除。60 秒内健康检查不恢复时，切回上一个 Git 标签/镜像并重新 `up -d`；只有迁移或数据损坏时才恢复备份。
+
+app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带从 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 解析出的 Host。生产 Trusted Host 或依赖版本变化时，无 Host 的探针可能得到 HTTP 400，即使带正确 Host 的业务探针为 200；发布时必须同时保留 Docker health、app 内网、共享 Caddy 容器内 origin、公网和 SQLite 探针，不能用单一元状态替代实际反馈。
 
 ## 9. 密钥轮换
 
@@ -335,6 +337,9 @@ docker compose ps
 
 ## 11. 运维记录
 
+- 2026-08-09：Alias 用途状态、点击邮箱复制和本地单次建模 100 项已完成生产收口。云端 `edge` 继续显式保持批量上限 50；生产提交为 `83df4668e4ccbd606c47a0d97c1bee5c6118fa04`，其中 `b38773b` 承载功能适配，`83df466` 只修正 Docker healthcheck Host 合同并增加回归测试。最终新 app 镜像为 `sha256:d25512d051937fe161f697ed770040fdc207537d3297e9c57f7762e6c534e5f8`，固定为 `latest/prod/release-83df466`；旧镜像 `sha256:5defdf1f4b1b93b66187d97fe05e38ac4ffcb87a77948cba67f799a483c36f4a` 保留 `rollback-pre-alias-usage-83df466-20260809T162411Z`。watchdog 26 秒接受容器、内网、公网、Caddy-origin、SQLite/schema 和 edge=50 连续探针，最终 app/browser/cn-proxy/Caddy 均 `healthy/restart=0/OOM=false`，后三者 ID 未变。
+- 2026-08-09：生产 SQLite 前后均为 `quick_check=ok`，375 条 Alias、357 条 active/keyed、2 条 setting、1 条 metadata、2158 条 audit、22 个 job、156 个 item 及表摘要守恒；`usage_label TEXT NOT NULL DEFAULT ''` 存在，非空用途为 0，active job 为 0。候选迁移、用途 API/XSS、邮箱复制静态合同、OTP fixture、旧镜像读新 schema、无效 key 404、实时有效 key HTTP 200 `waiting`、公网/管理页/noVNC 边界全部通过，未执行真实 Apple 100 项创建。成功审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T162411Z-83df466`，最终清单 SHA-256 为 `01cf7b4c85b331d94cc411d3249d1888e82b83b0c8bc11f731d283f89f81d115`，候选资源为 0。
+- 2026-08-09：此前数次未接受切换均由 watchdog 自动恢复 `07a3534`，没有等待人工恢复。最终窄字段 `Health.Log` 证明新镜像原 healthcheck 连续返回 HTTP 400，而带可信 Host 的业务探针为 200；修复后新容器在正式切换中正常转为 `healthy`。共享 Caddy 未重建、未在最终发布中 reload，browser/profile 和 cn-proxy 未动。
 - 2026-08-02：复制/导出格式修复提交 `49b2d9b0ecd6cd41a9aeb9b248d90858541f4ec3` 已部署。“一键复制”仅输出邮箱且一行一个，“导出信息”采用“邮箱、网站、密钥”标准字段。生产从 `e9fdc4f` 升级，目标仅变更管理页脚本、模板和测试；候选镜像在隔离临时数据目录中通过健康及 UI 契约断言后，由独立 60 秒 watchdog 只 force-recreate app，`22.668s` 完成 healthy、revision、marker、内外 200 和数据指纹闭环，状态 `accepted`，未触发回滚。新 app 容器 `7dd21948d0820e7be762cd930bfa47439f2c0b34d11c97a9b2f583d22d29c4fe`，镜像 `sha256:2fbc3239f6a803f8dd1e0774400899e40a09eab9d4f3d1718702f398975fb874`，固定为 `prod/release-49b2d9b`；browser `bcef6bba...`、cn-proxy `ed6f331e...` 未重建，共享 Caddy 未改，正式容器均为 `healthy/restart=0/OOM=false`。SQLite `quick_check=ok`，194/176 个 Alias、446 条审计、2 条设置以及 job/item 数据指纹前后完全一致；既有 5 个 `needs_reconcile` 终态任务保持不变，未自动重放，本轮未访问 Apple/HME 或 IMAP。公网健康/首页/登录为 200，未登录 noVNC 为 303，严重日志为 0。审计目录为 `/opt/new-api/icloud-code-gateway/backups/ui-copy-export-20260801T174254Z-49b2d9b`，清单 SHA-256 为 `2d228e321756d9a1885e54ca7780e205dbb662f72c4dd0bbdb6737b3f4c89e6b`；旧镜像 `sha256:b1eeaa894651a696a4485f2d00d448d7085e0a9460b0906f981d1905ad49978f` 保留专用 rollback 标签。普通回滚只恢复源码/marker、重标旧镜像并仅重建 app，不恢复 SQLite，不动 browser/profile、cn-proxy 或 Caddy。
 - 2026-08-01：用户更新 HME Session 后明确要求直接部署，因此本轮未执行额外 setup validate/
   HME list，也没有任何 HME 写调用。功能提交 `a954e06caf3368eff9a0a0c10269c1724b4eaaea`

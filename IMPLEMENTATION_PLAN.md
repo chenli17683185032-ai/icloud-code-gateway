@@ -2133,9 +2133,9 @@ Alias 邮箱按钮
 - [x] M：实现 `usage_label` 加法迁移、规范化数据库写入、管理员 Cookie+CSRF API、审计事件和 dashboard 字段。
 - [x] N：实现 GPT/Grok/其他/清除交互、点击邮箱复制和 Clipboard 回退；完成真实页面刷新持久化与桌面/390px 响应式测试。
 - [x] O：把 Settings、Compose、`.env.example`、本地启动器和前端 fallback 统一为 100；持久 job 测试确认一次建模 100 个串行 queued item，101 被拒绝。
-- [ ] P：GitHub `main` 已包含功能提交 `e38c708`；生产基线适配分支固定从当前线上谱系 `07a3534` 建立，只收敛旧 `_require_admin_json` 签名与机械格式差异，并重新通过该基线全量门禁。
-- [ ] Q：通过当前 Clash `jp22` 节点建立严格主机校验 SSH；建立第二阶段回滚点与隔离候选，app-only 部署并验证 schema、页面、公开取码和无关容器不变。
-- [ ] R：更新 README、`OPERATIONS.md`、本计划和云贝唯一连接手册；推送最终记录并清理工作树。
+- [x] P：GitHub `main` 已包含功能提交 `e38c708`，并以不改变主线代码树的 merge `8d6f731` 纳入生产适配谱系 `b38773b`；生产基线全量 218 项测试、Ruff、格式、Python/JS 语法、Compose、diff 与秘密扫描通过。
+- [x] Q：通过当前 Clash `jp22` 节点完成 app-only 部署。最终生产补丁 `83df466` 修正 Docker healthcheck Host 合同；watchdog 在 26 秒内以容器、内网、公网、Caddy-origin、SQLite/schema、edge 批量上限 50 连续三轮接受，新 app 随后通过 `healthy` 与完整 postflight。
+- [x] R：README 现有功能说明复核无漂移；`OPERATIONS.md`、本计划和云贝唯一连接手册已更新，生产补丁已合并 GitHub `main`，临时 worktree/分支/脚本/归档和远端候选状态已清理。
 
 ### 27.5 停止与回滚条件
 
@@ -2152,3 +2152,11 @@ Alias 邮箱按钮
 - 2026-08-08：管理页每条 Alias 显示 GPT/Grok/其他/清除按钮，选中项有显式勾选；其他用途展开 80 字符输入。点击邮箱直接复制并显示“已复制”，Clipboard API 失败时使用临时 textarea 选区回退，不写浏览器存储。
 - 2026-08-08：本机 control 已重启为新代码，PID `55651` 仅监听 `127.0.0.1:18081`；SQLite `quick_check=ok`，369 个 Alias，`usage_label` 列存在，页面导出批量上限 100。真实浏览器在第一条 Alias 上完成复制、GPT、自定义、刷新持久化并恢复原空值；1440px 与 390px 的 `scrollWidth == innerWidth`，移动端自定义表单与操作按钮均可达，未调用 Apple 创建或生命周期写。
 - 2026-08-08：用户将本机 Clash 出口切换为 `jp22`；`127.0.0.1:7897 -> 13.140.180.223:2222` 已在严格 known_hosts、固定私钥和 `BatchMode` 下只读连通，远端主机为既有生产机。服务器地址、SSH 用户和端口未变。
+- 2026-08-09：生产适配提交 `b38773b` 已作为祖先纳入 GitHub `main`。云下 control 保持一次建模 100 项；云上 edge 因不负责 Alias 生成且仍有既知生命周期门控缺口，在 `.env` 中显式保持批量上限 50，避免扩大破坏半径。
+- 2026-08-09：第一次正式切换前，生产库副本迁移、候选用途 API/XSS/静态资源 SHA/OTP fixture、旧镜像读取 Alias/管理页/invalid-key 兼容均通过；源树 20 项实际字节差异精确匹配。正式 app 替换后公网在 20 秒观察窗内仍返回 503，watchdog 主动回滚，切换到恢复共 29 秒；最终 marker、镜像、源码和 `.env` 均恢复 `07a3534`，公网 200、app healthy/restart=0/OOM=false，未留下候选容器、卷或部署锁。
+- 2026-08-09：第二次正式切换的审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T060824Z-b38773b`。候选迁移、用途 API/UI/XSS、OTP fixture、旧镜像兼容均再次通过；watchdog 脱敏探针显示新容器的 Docker health 在观察窗内始终为 `starting`，旧接受逻辑因此尚未执行内网、公网和 SQLite 真实探针便误判失败。watchdog 在 28 秒后启动回滚，切换后 39 秒内恢复旧 marker `07a3534` 和旧镜像 `5defdf1…`；公网观察期间持续 HTTP 200，app 最终 healthy/restart=0/OOM=false，部署锁与候选资源均清空。
+- 2026-08-09：第三次脚本把切换接受条件收敛为：容器 `running`、镜像正确、restart=0、OOM=false，Docker health 可为 `starting | healthy`，且内网 `/healthz`、公网 `/healthz`、SQLite `quick_check`、`usage_label` schema、edge 批量上限 50 连续三轮通过。watchdog 使用 28 秒新版本观察窗、45 秒自身回滚总窗，并与父进程共享从切换开始的 60 秒恢复截止；成功后 postflight 最长 180 秒等待 Docker `healthy` 并完成数据/API/UI/实时 valid-key 验收。
+- 2026-08-09：最终复审在一次尚处于 build/candidate 的尝试中发现父级兜底回滚只做单次健康验证；该尝试在切换前终止，旧服务始终 200。脚本随后改为在绝对 deadline 内循环完整旧版探针，并补齐发布前公网基线和候选 `usage_label TEXT NOT NULL DEFAULT ''` schema 门禁。
+- 2026-08-09：审计目录 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T062455Z-b38773b` 的切换已通过真实探针，但 postflight 记录 Docker health 长时间 `starting`，共享 Caddy 随后出现 Docker DNS 短暂失败并返回 503；脚本自动恢复旧版。下一次 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T161345Z-b38773b` 通过窄字段 `Health.Log` 建立直接根因：镜像内 healthcheck 未携带生产可信 Host，连续收到 HTTP 400。该次同样自动恢复旧 marker/镜像和公网 200。
+- 2026-08-09：从生产谱系 `b38773b` 建立最小补丁 `83df4668e4ccbd606c47a0d97c1bee5c6118fa04`，只修改 Docker healthcheck 从 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 提取 Host，并增加部署回归测试；生产基线全量 219 项测试、Ruff、格式、compileall、Docker health 命令解析和 diff 门禁通过。
+- 2026-08-09：最终 app-only 发布成功。watchdog `26s` 接受新镜像 `d25512d…`，marker/镜像 revision/`latest`/`prod`/`release-83df466` 均固定到 `83df466`；旧镜像 `5defdf1…` 保留专用 rollback 标签。SQLite 前后均为 `quick_check=ok`，375/357/357 个 Alias/active/keyed、2 个 setting、1 个 metadata、2158 条 audit、22 个 job、156 个 item 及各表摘要守恒，`usage_label` schema 正确且非空用途为 0、active job 为 0。生产 UI/API、OTP fixture、404 无效 key、实时有效 key（HTTP 200 `waiting`）、公网/管理页/noVNC 边界均通过；browser、cn-proxy、共享 Caddy ID 未变，四容器最终 `healthy/restart=0/OOM=false`。成功审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T162411Z-83df466`，最终清单 SHA-256 为 `01cf7b4c85b331d94cc411d3249d1888e82b83b0c8bc11f731d283f89f81d115`，候选资源为 0。
