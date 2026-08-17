@@ -61,6 +61,25 @@ def _normalize_email(value: str) -> str:
     return email
 
 
+def _alias_display_sort_key(alias: Mapping[str, Any]) -> tuple[int, int, str, str]:
+    remote = alias.get("remote_metadata")
+    timestamp = 0
+    if isinstance(remote, Mapping):
+        raw = remote.get("createTimestamp")
+        if isinstance(raw, bool):
+            raw = None
+        try:
+            timestamp = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            timestamp = 0
+    return (
+        0 if str(alias.get("state") or "") == "active" else 1,
+        -timestamp,
+        str(alias.get("created_at") or ""),
+        str(alias.get("id") or ""),
+    )
+
+
 def _clean_text(value: Any, *, limit: int) -> str:
     text = str(value or "").strip()
     if len(text) > limit or "\r" in text or "\n" in text:
@@ -68,13 +87,46 @@ def _clean_text(value: Any, *, limit: int) -> str:
     return text
 
 
-def _clean_usage_label(value: Any) -> str:
-    text = _clean_text(value, limit=80)
-    if "\x00" in text:
+_CANONICAL_USAGE_TOKENS = {
+    "gpt": "gpt",
+    "grok": "grok",
+    "封号": "封号",
+    "活跃": "活跃",
+    "banned": "封号",
+    "ban": "封号",
+    "active": "活跃",
+}
+
+
+def _split_usage_tokens(value: Any) -> list[str]:
+    raw = str(value or "").replace(",", " ").replace("|", " ")
+    if "\r" in raw or "\n" in raw or "\x00" in raw:
         raise ValueError("usage label is invalid")
-    canonical = text.casefold()
-    if canonical in {"gpt", "grok"}:
-        return canonical
+    tokens: list[str] = []
+    leftover: list[str] = []
+    for piece in raw.split():
+        key = piece.strip().casefold()
+        if not key:
+            continue
+        token = _CANONICAL_USAGE_TOKENS.get(key)
+        if token is None:
+            leftover.append(piece.strip())
+        elif token not in tokens:
+            tokens.append(token)
+    extra = " ".join(leftover).strip()
+    if extra:
+        if extra.casefold() in _CANONICAL_USAGE_TOKENS:
+            extra = _CANONICAL_USAGE_TOKENS[extra.casefold()]
+        if extra not in tokens:
+            tokens.append(extra)
+    return tokens
+
+
+def _clean_usage_label(value: Any) -> str:
+    tokens = _split_usage_tokens(value)
+    text = " ".join(tokens)
+    if len(text) > 80:
+        raise ValueError("usage label is invalid")
     return text
 
 
@@ -478,6 +530,15 @@ class Database:
         )
         return 0 if row is None else int(row["total"])
 
+    def latest_alias_synced_at(self) -> str | None:
+        row = (
+            self._connect()
+            .execute("SELECT MAX(last_synced_at) AS latest FROM aliases")
+            .fetchone()
+        )
+        value = None if row is None else row["latest"]
+        return None if value is None else str(value)
+
     def finish_remote_sync(self, seen_emails: list[str], *, synced_at: str) -> int:
         digests = [
             self.secret_box.digest(_normalize_email(email), "alias-email-index")
@@ -524,7 +585,9 @@ class Database:
             )
             .fetchall()
         )
-        return [self._alias_from_row(row) for row in rows]
+        aliases = [self._alias_from_row(row) for row in rows]
+        aliases.sort(key=_alias_display_sort_key)
+        return aliases
 
     def get_alias(self, alias_id: str) -> dict[str, Any]:
         row = (
@@ -925,13 +988,18 @@ class Database:
                 """
                 UPDATE batch_job_items
                 SET stage = ?, status = ?, alias_id = COALESCE(?, alias_id),
-                    result_blob = COALESCE(?, result_blob), error = ?, updated_at = ?
+                    result_blob = CASE
+                        WHEN ? = 1 THEN ?
+                        ELSE result_blob
+                    END,
+                    error = ?, updated_at = ?
                 WHERE job_id = ? AND item_index = ?
                 """,
                 (
                     stage,
                     status,
                     alias_id,
+                    1 if result is not None else 0,
                     None if result_blob is None else sqlite3.Binary(result_blob),
                     error,
                     timestamp,

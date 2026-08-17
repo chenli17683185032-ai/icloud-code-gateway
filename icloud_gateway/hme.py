@@ -62,6 +62,21 @@ class HmeNetworkError(HmeError):
     pass
 
 
+class HmeRateLimitedError(HmeError):
+    """Apple rejected an HME write because the account creation quota was hit."""
+
+    def __init__(
+        self,
+        message: str = "iCloud HME creation is rate limited",
+        *,
+        code: str = "-41015",
+        retry_after_seconds: int = 30 * 60,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "-41015").strip() or "-41015"
+        self.retry_after_seconds = max(0, int(retry_after_seconds))
+
+
 @dataclass(frozen=True)
 class ICloudHmeSession:
     host: str
@@ -541,22 +556,46 @@ class HmeClient:
     def __exit__(self, *_args: Any) -> None:
         self.close()
 
-    def list_settings(self) -> dict[str, Any]:
-        response = self._request("GET", "/v2/hme/list")
+    def list_settings(self, *, start_from: int | None = None) -> dict[str, Any]:
+        query = None
+        if start_from is not None and int(start_from) > 0:
+            query = {"startFrom": str(int(start_from))}
+        response = self._request("GET", "/v2/hme/list", query=query)
         result = response.get("result")
         if not isinstance(result, dict):
             raise HmeError("iCloud HME list response is invalid")
         return result
 
     def list_aliases(self) -> list[dict[str, Any]]:
-        aliases = self.list_settings().get("hmeEmails")
-        if aliases is None:
-            aliases = []
-        if not isinstance(aliases, list):
-            raise HmeError("iCloud HME alias list is invalid")
-        if any(not isinstance(item, Mapping) for item in aliases):
-            raise HmeError("iCloud HME alias list is incomplete")
-        return [dict(item) for item in aliases]
+        collected: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        start_from = 0
+        for _ in range(50):
+            result = self.list_settings(start_from=start_from or None)
+            page = _hme_email_page(result)
+            added = 0
+            for item in page:
+                remote_id = str(item.get("anonymousId") or "").strip()
+                key = remote_id or str(item.get("hme") or item.get("email") or "").strip().casefold()
+                if not key or key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                collected.append(dict(item))
+                added += 1
+            if added == 0:
+                break
+            next_from = _optional_int(result.get("startFrom"))
+            has_more = result.get("hasMore")
+            if has_more is False:
+                break
+            if next_from is not None and next_from > start_from:
+                start_from = next_from
+                continue
+            if has_more is True or len(page) >= 100:
+                start_from = start_from + len(page)
+                continue
+            break
+        return collected
 
     def generate_alias(self) -> str:
         response = self._request("POST", "/v1/hme/generate", {"langCode": self.session.lang_code})
@@ -603,16 +642,22 @@ class HmeClient:
         return dict(result) if isinstance(result, Mapping) else {}
 
     def _request(
-        self, method: str, path: str, payload: Mapping[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        query: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        params = urllib.parse.urlencode(
-            {
-                "clientBuildNumber": self.session.client_build_number,
-                "clientMasteringNumber": self.session.client_mastering_number,
-                "clientId": self.session.client_id,
-                "dsid": self.session.dsid,
-            }
-        )
+        params = {
+            "clientBuildNumber": self.session.client_build_number,
+            "clientMasteringNumber": self.session.client_mastering_number,
+            "clientId": self.session.client_id,
+            "dsid": self.session.dsid,
+        }
+        if query:
+            params.update({str(key): str(value) for key, value in query.items() if str(value)})
+        params = urllib.parse.urlencode(params)
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         try:
             response = self.requester(
@@ -645,6 +690,11 @@ class HmeClient:
             code = _safe_error_code(body)
             if code.upper() in _SETUP_AUTH_ERROR_CODES:
                 raise HmeSessionError("iCloud HME session is expired or rejected")
+            if _is_rate_limited_code(code):
+                raise HmeRateLimitedError(
+                    f"iCloud HME creation is rate limited ({code or '-41015'})",
+                    code=code or "-41015",
+                )
             suffix = f" ({code})" if code else ""
             raise HmeError(f"iCloud HME rejected the request{suffix}")
         return body
@@ -668,6 +718,26 @@ class HmeClient:
         )
 
 
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hme_email_page(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    aliases = result.get("hmeEmails")
+    if aliases is None:
+        aliases = []
+    if not isinstance(aliases, list):
+        raise HmeError("iCloud HME alias list is invalid")
+    if any(not isinstance(item, Mapping) for item in aliases):
+        raise HmeError("iCloud HME alias list is incomplete")
+    return [item for item in aliases if isinstance(item, Mapping)]
+
+
 def _safe_error_code(payload: Mapping[str, Any]) -> str:
     candidates: list[Any] = [payload.get("errorCode"), payload.get("code")]
     error = payload.get("error")
@@ -680,11 +750,20 @@ def _safe_error_code(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _is_rate_limited_code(code: str) -> bool:
+    text = str(code or "").strip()
+    if not text:
+        return False
+    # Community / Apple private API: -41015 is the observed Hide My Email throttle.
+    return text.lstrip("-") == "41015"
+
+
 __all__ = [
     "CORE_SESSION_COOKIE_NAMES",
     "HmeClient",
     "HmeError",
     "HmeNetworkError",
+    "HmeRateLimitedError",
     "HmeSessionError",
     "ICloudHmeSession",
     "merge_set_cookie_headers",

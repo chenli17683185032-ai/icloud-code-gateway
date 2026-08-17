@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from .browser_capture import CaptureManager
 from .config import Settings
-from .database import ConflictError, Database, IssuedAccessKey, NotFoundError
+from .database import ConflictError, Database, DatabaseError, IssuedAccessKey, NotFoundError
 from .edge_sync import EdgeSyncClient, EdgeSyncError
 from .hme import (
     HmeClient,
@@ -29,6 +31,7 @@ from .imap_otp import (
     ImapError,
     ImapOtpReader,
 )
+from .mail_tags import refresh_usage_tags as _refresh_usage_tags
 from .rate_limit import SlidingWindowRateLimiter
 from .security import SecretBox, SecurityError, hash_access_key
 
@@ -225,6 +228,8 @@ class GatewayService:
         self._last_validated_ts: float | None = None
         self._maintenance_thread: threading.Thread | None = None
         self._imap_slots = threading.BoundedSemaphore(4)
+        self._admin_code_cache_lock = threading.Lock()
+        self._admin_code_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.capture_manager = CaptureManager(
             cdp_url=settings.cdp_url,
             on_session=self.save_hme_session,
@@ -233,6 +238,9 @@ class GatewayService:
             timeout_seconds=settings.capture_timeout_seconds,
             profile_dir=settings.browser_profile_dir,
         )
+        self._bootstrap_imap_from_environment()
+        self._edge_push_lock = threading.Lock()
+        self._edge_reconcile_thread: threading.Thread | None = None
         if start_maintenance and settings.manages_hme:
             self._maintenance_thread = threading.Thread(
                 target=self._maintenance_loop,
@@ -240,6 +248,19 @@ class GatewayService:
                 daemon=True,
             )
             self._maintenance_thread.start()
+        if (
+            start_maintenance
+            and settings.is_control
+            and settings.edge_sync_enabled
+            and self.edge_sync_client is not None
+            and settings.edge_reconcile_seconds > 0
+        ):
+            self._edge_reconcile_thread = threading.Thread(
+                target=self._edge_reconcile_loop,
+                name="icloud-edge-reconcile",
+                daemon=True,
+            )
+            self._edge_reconcile_thread.start()
 
     @property
     def stop_requested(self) -> bool:
@@ -259,6 +280,15 @@ class GatewayService:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
         if thread is not None and thread.is_alive():
+            return False
+        reconcile = self._edge_reconcile_thread
+        if (
+            reconcile is not None
+            and reconcile.is_alive()
+            and reconcile is not threading.current_thread()
+        ):
+            reconcile.join(max(0.0, deadline - time.monotonic()))
+        if reconcile is not None and reconcile.is_alive():
             return False
         if not self.capture_manager.shutdown(timeout=max(0.0, deadline - time.monotonic())):
             return False
@@ -687,7 +717,50 @@ class GatewayService:
                 synced_at=synced_at,
             )
             seen.append(email)
+        known_remote = self.database.count_remote_aliases()
+        missing = max(0, known_remote - len(seen))
+        shrink_limit = max(5, int(known_remote * 0.1))
+        if missing > shrink_limit:
+            self.database.record_audit_event("hme_sync", "refused_incomplete")
+            return
         self.database.finish_remote_sync(seen, synced_at=synced_at)
+
+    def ensure_remote_aliases(self) -> str:
+        """Pull Apple HME into the local list when the snapshot is stale.
+
+        Returns a notice code, or an empty string when nothing should be flashed.
+        """
+        if not self.settings.manages_hme:
+            return ""
+        try:
+            if self.get_hme_session() is None:
+                return ""
+        except (HmeSessionError, SecurityError):
+            return ""
+        latest = self.database.latest_alias_synced_at()
+        if latest:
+            try:
+                synced = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+            except ValueError:
+                synced = None
+            if synced is not None:
+                if synced.tzinfo is None:
+                    synced = synced.replace(tzinfo=UTC)
+                if (datetime.now(UTC) - synced.astimezone(UTC)).total_seconds() < 30.0:
+                    return ""
+        before = self.database.count_remote_aliases()
+        try:
+            self._refresh_hme_session()
+        except GatewayBusyError:
+            return ""
+        except GatewayNotConfiguredError:
+            return ""
+        except (GatewayError, HmeError, HmeSessionError, DatabaseError):
+            return "sync_error"
+        after = self.database.count_remote_aliases()
+        if after > before:
+            return "sync_done"
+        return ""
 
     def _confirmed_remote_aliases(
         self,
@@ -945,6 +1018,51 @@ class GatewayService:
             raise GatewayNotConfiguredError("IMAP is not configured")
         self.imap_reader_factory(config).check(timeout=self.settings.otp_request_timeout_seconds)
 
+    def _bootstrap_imap_from_environment(self) -> None:
+        """Load IMAP settings from env when the local DB has no saved config.
+
+        Used by the local control plane so App passwords can ship in the
+        private creds file without forcing a public OTP surface.
+        """
+        if self.get_imap_config() is not None:
+            return
+        password = str(os.environ.get("ICLOUD_GATEWAY_IMAP_PASSWORD") or "").strip()
+        username = str(os.environ.get("ICLOUD_GATEWAY_IMAP_USERNAME") or "").strip()
+        forwarding = str(
+            os.environ.get("ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL") or username or ""
+        ).strip()
+        if not password or not username or not forwarding:
+            return
+        host = str(
+            os.environ.get("ICLOUD_GATEWAY_IMAP_HOST") or "imap.mail.me.com"
+        ).strip()
+        port_raw = str(os.environ.get("ICLOUD_GATEWAY_IMAP_PORT") or "993").strip()
+        folder = str(os.environ.get("ICLOUD_GATEWAY_IMAP_FOLDER") or "INBOX").strip()
+        junk_folder = str(os.environ.get("ICLOUD_GATEWAY_IMAP_JUNK_FOLDER") or "").strip()
+        proxy = str(os.environ.get("ICLOUD_GATEWAY_IMAP_PROXY") or "").strip()
+        test_raw = str(os.environ.get("ICLOUD_GATEWAY_IMAP_BOOTSTRAP_TEST") or "0").strip()
+        should_test = test_raw.casefold() in {"1", "true", "yes", "on"}
+        try:
+            port = int(port_raw or 993)
+            self.configure_imap(
+                {
+                    "forwarding_email": forwarding,
+                    "host": host,
+                    "port": port,
+                    "username": username,
+                    "password": password,
+                    "folder": folder,
+                    "junk_folder": junk_folder,
+                    "proxy": proxy,
+                },
+                test=should_test,
+            )
+            self.database.record_audit_event("imap_config", "bootstrapped")
+        except Exception:
+            # Leave the local console bootable even if IMAP bootstrap fails;
+            # the admin page can still save/test credentials manually.
+            self.database.record_audit_event("imap_config", "bootstrap_failed")
+
     def _require_hme_management(self) -> None:
         if not self.settings.manages_hme:
             raise GatewayNotAllowedError("HME management is disabled in edge mode")
@@ -952,6 +1070,11 @@ class GatewayService:
     def _require_public_otp(self) -> None:
         if not self.settings.serves_public_otp:
             raise GatewayNotAllowedError("public OTP is disabled in control mode")
+
+    def _require_admin_otp(self) -> None:
+        # Admin IMAP reads are allowed on control/full/edge so the local
+        # control console can show live codes next to each alias.
+        return
 
     def _push_alias_to_edge(
         self,
@@ -1110,44 +1233,111 @@ class GatewayService:
             return issued
 
     def push_all_access_keys_to_edge(self) -> dict[str, int]:
-        """Backfill local keyed aliases to the cloud edge control plane."""
+        """Reconcile every active local alias (with key when available) to the edge.
+
+        Keyless active aliases are registered too so the edge alias set matches the
+        local control plane; the edge keeps any access key it already holds when no
+        key is supplied. Pushes run in parallel: each upsert is an independent,
+        idempotent HTTP call, so ordering does not matter and a full reconcile of
+        ~450 aliases finishes in seconds instead of minutes.
+        """
         if self.edge_sync_client is None or not self.settings.edge_sync_enabled:
             raise GatewayNotAllowedError("edge sync is not enabled")
         if self.settings.is_edge:
             raise GatewayNotAllowedError("edge mode cannot push to itself")
-        succeeded = 0
-        failed = 0
-        skipped = 0
-        for alias in self.database.list_aliases():
-            if str(alias.get("state") or "") != "active":
-                skipped += 1
-                continue
-            if not bool(alias.get("has_access_key")):
-                skipped += 1
-                continue
-            alias_id = str(alias["id"])
-            try:
-                access_key = self.database.reveal_access_key(alias_id)
-                # Prefer upsert with key so missing emails are created on edge.
-                self._push_alias_to_edge(alias, access_key=access_key, action="upsert")
-                succeeded += 1
-            except Exception:
-                failed += 1
-                self.database.record_audit_event(
-                    "edge_sync",
-                    "backfill_failed",
-                    alias_id=alias_id,
+        with self._edge_push_lock:
+            skipped = 0
+            payloads: list[tuple[dict[str, Any], str | None]] = []
+            for alias in self.database.list_aliases():
+                if str(alias.get("state") or "") != "active":
+                    skipped += 1
+                    continue
+                access_key: str | None = None
+                if bool(alias.get("has_access_key")):
+                    # Hash-only legacy keys cannot be revealed; still register the
+                    # alias and leave the key already stored on the edge untouched.
+                    with suppress(Exception):
+                        access_key = self.database.reveal_access_key(str(alias["id"]))
+                payloads.append((alias, access_key))
+
+            client = self.edge_sync_client
+
+            def _push(entry: tuple[dict[str, Any], str | None]) -> None:
+                alias, key = entry
+                client.upsert_alias(
+                    alias_id=str(alias["id"]),
+                    email=str(alias.get("email") or ""),
+                    label=str(alias.get("label") or alias.get("email") or ""),
+                    note=str(alias.get("note") or ""),
+                    sender_filter=str(alias.get("sender_filter") or ""),
+                    state="active",
+                    access_key=key,
                 )
-        self.database.record_audit_event(
-            "edge_sync",
-            "backfill_done",
-        )
+
+            succeeded = 0
+            failed = 0
+            if payloads:
+                # Probe with a single push first: when the edge is unreachable we
+                # fail fast instead of burning a timeout per alias.
+                try:
+                    _push(payloads[0])
+                    succeeded += 1
+                except EdgeSyncError as exc:
+                    if exc.status_code is None:
+                        failed = len(payloads)
+                        self.database.record_audit_event(
+                            "edge_sync", "backfill_failed", alias_id=str(payloads[0][0]["id"])
+                        )
+                        self.database.record_audit_event("edge_sync", "backfill_done")
+                        return {
+                            "succeeded": 0,
+                            "failed": failed,
+                            "skipped": skipped,
+                            "total": failed + skipped,
+                        }
+                    failed += 1
+                    self.database.record_audit_event(
+                        "edge_sync", "backfill_failed", alias_id=str(payloads[0][0]["id"])
+                    )
+                except Exception:
+                    failed += 1
+                    self.database.record_audit_event(
+                        "edge_sync", "backfill_failed", alias_id=str(payloads[0][0]["id"])
+                    )
+                with ThreadPoolExecutor(max_workers=8, thread_name_prefix="edge-push") as pool:
+                    futures = {pool.submit(_push, entry): entry for entry in payloads[1:]}
+                    for future in as_completed(futures):
+                        alias, _key = futures[future]
+                        try:
+                            future.result()
+                        except Exception:
+                            failed += 1
+                            self.database.record_audit_event(
+                                "edge_sync", "backfill_failed", alias_id=str(alias["id"])
+                            )
+                        else:
+                            succeeded += 1
+            self.database.record_audit_event(
+                "edge_sync",
+                "backfill_done",
+            )
         return {
             "succeeded": succeeded,
             "failed": failed,
             "skipped": skipped,
             "total": succeeded + failed + skipped,
         }
+
+    def _edge_reconcile_loop(self) -> None:
+        """Background self-healing: keep the edge alias/key set converged to local."""
+        # First pass shortly after startup so a restart heals missed pushes quickly.
+        if self._stop_event.wait(30.0):
+            return
+        while True:
+            with suppress(Exception):
+                self.push_all_access_keys_to_edge()
+            if self._stop_event.wait(max(300, int(self.settings.edge_reconcile_seconds))):
+                return
 
     def reveal_access_key(self, alias_id: str) -> str:
         with self._hme_lock:
@@ -1186,6 +1376,19 @@ class GatewayService:
         outcome = "cleared" if not alias["usage_label"] else "updated"
         self.database.record_audit_event("alias_usage", outcome, alias_id=str(alias_id))
         return alias
+
+    def refresh_usage_tags(self) -> dict[str, int]:
+        config = self.get_imap_config()
+        if config is None:
+            raise GatewayNotConfiguredError("IMAP is not configured")
+        aliases = self.database.list_aliases()
+        stats = _refresh_usage_tags(
+            config=config,
+            aliases=aliases,
+            updater=self.database.update_alias_usage,
+        )
+        self.database.record_audit_event("usage_tags", "refreshed")
+        return stats
 
     def deactivate_alias(self, alias_id: str) -> dict[str, Any]:
         self._ensure_hme_fresh()
@@ -1319,6 +1522,7 @@ class GatewayService:
                 max_age_seconds=self.settings.otp_max_age_seconds,
                 future_skew_seconds=self.settings.otp_future_skew_seconds,
                 sender_filter=alias["sender_filter"],
+                sender_policy="gpt_grok",
                 timeout=self.settings.otp_request_timeout_seconds,
             )
         except ImapCredentialsError:
@@ -1341,25 +1545,130 @@ class GatewayService:
             expires_at=expires_at.isoformat().replace("+00:00", "Z"),
         )
 
-    def admin_recent_codes(self) -> dict[str, Any]:
-        self._require_public_otp()
+    def _admin_code_payload(self, alias: Mapping[str, Any], *, code: str, received_at: datetime) -> dict[str, Any]:
+        value = received_at
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return {
+            "alias_id": alias["id"],
+            "email": alias["email"],
+            "label": alias["label"],
+            "code": code,
+            "received_at": value.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "received_at_display": value.astimezone(_BEIJING_TIMEZONE).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+
+    def admin_recent_codes(self, alias_ids: Sequence[str] | None = None) -> dict[str, Any]:
+        self._require_admin_otp()
         config = self.get_imap_config()
         if config is None:
             self.database.record_audit_event("admin_code_scan", "not_configured")
             raise GatewayNotConfiguredError("IMAP is not configured")
+        # QQ often deposits HME forwards in Junk; auto-scan it for admin reads.
+        if not config.junk_folder and "qq.com" in config.host.casefold():
+            config = ImapConfig(
+                forwarding_email=config.forwarding_email,
+                host=config.host,
+                port=config.port,
+                username=config.username,
+                password=config.password,
+                folder=config.folder or "INBOX",
+                junk_folder="Junk",
+                proxy=config.proxy,
+            )
         aliases = self.database.list_aliases()
+        wanted_ids = tuple(
+            dict.fromkeys(str(item or "").strip() for item in (alias_ids or ()) if str(item or "").strip())
+        )
+        if wanted_ids:
+            wanted = set(wanted_ids)
+            aliases = [item for item in aliases if str(item["id"]) in wanted]
+            if not aliases:
+                self.database.record_audit_event("admin_code_scan", "not_found")
+                raise NotFoundError("alias not found")
         aliases_by_email = {item["email"].casefold(): item for item in aliases}
+        if not aliases_by_email:
+            return {"codes": [], "by_alias": {}, "scanned": 0, "truncated": False, "scope": "none"}
+
+        # Local admin needs a wider window than the public 5-minute API: iCloud
+        # forward to QQ can lag, and the operator often copies the mail a bit late.
+        admin_max_age = max(int(self.settings.otp_max_age_seconds), 30 * 60)
+
+        # Positive cache only. Never cache empty results — that made the UI look
+        # "stuck" with no code while a mail was already in the mailbox.
+        if len(aliases) == 1:
+            alias = aliases[0]
+            alias_id = str(alias["id"])
+            now = float(self.clock())
+            with self._admin_code_cache_lock:
+                cached = self._admin_code_cache.get(alias_id)
+            # 4s TTL coalesces concurrent tabs polling the same alias without
+            # noticeably delaying a fresh code (poll interval is 5s anyway).
+            if cached is not None and (now - cached[0]) <= 4.0 and cached[1]:
+                payload = cached[1]
+                return {
+                    "codes": [payload],
+                    "by_alias": {alias_id: payload},
+                    "scanned": 0,
+                    "truncated": False,
+                    "scope": "single",
+                    "alias_ids": [alias_id],
+                    "cached": True,
+                }
+
         if not self._imap_slots.acquire(timeout=0.1):
             self.database.record_audit_event("admin_code_scan", "busy")
             raise GatewayBusyError("IMAP reader is busy")
+        scanned = 0
+        truncated = False
+        codes: list[dict[str, Any]] = []
+        by_alias: dict[str, dict[str, Any]] = {}
         try:
-            batch = self.imap_reader_factory(config).find_recent_codes(
-                tuple(aliases_by_email),
-                now_ts=float(self.clock()),
-                max_age_seconds=self.settings.otp_max_age_seconds,
-                future_skew_seconds=self.settings.otp_future_skew_seconds,
-                timeout=self.settings.otp_request_timeout_seconds,
-            )
+            reader = self.imap_reader_factory(config)
+            if len(aliases) == 1:
+                alias = aliases[0]
+                alias_id = str(alias["id"])
+                now = float(self.clock())
+                result = reader.find_latest_code(
+                    alias["email"],
+                    now_ts=now,
+                    max_age_seconds=admin_max_age,
+                    future_skew_seconds=self.settings.otp_future_skew_seconds,
+                    sender_filter="",  # local UI should never hide a code via sender filter
+                    timeout=max(6, min(15, int(self.settings.otp_request_timeout_seconds))),
+                )
+                scanned = 1 if result is not None else 0
+                if result is not None:
+                    payload = self._admin_code_payload(
+                        alias, code=result.code, received_at=result.received_at
+                    )
+                    codes.append(payload)
+                    by_alias[alias_id] = payload
+                    with self._admin_code_cache_lock:
+                        self._admin_code_cache[alias_id] = (now, payload)
+            else:
+                batch = reader.find_recent_codes(
+                    tuple(aliases_by_email),
+                    now_ts=float(self.clock()),
+                    max_age_seconds=admin_max_age,
+                    future_skew_seconds=self.settings.otp_future_skew_seconds,
+                    timeout=max(12, min(25, int(self.settings.otp_request_timeout_seconds))),
+                    scan_limit=120,
+                    result_limit=80,
+                )
+                scanned = batch.scanned
+                truncated = batch.truncated
+                for item in batch.items:
+                    alias = aliases_by_email.get(item.alias.casefold())
+                    if alias is None:
+                        continue
+                    payload = self._admin_code_payload(
+                        alias, code=item.code, received_at=item.received_at
+                    )
+                    codes.append(payload)
+                    by_alias.setdefault(str(alias["id"]), payload)
         except ImapCredentialsError:
             self.database.record_audit_event("admin_code_scan", "imap_invalid")
             raise GatewayNotConfiguredError("IMAP is unavailable") from None
@@ -1369,33 +1678,18 @@ class GatewayService:
         finally:
             self._imap_slots.release()
 
-        codes: list[dict[str, Any]] = []
-        for item in batch.items:
-            alias = aliases_by_email.get(item.alias.casefold())
-            if alias is None:
-                continue
-            received_at = item.received_at
-            if received_at.tzinfo is None:
-                received_at = received_at.replace(tzinfo=UTC)
-            codes.append(
-                {
-                    "alias_id": alias["id"],
-                    "email": alias["email"],
-                    "label": alias["label"],
-                    "code": item.code,
-                    "received_at": received_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-                    "received_at_display": received_at.astimezone(_BEIJING_TIMEZONE).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                }
-            )
-        outcome = "truncated" if batch.truncated else ("found" if codes else "empty")
+        outcome = "truncated" if truncated else ("found" if codes else "empty")
         self.database.record_audit_event("admin_code_scan", outcome)
         return {
             "codes": codes,
-            "scanned": batch.scanned,
-            "truncated": batch.truncated,
+            "by_alias": by_alias,
+            "scanned": scanned,
+            "truncated": truncated,
+            "scope": "single" if len(aliases) == 1 else "all",
+            "alias_ids": [str(item["id"]) for item in aliases],
+            "max_age_seconds": admin_max_age,
         }
+
 
     def dashboard(self) -> dict[str, Any]:
         hme_session: ICloudHmeSession | None

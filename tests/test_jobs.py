@@ -8,7 +8,7 @@ import pytest
 
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, Database
-from icloud_gateway.hme import ICloudHmeSession
+from icloud_gateway.hme import HmeRateLimitedError, ICloudHmeSession
 from icloud_gateway.jobs import BatchJobManager, request_fingerprint
 from icloud_gateway.security import SecretBox
 from icloud_gateway.service import (
@@ -409,7 +409,7 @@ def test_generated_candidate_is_reserved_without_generating_again(
     item = database.get_batch_job(job["id"])["items"][0]
 
     manager = BatchJobManager(gateway, throttle_seconds=0)
-    assert manager._create_alias(item, job_id=job["id"]) is False
+    assert manager._create_alias(item, job_id=job["id"]) == "ok"
     assert generated == []
     assert reserved == ["saved@icloud.com"]
     assert gateway._remote_write_active is False
@@ -611,10 +611,123 @@ def test_reserve_failure_is_unknown_and_stops_replay(database: Database, tmp_pat
     )
     item = database.get_batch_job(job["id"])["items"][0]
 
-    assert BatchJobManager(gateway)._create_alias(item, job_id=job["id"]) is True
+    assert BatchJobManager(gateway)._create_alias(item, job_id=job["id"]) == "unknown"
     recovered = database.get_batch_job(job["id"])["items"][0]
     assert recovered["status"] == "unknown"
     assert recovered["result"] == {"candidate": "candidate@icloud.com"}
+
+
+def test_rate_limited_create_cools_down_then_continues(database: Database, tmp_path) -> None:
+    gateway = _Gateway(database, tmp_path)
+    gateway._remote_write_active = False
+    gateway._hme_lock = threading.RLock()
+    gateway._begin_remote_write = lambda: setattr(gateway, "_remote_write_active", True)
+    gateway._finish_remote_write = lambda: setattr(gateway, "_remote_write_active", False)
+    gateway._ensure_hme_fresh = lambda: None
+    gateway.get_hme_session = lambda: object()
+    gateway._close_client = lambda _client: None
+    gateway._persist_rotated_hme_session = lambda _original, _candidate: False
+    generate_calls = 0
+    reserve_calls = 0
+
+    class Client:
+        def generate_alias(self):
+            nonlocal generate_calls
+            generate_calls += 1
+            if generate_calls == 2:
+                raise HmeRateLimitedError(code="-41015", retry_after_seconds=60)
+            return f"new-{generate_calls}@icloud.com"
+
+        def reserve_alias(self, candidate, *, label, note):
+            nonlocal reserve_calls
+            reserve_calls += 1
+            return {"hme": candidate, "anonymousId": candidate, "isActive": True}
+
+    gateway.hme_client_factory = lambda _session: Client()
+    # Tiny cooldown so the unit test can resume without sleeping 30 minutes.
+    manager = BatchJobManager(gateway, throttle_seconds=0, rate_limit_cooldown_seconds=60)
+    sleeps: list[float] = []
+
+    def fake_wait(timeout=None):
+        sleeps.append(float(timeout or 0.0))
+        # Expire cooldown after the first wait slice is observed.
+        if len(sleeps) == 1:
+            job_id = job["id"]
+            item = database.get_batch_job(job_id)["items"][1]
+            result = dict(item["result"] or {})
+            result["resume_at"] = "2000-01-01T00:00:00.000Z"
+            database.update_batch_item(
+                job_id,
+                2,
+                stage="waiting_quota",
+                status="queued",
+                result=result,
+                error=item.get("error"),
+            )
+        return False
+
+    manager._stop = threading.Event()
+    manager._stop.wait = fake_wait  # type: ignore[method-assign]
+    job, _created = manager.create_alias_job(
+        count=3,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+
+    manager._run_job(database.get_batch_job(job["id"]))
+
+    current = database.get_batch_job(job["id"])
+    assert current["status"] == "completed"
+    assert current["succeeded"] == 3
+    assert generate_calls >= 3
+    assert reserve_calls == 3
+    assert sleeps  # cooled down instead of needs_reconcile
+    assert all(item["status"] == "success" for item in current["items"])
+    public = manager.public_job(job["id"])
+    assert public["status"] == "completed"
+
+
+def test_rate_limited_generate_keeps_item_queued_for_resume(
+    database: Database, tmp_path
+) -> None:
+    gateway = _Gateway(database, tmp_path)
+    gateway._remote_write_active = False
+    gateway._hme_lock = threading.RLock()
+    gateway._begin_remote_write = lambda: setattr(gateway, "_remote_write_active", True)
+    gateway._finish_remote_write = lambda: setattr(gateway, "_remote_write_active", False)
+    gateway._ensure_hme_fresh = lambda: None
+    gateway.get_hme_session = lambda: object()
+    gateway._close_client = lambda _client: None
+
+    class Client:
+        def generate_alias(self):
+            raise HmeRateLimitedError(code="-41015", retry_after_seconds=120)
+
+        def reserve_alias(self, candidate, *, label, note):
+            raise AssertionError("reserve must not run after generate rate limit")
+
+    gateway.hme_client_factory = lambda _session: Client()
+    manager = BatchJobManager(gateway, throttle_seconds=0, rate_limit_cooldown_seconds=120)
+    job, _created = database.create_batch_job(
+        kind="create_aliases",
+        action="create",
+        fingerprint=b"q" * 32,
+        items=[{"label": "Team", "note": "", "sender_filter": ""}],
+    )
+    item = database.get_batch_job(job["id"])["items"][0]
+
+    assert manager._create_alias(item, job_id=job["id"]) == "rate_limited"
+    recovered = database.get_batch_job(job["id"])
+    assert recovered["status"] == "queued"
+    assert recovered["items"][0]["status"] == "queued"
+    assert recovered["items"][0]["stage"] == "waiting_quota"
+    assert recovered["items"][0]["result"]["wait_reason"] == "rate_limited"
+    assert recovered["items"][0]["result"]["code"] == "-41015"
+    public = manager.public_job(job["id"])
+    assert public["wait_reason"] == "rate_limited"
+    assert public["retry_after_seconds"] >= 0
 
 
 def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(
@@ -643,7 +756,7 @@ def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(
                 alias_id=f"alias-{calls}",
                 result={"id": f"alias-{calls}"},
             )
-            return False
+            return "ok"
         database.update_batch_item(
             job["id"],
             item["index"],
@@ -651,7 +764,7 @@ def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(
             status="unknown",
             error="remote write outcome is unknown",
         )
-        return True
+        return "unknown"
 
     manager._run_item = run_item
     manager._run_job(database.get_batch_job(job["id"]))

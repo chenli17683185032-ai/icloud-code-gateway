@@ -10,13 +10,50 @@ LOG_DIR="${RUNTIME_ROOT}/logs"
 PID_FILE="${RUNTIME_ROOT}/control.pid"
 LOG_FILE="${LOG_DIR}/control.log"
 ENV_FILE="${PROJECT_DIR}/.env"
-CREDS_FILE="${HOME}/Desktop/云贝/服务器相关/icloud-control-plane.env"
+CREDS_FILE=""
+for candidate in \
+  "${PROJECT_DIR}/icloud-control-plane.env" \
+  "${PROJECT_DIR}/../icloud-control-plane.env" \
+  "${HOME}/Desktop/鲨鱼工具库/iCloud管理工具/icloud-control-plane.env" \
+  "${HOME}/Desktop/云贝/服务器相关/icloud-control-plane.env"
+do
+  if [[ -f "$candidate" ]]; then
+    CREDS_FILE="$candidate"
+    break
+  fi
+done
 VENV_PY="${PROJECT_DIR}/.venv/bin/python"
 APP_HOST="127.0.0.1"
 APP_PORT="18081"
 ADMIN_URL="http://${APP_HOST}:${APP_PORT}/admin"
 EDGE_URL="https://icloud.yunbay.xyz"
 HME_PROXY_DEFAULT="socks5h://127.0.0.1:7897"
+
+pick_bootstrap_python() {
+  local candidates=(
+    "${ICLOUD_BOOTSTRAP_PYTHON:-}"
+    "$HOME/.workbuddy/binaries/python/versions/3.13.12/bin/python3"
+    "$HOME/.workbuddy/binaries/python/envs/default/bin/python"
+    "/opt/homebrew/bin/python3"
+    "/usr/local/bin/python3"
+    "$(command -v python3 2>/dev/null || true)"
+    "/usr/bin/python3"
+  )
+  local p
+  for p in "${candidates[@]}"; do
+    [[ -z "$p" || ! -x "$p" ]] && continue
+    if "$p" -c "import sys" >/dev/null 2>&1; then
+      print -r -- "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! BOOTSTRAP_PY="$(pick_bootstrap_python)"; then
+  echo "错误：找不到可用的 Python 3（系统 Python 可能缺少 Command Line Tools）。"
+  exit 1
+fi
 
 echo "========================================"
 echo "  本地 iCloud 控制台（无 Docker / control）"
@@ -38,7 +75,8 @@ chmod 700 "$RUNTIME_ROOT" "$DATA_DIR" "$PROFILE_DIR" "$LOG_DIR" 2>/dev/null || t
 read_env() {
   local key="$1"
   local file="$2"
-  python3 - "$key" "$file" <<'PY'
+  [[ -z "$file" || ! -f "$file" ]] && return 0
+  "$BOOTSTRAP_PY" - "$key" "$file" <<'PY'
 import sys
 from pathlib import Path
 key, path = sys.argv[1], Path(sys.argv[2])
@@ -60,12 +98,25 @@ ensure_venv() {
     return 0
   fi
   echo "首次准备 Python 环境..."
+  echo "使用引导 Python：${BOOTSTRAP_PY}"
   if command -v uv >/dev/null 2>&1; then
-    (cd "$PROJECT_DIR" && uv sync)
-  else
-    python3 -m venv "${PROJECT_DIR}/.venv"
+    (cd "$PROJECT_DIR" && UV_PYTHON="$BOOTSTRAP_PY" uv sync) || true
+  fi
+  if [[ ! -x "$VENV_PY" ]]; then
+    "$BOOTSTRAP_PY" -m venv "${PROJECT_DIR}/.venv"
     "${PROJECT_DIR}/.venv/bin/pip" install -U pip
-    "${PROJECT_DIR}/.venv/bin/pip" install -e "${PROJECT_DIR}"
+    # 优先 editable；失败则退回直接装依赖，保证可启动
+    if ! "${PROJECT_DIR}/.venv/bin/pip" install -e "${PROJECT_DIR}"; then
+      echo "editable 安装失败，改为安装运行依赖..."
+      "${PROJECT_DIR}/.venv/bin/pip" install \
+        "cryptography>=43,<47" \
+        "fastapi>=0.116,<1" \
+        "jinja2>=3.1,<4" \
+        "playwright>=1.58,<2" \
+        "python-multipart>=0.0.20,<1" \
+        "requests[socks]>=2.31,<3" \
+        "uvicorn[standard]>=0.35,<1"
+    fi
   fi
   if [[ ! -x "$VENV_PY" ]]; then
     echo "错误：无法创建虚拟环境 ${PROJECT_DIR}/.venv"
@@ -187,6 +238,59 @@ export ICLOUD_GATEWAY_CDP_URL=""
 export ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$HME_PROXY_DEFAULT}"
 export ICLOUD_GATEWAY_HME_PROXY_REQUIRED="${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
 
+
+# 可选：本地 control 直接启用 IMAP 取码（列表行显示验证码）
+# 凭证优先读取桌面凭据文件，其次项目 .env
+IMAP_USERNAME="$(read_env ICLOUD_GATEWAY_IMAP_USERNAME "$CREDS_FILE" || true)"
+IMAP_PASSWORD="$(read_env ICLOUD_GATEWAY_IMAP_PASSWORD "$CREDS_FILE" || true)"
+IMAP_FORWARD="$(read_env ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL "$CREDS_FILE" || true)"
+IMAP_HOST="$(read_env ICLOUD_GATEWAY_IMAP_HOST "$CREDS_FILE" || true)"
+IMAP_PORT="$(read_env ICLOUD_GATEWAY_IMAP_PORT "$CREDS_FILE" || true)"
+IMAP_FOLDER="$(read_env ICLOUD_GATEWAY_IMAP_FOLDER "$CREDS_FILE" || true)"
+IMAP_JUNK="$(read_env ICLOUD_GATEWAY_IMAP_JUNK_FOLDER "$CREDS_FILE" || true)"
+IMAP_PROXY="$(read_env ICLOUD_GATEWAY_IMAP_PROXY "$CREDS_FILE" || true)"
+if [[ -z "$IMAP_USERNAME" ]]; then IMAP_USERNAME="$(read_env ICLOUD_GATEWAY_IMAP_USERNAME "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_PASSWORD" ]]; then IMAP_PASSWORD="$(read_env ICLOUD_GATEWAY_IMAP_PASSWORD "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_FORWARD" ]]; then IMAP_FORWARD="$(read_env ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_HOST" ]]; then IMAP_HOST="$(read_env ICLOUD_GATEWAY_IMAP_HOST "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_PORT" ]]; then IMAP_PORT="$(read_env ICLOUD_GATEWAY_IMAP_PORT "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_FOLDER" ]]; then IMAP_FOLDER="$(read_env ICLOUD_GATEWAY_IMAP_FOLDER "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_JUNK" ]]; then IMAP_JUNK="$(read_env ICLOUD_GATEWAY_IMAP_JUNK_FOLDER "$ENV_FILE" || true)"; fi
+if [[ -z "$IMAP_PROXY" ]]; then IMAP_PROXY="$(read_env ICLOUD_GATEWAY_IMAP_PROXY "$ENV_FILE" || true)"; fi
+if [[ -n "$IMAP_USERNAME" && -n "$IMAP_PASSWORD" ]]; then
+  export ICLOUD_GATEWAY_IMAP_USERNAME="$IMAP_USERNAME"
+  export ICLOUD_GATEWAY_IMAP_PASSWORD="$IMAP_PASSWORD"
+  export ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL="${IMAP_FORWARD:-$IMAP_USERNAME}"
+  export ICLOUD_GATEWAY_IMAP_HOST="${IMAP_HOST:-imap.mail.me.com}"
+  export ICLOUD_GATEWAY_IMAP_PORT="${IMAP_PORT:-993}"
+  export ICLOUD_GATEWAY_IMAP_FOLDER="${IMAP_FOLDER:-INBOX}"
+  export ICLOUD_GATEWAY_IMAP_JUNK_FOLDER="${IMAP_JUNK:-}"
+  export ICLOUD_GATEWAY_IMAP_PROXY="${IMAP_PROXY:-}"
+  export ICLOUD_GATEWAY_IMAP_BOOTSTRAP_TEST="${ICLOUD_GATEWAY_IMAP_BOOTSTRAP_TEST:-0}"
+  echo "IMAP 本地取码：已从凭据加载（${ICLOUD_GATEWAY_IMAP_USERNAME} @ ${ICLOUD_GATEWAY_IMAP_HOST}）"
+else
+  echo "IMAP 本地取码：未配置（可在凭据文件写入 ICLOUD_GATEWAY_IMAP_USERNAME / PASSWORD）"
+fi
+
+
+# 认领已在监听的本机 control 进程（避免启动脚本/rsync 冲掉 control.pid 后误判占用）
+claim_existing_control() {
+  local listen_pid=""
+  if command -v lsof >/dev/null 2>&1; then
+    listen_pid="$(lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+  fi
+  if [[ -n "$listen_pid" ]] && health_ok; then
+    echo "$listen_pid" >"$PID_FILE"
+    echo "本地 control 已在运行 (pid=${listen_pid})."
+    echo "管理页：${ADMIN_URL}"
+    if command -v open >/dev/null 2>&1; then
+      open "$ADMIN_URL" || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
   if is_running "${OLD_PID:-}"; then
@@ -206,11 +310,27 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
+# PID 文件缺失/过期，但 18081 上仍是健康服务 → 直接接管
+if claim_existing_control; then
+  exit 0
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   if lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "错误：端口 ${APP_PORT} 已被占用，且不在本脚本管理范围。"
-    lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN || true
-    exit 1
+    LISTEN_PID="$(lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+    echo "端口 ${APP_PORT} 被占用且健康检查失败，尝试接管并重启 (pid=${LISTEN_PID:-unknown})..."
+    if [[ -n "${LISTEN_PID:-}" ]]; then
+      if ! stop_control_process "$LISTEN_PID"; then
+        echo "错误：无法释放端口 ${APP_PORT}。"
+        lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN || true
+        exit 1
+      fi
+      rm -f "$PID_FILE"
+    else
+      echo "错误：端口 ${APP_PORT} 已被占用，且不在本脚本管理范围。"
+      lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN || true
+      exit 1
+    fi
   fi
 fi
 

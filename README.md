@@ -22,11 +22,16 @@ ICLOUD_GATEWAY_DEPLOYMENT_MODE=control
 ICLOUD_GATEWAY_EDGE_BASE_URL=https://icloud.yunbay.xyz
 ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<shared-secret>
 ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
+# 自动对账周期（秒）；0 关闭。control 会在启动 30 秒后先对账一次
+ICLOUD_GATEWAY_EDGE_RECONCILE_SECONDS=1800
 
 # 云端 edge
 ICLOUD_GATEWAY_DEPLOYMENT_MODE=edge
 ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 ```
+
+创建/签发密钥会即时推送云端（失败自动由对账兜底）；“同步云端”按钮和自动对账都会
+并行推送全部活跃 Alias（含未签发密钥的），云端已存在的密钥不会被无密钥推送清掉。
 
 控制面同步接口（仅 token 鉴权，不走管理员 Cookie）：
 
@@ -67,6 +72,20 @@ ICLOUD_GATEWAY_ADMIN_OPEN=1
 ```
 
 即**本机管理页免管理员密码**。线上 edge 不设置该开关，生产管理员密码保持原样。无 Docker 本地也不再使用 noVNC，因此**没有 VNC 密码**。
+
+本地 control 现已支持管理端 IMAP 取码：配好转发邮箱 IMAP 后，主页 Alias 列表每一行会显示最近 5 分钟验证码，并支持自动刷新。公开 `/api/code` 仍只在云端 edge 提供。
+
+把下面这些写进 `~/Desktop/云贝/服务器相关/icloud-control-plane.env`（或项目 `.env`），本地启动脚本会自动注入：
+
+```dotenv
+ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL=you@example.com
+ICLOUD_GATEWAY_IMAP_HOST=imap.mail.me.com
+ICLOUD_GATEWAY_IMAP_PORT=993
+ICLOUD_GATEWAY_IMAP_USERNAME=you@example.com
+ICLOUD_GATEWAY_IMAP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+ICLOUD_GATEWAY_IMAP_FOLDER=INBOX
+ICLOUD_GATEWAY_IMAP_JUNK_FOLDER=
+```
 
 ## 架构取舍
 
@@ -177,6 +196,6 @@ uv run python -m compileall -q icloud_gateway tests
 - 不保存或自动填写 Apple ID 密码、2FA 码、恢复密钥。
 - 不向普通使用者开放收件箱、邮件正文、Alias 列表或 iCloud 管理能力。
 - 不自动执行真实 HME Alias 生命周期操作；仅支持管理员显式选择最多 100 条后批量停用或永久删除。网关严格串行写入、逐条读取 Apple 状态确认并返回逐项结果；永久删除仅允许失活项且需要二次确认。
-- 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve，并遵守间隔、私有 API 限流与账户真实配额，状态不确定时不会盲目重试。
+- 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve。Apple 返回 `-41015` 时按开源同款逻辑冷却 30 分钟（`ICLOUD_GATEWAY_HME_CREATE_COOLDOWN_SECONDS=1800`）后自动续跑；远端写结果未知时仍停止自动重放并对账。
 - 不共享联动小铺正在运行的 Chromium 进程/profile。
 - 不保证 Apple Session 永不过期；过期后管理员通过网站中的同一个浏览器重新登录维护。

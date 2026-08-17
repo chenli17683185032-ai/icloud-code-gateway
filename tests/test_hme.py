@@ -10,6 +10,7 @@ from icloud_gateway.hme import (
     HmeClient,
     HmeError,
     HmeNetworkError,
+    HmeRateLimitedError,
     HmeSessionError,
     ICloudHmeSession,
     merge_set_cookie_headers,
@@ -150,6 +151,18 @@ def test_client_absorbs_rotated_cookie_for_the_next_request() -> None:
     assert "X-APPLE-WEBAUTH-USER=user-secret" in client.session.cookie
 
 
+def test_client_maps_apple_41015_to_rate_limited_error() -> None:
+    def requester(method, url, **kwargs):
+        return FakeResponse({"success": False, "errorCode": "-41015"})
+
+    client = HmeClient(session(), requester=requester)
+
+    with pytest.raises(HmeRateLimitedError) as excinfo:
+        client.generate_alias()
+    assert excinfo.value.code == "-41015"
+    assert excinfo.value.retry_after_seconds == 30 * 60
+
+
 def test_client_lists_and_creates_alias_using_generate_then_reserve() -> None:
     calls = []
 
@@ -186,6 +199,46 @@ def test_client_lists_and_creates_alias_using_generate_then_reserve() -> None:
         "label": "Person 7",
         "note": "sender bound",
     }
+
+
+def test_client_follows_paginated_hme_list() -> None:
+    calls = []
+    pages = [
+        FakeResponse(
+            {
+                "success": True,
+                "result": {
+                    "hmeEmails": [
+                        {"hme": "one@icloud.com", "anonymousId": "one", "isActive": True},
+                    ],
+                    "hasMore": True,
+                    "startFrom": 1,
+                },
+            }
+        ),
+        FakeResponse(
+            {
+                "success": True,
+                "result": {
+                    "hmeEmails": [
+                        {"hme": "two@icloud.com", "anonymousId": "two", "isActive": True},
+                    ],
+                    "hasMore": False,
+                },
+            }
+        ),
+    ]
+
+    def requester(method, url, **kwargs):
+        calls.append(url)
+        return pages.pop(0)
+
+    client = HmeClient(session(), requester=requester)
+
+    emails = [item["hme"] for item in client.list_aliases()]
+
+    assert emails == ["one@icloud.com", "two@icloud.com"]
+    assert "startFrom=1" in calls[1]
 
 
 def test_client_rejects_partial_alias_list_and_sends_lifecycle_payloads() -> None:

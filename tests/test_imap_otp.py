@@ -146,7 +146,11 @@ def config() -> ImapConfig:
 
 
 def reader(connection: FakeImap) -> ImapOtpReader:
-    return ImapOtpReader(config(), connection_factory=lambda _config, _timeout: connection)
+    return ImapOtpReader(
+        config(),
+        connection_factory=lambda _config, _timeout: connection,
+        reuse_connection=False,
+    )
 
 
 def test_reader_matches_exact_alias_and_ignores_other_alias() -> None:
@@ -804,6 +808,87 @@ def test_reader_prefers_grok_code_over_nearby_numeric_noise() -> None:
 
     assert result is not None
     assert result.code == "Q1W-E2R"
+
+
+def test_reader_public_policy_only_returns_gpt_and_grok_senders() -> None:
+    connection = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="111111",
+                    sender="hello@cursor.com",
+                    subject="Your Cursor verification code",
+                    body="Your verification code is 111111",
+                ),
+                NOW,
+            ),
+            "2": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="222222",
+                    sender="noreply@tm.openai.com",
+                    subject="Your ChatGPT verification code",
+                    body="Your verification code is 222222",
+                ),
+                NOW - 1,
+            ),
+        }
+    )
+
+    result = reader(connection).find_latest_code(
+        "target@icloud.com",
+        now_ts=NOW,
+        sender_policy="gpt_grok",
+    )
+
+    assert result is not None
+    assert result.code == "222222"
+
+    grok = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="A1B-2C3",
+                    sender="noreply@x.ai",
+                    subject="Your Grok verification code",
+                    body="Use this code to continue signing in to Grok.\n\nA1B-2C3",
+                ),
+                NOW,
+            )
+        }
+    )
+    grok_result = reader(grok).find_latest_code(
+        "target@icloud.com",
+        now_ts=NOW,
+        sender_policy="gpt_grok",
+    )
+    assert grok_result is not None
+    assert grok_result.code == "A1B-2C3"
+
+    cursor_only = FakeImap(
+        {
+            "1": (
+                raw_message(
+                    recipient="target@icloud.com",
+                    code="333333",
+                    sender="hello@cursor.com",
+                    subject="Your Cursor verification code",
+                    body="Your verification code is 333333",
+                ),
+                NOW,
+            )
+        }
+    )
+    assert (
+        reader(cursor_only).find_latest_code(
+            "target@icloud.com",
+            now_ts=NOW,
+            sender_policy="gpt_grok",
+        )
+        is None
+    )
 
 
 def test_reader_still_accepts_six_digit_codes_for_non_grok_mail() -> None:

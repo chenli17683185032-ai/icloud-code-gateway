@@ -114,6 +114,13 @@
             <span>导入 / 刷新</span>
           </button>
         </form>
+        <form method="post" action="/admin/tags/refresh">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描 QQ 邮箱，按开通/封号邮件更新 GPT、封号、活跃标签" {% if not imap.configured %}disabled{% endif %}>
+            <img src="/static/icons/mail.svg" alt="" aria-hidden="true">
+            <span>更新标签</span>
+          </button>
+        </form>
         {% if deployment_mode == 'control' %}
         <form method="post" action="/admin/edge/sync">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -145,16 +152,25 @@
       <div class="alias-header" role="row">
         <label class="checkbox-control" role="columnheader"><input id="select-visible-aliases" type="checkbox"><span class="sr-only">选择当前筛选可见项</span></label>
         <span role="columnheader">Alias</span>
+        <span role="columnheader">验证码</span>
         <span role="columnheader">标签</span>
         <span role="columnheader">密钥</span>
         <span role="columnheader">状态</span>
         <span role="columnheader">操作</span>
       </div>
       {% for alias in aliases %}
-      {% set custom_usage = alias.usage_label if alias.usage_label not in ['', 'gpt', 'grok'] else '' %}
+      {% set usage_tokens = alias.usage_label.split() if alias.usage_label else [] %}
+      {% set ns = namespace(custom_parts=[]) %}
+      {% for token in usage_tokens %}
+        {% if token not in ['gpt', 'grok', '封号', '活跃'] %}
+          {% set ns.custom_parts = ns.custom_parts + [token] %}
+        {% endif %}
+      {% endfor %}
+      {% set custom_usage = ns.custom_parts | join(' ') %}
       <article
         class="alias-row"
         role="row"
+        data-alias-id="{{ alias.id }}"
         data-alias-base-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}"
         data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }} {{ alias.usage_label }}"
       >
@@ -183,14 +199,26 @@
                 class="usage-choice"
                 type="button"
                 data-usage-value="gpt"
-                aria-pressed="{{ 'true' if alias.usage_label == 'gpt' else 'false' }}"
+                aria-pressed="{{ 'true' if 'gpt' in usage_tokens else 'false' }}"
               >GPT</button>
               <button
                 class="usage-choice"
                 type="button"
                 data-usage-value="grok"
-                aria-pressed="{{ 'true' if alias.usage_label == 'grok' else 'false' }}"
+                aria-pressed="{{ 'true' if 'grok' in usage_tokens else 'false' }}"
               >Grok</button>
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-value="封号"
+                aria-pressed="{{ 'true' if '封号' in usage_tokens else 'false' }}"
+              >封号</button>
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-value="活跃"
+                aria-pressed="{{ 'true' if '活跃' in usage_tokens else 'false' }}"
+              >活跃</button>
               <button
                 class="usage-choice"
                 type="button"
@@ -219,6 +247,9 @@
             </form>
             <span class="usage-feedback" aria-live="polite"></span>
           </div>
+        </div>
+        <div class="alias-code" role="cell" data-alias-id="{{ alias.id }}">
+          <span class="alias-code-empty muted-text">—</span>
         </div>
         <div class="alias-label" role="cell">{{ alias.label }}</div>
         <div class="alias-key" role="cell">
@@ -305,15 +336,21 @@
     <div class="section-toolbar admin-codes-toolbar">
       <div class="section-heading">
         <h2 id="admin-codes-title">验证码</h2>
-        <p>最近 5 分钟，覆盖全部已导入 Alias。</p>
+        <p>复制某个邮箱后只扫这一条，验证码显示在该行后面；“刷新验证码”可全量扫描。</p>
       </div>
-      <button class="secondary-button" id="refresh-admin-codes" type="button" {% if not imap.configured %}disabled{% endif %}>
-        <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
-        <span>刷新验证码</span>
-      </button>
+      <div class="toolbar-actions">
+        <label class="auto-refresh-control" for="auto-refresh-codes">
+          <input id="auto-refresh-codes" type="checkbox" {% if imap.configured %}checked{% endif %} {% if not imap.configured %}disabled{% endif %}>
+          <span>自动刷新</span>
+        </label>
+        <button class="secondary-button" id="refresh-admin-codes" type="button" {% if not imap.configured %}disabled{% endif %}>
+          <img src="/static/icons/refresh-cw.svg" alt="" aria-hidden="true">
+          <span>刷新验证码</span>
+        </button>
+      </div>
     </div>
     <p class="admin-codes-message" id="admin-codes-message" aria-live="polite">
-      {% if imap.configured %}尚未刷新。{% else %}请先配置 IMAP。{% endif %}
+      {% if imap.configured %}自动读取最近验证码…{% else %}请先配置 IMAP。{% endif %}
     </p>
     <div class="admin-codes-table" id="admin-codes-table" role="table" aria-label="最近验证码" hidden>
       <div class="admin-codes-header" role="row">

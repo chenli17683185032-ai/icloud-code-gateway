@@ -23,6 +23,7 @@ from icloud_gateway.security import hash_access_key
 from icloud_gateway.service import (
     GatewayBusyError,
     GatewayError,
+    GatewayNotAllowedError,
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
     GatewayRetryableError,
@@ -116,6 +117,7 @@ class FakeReader:
     recent_error = None
     checked = []
     recent_calls = []
+    last_kwargs = {}
 
     def __init__(self, config):
         self.config = config
@@ -124,8 +126,10 @@ class FakeReader:
         self.checked.append((self.config, timeout))
 
     def find_latest_code(self, alias, **kwargs):
-        self.last_alias = alias
-        self.last_kwargs = kwargs
+        type(self).last_alias = alias
+        type(self).last_kwargs = kwargs
+        if self.recent_error is not None:
+            raise self.recent_error
         return self.result
 
     def find_recent_codes(self, aliases, **kwargs):
@@ -147,12 +151,14 @@ def reset_fakes():
     FakeReader.recent_error = None
     FakeReader.checked = []
     FakeReader.recent_calls = []
+    FakeReader.last_kwargs = {}
 
 
 def service(tmp_path, *, limiter=None, sleeper=lambda _seconds: None) -> GatewayService:
     return GatewayService(
         settings(tmp_path),
         hme_client_factory=FakeHmeClient,
+        hme_session_refresher=lambda session: session,
         imap_reader_factory=FakeReader,
         rate_limiter=limiter,
         clock=lambda: NOW,
@@ -283,6 +289,74 @@ def test_remote_sync_preserves_local_configuration_and_revokes_missing_alias(tmp
     assert two_after["state"] == "inactive"
     assert two_after["has_access_key"] is False
     assert value.database.find_alias_by_access_key_hash(hash_access_key(issued.access_key)) is None
+
+
+def test_incomplete_remote_snapshot_does_not_deactivate_existing_aliases(tmp_path) -> None:
+    value = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": f"keep{index}@icloud.com", "anonymousId": f"keep{index}", "isActive": True}
+        for index in range(8)
+    ]
+    value.save_hme_session(hme_session())
+    FakeHmeClient.aliases = [
+        {"hme": "keep0@icloud.com", "anonymousId": "keep0", "isActive": True}
+    ]
+
+    value.sync_aliases()
+
+    states = {item["email"]: item["state"] for item in value.database.list_aliases()}
+    assert states["keep0@icloud.com"] == "active"
+    assert states["keep7@icloud.com"] == "active"
+    assert any(
+        event["event_type"] == "hme_sync" and event["outcome"] == "refused_incomplete"
+        for event in value.database.list_audit_events(limit=20)
+    )
+
+
+def test_ensure_remote_aliases_imports_new_emails_when_snapshot_is_stale(tmp_path) -> None:
+    value = service(tmp_path)
+    FakeHmeClient.aliases = [
+        {"hme": "old@icloud.com", "anonymousId": "old", "isActive": True}
+    ]
+    value.save_hme_session(hme_session())
+    with value.database.transaction() as connection:
+        connection.execute("UPDATE aliases SET last_synced_at = ?", ("2026-08-01T00:00:00.000Z",))
+    FakeHmeClient.aliases = [
+        {"hme": "old@icloud.com", "anonymousId": "old", "isActive": True},
+        {"hme": "new@icloud.com", "anonymousId": "new", "isActive": True},
+    ]
+
+    notice = value.ensure_remote_aliases()
+
+    emails = {item["email"] for item in value.database.list_aliases()}
+    assert notice == "sync_done"
+    assert emails == {"old@icloud.com", "new@icloud.com"}
+
+
+def test_refresh_usage_tags_applies_plan_and_ban_rules(tmp_path, monkeypatch) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    plan = value.database.upsert_alias(
+        email="plan@icloud.com",
+        remote_metadata={"anonymousId": "plan", "isActive": True},
+    )
+    banned = value.database.upsert_alias(
+        email="banned@icloud.com",
+        remote_metadata={"anonymousId": "banned", "isActive": True},
+    )
+
+    def fake_refresh(*, config, aliases, updater, **_kwargs):
+        assert config.host == "imap.example.com"
+        updater(plan["id"], "gpt 活跃")
+        updater(banned["id"], "gpt 封号")
+        return {"matched": 2, "updated": 2, "gpt_active": 1, "gpt_banned": 1, "scanned": 3, "classified": 2}
+
+    monkeypatch.setattr("icloud_gateway.service._refresh_usage_tags", fake_refresh)
+    stats = value.refresh_usage_tags()
+
+    assert stats["updated"] == 2
+    assert value.database.get_alias(plan["id"])["usage_label"] == "gpt 活跃"
+    assert value.database.get_alias(banned["id"])["usage_label"] == "gpt 封号"
 
 
 def test_create_aliases_issues_one_unique_key_per_alias(tmp_path) -> None:
@@ -447,6 +521,7 @@ def test_code_lookup_returns_only_code_and_timestamps(tmp_path) -> None:
     assert result.received_at == "2027-01-15T07:59:58Z"
     assert result.expires_at == "2027-01-15T08:04:58Z"
     assert not hasattr(result, "email")
+    assert FakeReader.last_kwargs["sender_policy"] == "gpt_grok"
 
 
 def test_admin_recent_codes_include_aliases_without_access_keys(tmp_path) -> None:
@@ -491,7 +566,7 @@ def test_admin_recent_codes_include_aliases_without_access_keys(tmp_path) -> Non
     assert result["truncated"] is False
     aliases, kwargs = FakeReader.recent_calls[-1]
     assert set(aliases) == {"unkeyed@icloud.com", "keyed@icloud.com"}
-    assert kwargs["max_age_seconds"] == 300
+    assert kwargs["max_age_seconds"] == 1800
     event = value.database.list_audit_events(limit=1)[0]
     assert event["event_type"] == "admin_code_scan"
     assert event["outcome"] == "found"
@@ -514,11 +589,12 @@ def test_admin_recent_codes_fail_closed_and_release_the_imap_slot(tmp_path) -> N
     assert event["event_type"] == "admin_code_scan"
     assert event["outcome"] == "imap_invalid"
     FakeReader.recent_error = None
-    assert value.admin_recent_codes() == {
-        "codes": [],
-        "scanned": 0,
-        "truncated": False,
-    }
+    result = value.admin_recent_codes()
+    assert result["codes"] == []
+    assert result["by_alias"] == {}
+    assert result["scanned"] == 0
+    assert result["truncated"] is False
+    assert result["scope"] == "single"
 
 
 def test_invalid_key_and_no_code_have_distinct_safe_states(tmp_path) -> None:
@@ -1161,3 +1237,83 @@ def test_key_dimension_rate_limit_does_not_depend_on_ip_limit(tmp_path) -> None:
     with pytest.raises(GatewayRateLimitedError) as caught:
         value.lookup_code(issued.access_key, client_ip="203.0.113.99")
     assert caught.value.retry_after == 60
+
+
+def test_admin_recent_codes_work_in_control_mode(tmp_path) -> None:
+    configured = replace(
+        settings(tmp_path),
+        deployment_mode="control",
+        control_plane_token="control-token-abcdefghijklmnop",
+        edge_base_url="https://edge.example.com",
+        edge_sync_enabled=False,
+    )
+    value = GatewayService(
+        configured,
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    configure_imap(value)
+    alias = value.database.upsert_alias(
+        email="control@icloud.com",
+        remote_metadata={"anonymousId": "control"},
+        label="Control",
+    )
+    FakeReader.result = OtpResult(
+        code="112233",
+        uid="7",
+        received_at=datetime.fromtimestamp(NOW - 3, tz=UTC),
+    )
+
+    result = value.admin_recent_codes()
+
+    assert result["scope"] == "single"
+    assert result["codes"][0]["code"] == "112233"
+    assert result["by_alias"][alias["id"]]["code"] == "112233"
+    with pytest.raises(GatewayNotAllowedError):
+        # public OTP remains disabled in control mode
+        value.lookup_code("icg_" + ("a" * 43), client_ip="127.0.0.1")
+
+
+def test_imap_bootstrap_from_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ICLOUD_GATEWAY_IMAP_USERNAME", "forwarding@example.com")
+    monkeypatch.setenv("ICLOUD_GATEWAY_IMAP_PASSWORD", "app-password")
+    monkeypatch.setenv("ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL", "forwarding@example.com")
+    monkeypatch.setenv("ICLOUD_GATEWAY_IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("ICLOUD_GATEWAY_IMAP_BOOTSTRAP_TEST", "0")
+    value = GatewayService(
+        settings(tmp_path),
+        imap_reader_factory=FakeReader,
+        start_maintenance=False,
+    )
+    config = value.get_imap_config()
+    assert config is not None
+    assert config.username == "forwarding@example.com"
+    assert config.host == "imap.example.com"
+
+
+def test_admin_recent_codes_single_alias_uses_latest_lookup(tmp_path) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    alias = value.database.upsert_alias(
+        email="focused@icloud.com",
+        remote_metadata={"anonymousId": "focused"},
+        label="Focused",
+    )
+    value.database.upsert_alias(
+        email="other@icloud.com",
+        remote_metadata={"anonymousId": "other"},
+        label="Other",
+    )
+    FakeReader.result = OtpResult(
+        code="778899",
+        uid="99",
+        received_at=datetime.fromtimestamp(NOW - 1, tz=UTC),
+    )
+    FakeReader.recent_batch = RecentOtpBatch(items=(), scanned=0, truncated=False)
+
+    result = value.admin_recent_codes(alias_ids=[alias["id"]])
+
+    assert result["scope"] == "single"
+    assert result["codes"][0]["code"] == "778899"
+    assert result["by_alias"][alias["id"]]["email"] == "focused@icloud.com"
+    assert FakeReader.recent_calls == []

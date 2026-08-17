@@ -65,7 +65,9 @@ def test_edge_mode_registers_alias_and_serves_public_code_mapping(tmp_path: Path
     assert bad.status_code == 401
 
     # public page exists for edge
-    assert client.get("/").status_code == 200
+    homepage = client.get("/")
+    assert homepage.status_code == 200
+    assert "仅 GPT / Grok" in homepage.text
 
     # lookup without IMAP is unavailable (not invalid_key)
     code = client.post("/api/code", json={"access_key": access_key})

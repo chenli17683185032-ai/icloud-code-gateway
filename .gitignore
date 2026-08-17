@@ -1,5 +1,8 @@
 .DS_Store
 .env
+*.env
+!.env.example
+icloud-control-plane.env
 .venv/
 .pytest_cache/
 .ruff_cache/

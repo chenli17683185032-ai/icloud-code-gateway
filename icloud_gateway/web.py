@@ -65,6 +65,7 @@ NOTICE_MESSAGES = {
     "alias_error": "Alias 配置未保存。",
     "edge_sync_empty": "云端同步完成：没有可推送的已签发密钥。",
     "edge_sync_error": "云端同步失败：请确认 edge sync 已启用且 Clash 代理可用。",
+    "tags_error": "标签更新失败：请确认 IMAP 已配置。",
 }
 
 
@@ -101,6 +102,16 @@ def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) ->
             f"云端同步失败：{fail} 个密钥推送失败，跳过 {skip} 个。"
             "请检查 Clash 代理与 control token。",
             "error",
+        )
+    if notice == "tags_done":
+        updated = _notice_int(params.get("updated"))
+        matched = _notice_int(params.get("matched"))
+        active = _notice_int(params.get("active"))
+        banned = _notice_int(params.get("banned"))
+        return (
+            f"标签已更新：匹配 {matched} 个账号，写入 {updated} 个"
+            f"（GPT 活跃 {active}，封号 {banned}）。",
+            "success",
         )
     message = NOTICE_MESSAGES.get(notice, "")
     kind = "error" if notice.endswith("error") or notice.endswith("failed") else "success"
@@ -524,10 +535,16 @@ def create_app(
         session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
+        auto_notice = ""
+        if not notice:
+            try:
+                auto_notice = await asyncio.to_thread(gateway.ensure_remote_aliases)
+            except Exception:
+                auto_notice = ""
         context = gateway.dashboard()
         context["capture"] = _capture_view(context["capture"])
         notice_params = {key: str(value) for key, value in request.query_params.multi_items()}
-        notice_message, notice_kind = _build_admin_notice(notice, notice_params)
+        notice_message, notice_kind = _build_admin_notice(notice or auto_notice, notice_params)
         context.update(
             {
                 "page_title": "iCloud 验证码网关",
@@ -659,6 +676,27 @@ def create_app(
         except (GatewayError, HmeError, HmeSessionError, DatabaseError):
             return _redirect_notice("sync_error")
         return _redirect_notice("sync_done")
+
+    @app.post("/admin/tags/refresh")
+    async def refresh_tags(request: Request):
+        session = _admin_session(request, session_codec, settings=settings)
+        if session is None:
+            return RedirectResponse("/admin/login", status_code=303)
+        form = await request.form()
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
+        try:
+            result = await asyncio.to_thread(gateway.refresh_usage_tags)
+        except (GatewayNotConfiguredError, ImapCredentialsError, ImapError):
+            return _redirect_notice("tags_error")
+        except Exception:
+            return _redirect_notice("tags_error")
+        return _redirect_notice(
+            "tags_done",
+            updated=int(result.get("updated") or 0),
+            matched=int(result.get("matched") or 0),
+            active=int(result.get("gpt_active") or 0),
+            banned=int(result.get("gpt_banned") or 0),
+        )
 
     @app.post("/admin/edge/sync")
     async def sync_edge(request: Request):
@@ -850,9 +888,20 @@ def create_app(
     @app.post("/admin/api/codes/recent")
     async def recent_admin_codes(request: Request):
         _require_admin_json(request, session_codec, settings=settings)
+        alias_ids: list[str] = []
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            raw_ids = body.get("alias_ids") or body.get("alias_id")
+            if isinstance(raw_ids, str):
+                alias_ids = [raw_ids]
+            elif isinstance(raw_ids, list):
+                alias_ids = [str(item) for item in raw_ids if str(item or "").strip()]
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(gateway.admin_recent_codes),
+                asyncio.to_thread(gateway.admin_recent_codes, alias_ids or None),
                 timeout=max(1, settings.otp_request_timeout_seconds) + 1,
             )
         except TimeoutError:
@@ -865,6 +914,8 @@ def create_app(
             )
         except GatewayNotConfiguredError:
             return JSONResponse({"status": "not_configured"}, status_code=503)
+        except NotFoundError:
+            return JSONResponse({"status": "not_found"}, status_code=404)
         except (GatewayError, DatabaseError):
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return {"status": "ok", **result}

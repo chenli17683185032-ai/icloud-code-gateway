@@ -33,7 +33,13 @@ def main() -> int:
     home = Path.home()
     runtime = home / ".icloud-code-gateway"
     data_dir = runtime / "data"
-    creds = home / "Desktop" / "云贝" / "服务器相关" / "icloud-control-plane.env"
+    creds_candidates = (
+        project / "icloud-control-plane.env",
+        project.parent / "icloud-control-plane.env",
+        home / "Desktop" / "鲨鱼工具库" / "iCloud管理工具" / "icloud-control-plane.env",
+        home / "Desktop" / "云贝" / "服务器相关" / "icloud-control-plane.env",
+    )
+    creds = next((path for path in creds_candidates if path.is_file()), creds_candidates[0])
     local_env = project / ".env"
     values = {}
     values.update(_load_env_file(local_env))

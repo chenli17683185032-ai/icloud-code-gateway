@@ -23,12 +23,21 @@
   const deleteMessage = document.querySelector("#delete-alias-message");
   const deleteSubmit = document.querySelector("#delete-alias-submit");
   const refreshCodesButton = document.querySelector("#refresh-admin-codes");
+  const autoRefreshCodes = document.querySelector("#auto-refresh-codes");
   const adminCodesMessage = document.querySelector("#admin-codes-message");
   const adminCodesTable = document.querySelector("#admin-codes-table");
   const adminCodesList = document.querySelector("#admin-codes-list");
   const adminCodesEmpty = document.querySelector("#admin-codes-empty");
   let modalReturnFocus = null;
   let deleteTarget = null;
+  let codesRefreshTimer = null;
+  let codesRefreshInFlight = false;
+  let focusedAliasId = "";
+  let focusedAliasEmail = "";
+  const CODES_REFRESH_MS = 2000;
+  // Each poll is a full QQ IMAP login + scan (~1s server-side); QQ throttles
+  // frequent logins, so pace like the public page (5s) instead of hammering.
+  const FOCUSED_POLL_MS = 5000;
 
   class AuthenticationRequiredError extends Error {}
 
@@ -97,11 +106,56 @@
     if (!copied) throw new Error("copy_failed");
   }
 
+  const CANONICAL_USAGE_TOKENS = {
+    gpt: "gpt",
+    grok: "grok",
+    封号: "封号",
+    活跃: "活跃",
+    banned: "封号",
+    ban: "封号",
+    active: "活跃",
+  };
+
+  function splitUsageTokens(value) {
+    const tokens = [];
+    const leftover = [];
+    String(value || "")
+      .replaceAll(",", " ")
+      .replaceAll("|", " ")
+      .split(/\s+/)
+      .forEach((piece) => {
+        const raw = String(piece || "").trim();
+        if (!raw) return;
+        const token = CANONICAL_USAGE_TOKENS[raw.toLocaleLowerCase()];
+        if (token) {
+          if (!tokens.includes(token)) tokens.push(token);
+          return;
+        }
+        leftover.push(raw);
+      });
+    const extra = leftover.join(" ").trim();
+    if (extra && !tokens.includes(extra)) tokens.push(extra);
+    return tokens;
+  }
+
   function usageKind(value) {
-    const normalized = String(value || "").trim().toLocaleLowerCase();
-    if (!normalized) return "empty";
-    if (normalized === "gpt" || normalized === "grok") return normalized;
+    const tokens = splitUsageTokens(value);
+    if (!tokens.length) return "empty";
+    if (tokens.length === 1 && (tokens[0] === "gpt" || tokens[0] === "grok")) {
+      return tokens[0];
+    }
     return "custom";
+  }
+
+  function composeUsage(existing, nextFixedToken) {
+    const tokens = splitUsageTokens(existing).filter(
+      (token) => token === "gpt" || token === "grok" || token === "封号" || token === "活跃",
+    );
+    if (tokens.includes(nextFixedToken)) {
+      return tokens.filter((token) => token !== nextFixedToken).join(" ");
+    }
+    tokens.push(nextFixedToken);
+    return tokens.join(" ");
   }
 
   function createCopyButton(value, label = "复制") {
@@ -243,12 +297,49 @@
     return `${parts.join("；")}。`;
   }
 
+  function formatCountdown(totalSeconds) {
+    const seconds = Math.max(0, Number(totalSeconds) || 0);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const rest = seconds % 60;
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+    }
+    return `${minutes}:${String(rest).padStart(2, "0")}`;
+  }
+
+  function jobProgressText(job) {
+    if (job.wait_reason === "rate_limited") {
+      const retryAfter = Number(job.retry_after_seconds || 0);
+      const code = job.cooldown_code || "-41015";
+      if (retryAfter > 0) {
+        return (
+          `Apple 限流 ${code}，已成功 ${job.succeeded}/${job.requested}。` +
+          `冷却中，约 ${formatCountdown(retryAfter)} 后自动继续` +
+          (job.resume_at ? `（至 ${job.resume_at}）` : "") +
+          "。"
+        );
+      }
+      return (
+        `Apple 限流 ${code}，已成功 ${job.succeeded}/${job.requested}。` +
+        `已关闭额外冷却，正在按串行间隔立即重试。`
+      );
+    }
+    if (String(job.error || "").includes("rate limited")) {
+      return (
+        `Apple 限流中：已成功 ${job.succeeded}/${job.requested}，` +
+        `正在继续重试剩余任务。`
+      );
+    }
+    return `任务进度 ${job.current}/${job.requested}，成功 ${job.succeeded}，失败 ${job.failed}。`;
+  }
+
   async function pollJob(jobId, messageElement) {
     while (true) {
       const job = await api(`/admin/api/jobs/${encodeURIComponent(jobId)}`);
       messageElement.textContent = terminalJobStatuses.has(job.status)
         ? jobSummary(job)
-        : `任务进度 ${job.current}/${job.requested}，成功 ${job.succeeded}，失败 ${job.failed}。`;
+        : jobProgressText(job);
       if (terminalJobStatuses.has(job.status)) return job;
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
@@ -309,11 +400,17 @@
   document.querySelectorAll(".alias-email-copy").forEach((button) => {
     button.addEventListener("click", async () => {
       const feedback = button.parentElement.querySelector(".alias-copy-feedback");
+      const row = button.closest(".alias-row");
+      const aliasId = row?.dataset.aliasId || "";
+      const email = button.dataset.copyEmail || "";
       try {
-        await writeClipboard(button.dataset.copyEmail || "");
+        await writeClipboard(email);
         feedback.textContent = "已复制";
       } catch (_error) {
         feedback.textContent = "复制失败";
+      }
+      if (aliasId) {
+        setFocusedAlias(aliasId, email, { pollNow: true });
       }
       window.setTimeout(() => {
         feedback.textContent = "";
@@ -323,19 +420,22 @@
 
   function applyUsageState(control, usageLabel) {
     const value = String(usageLabel || "").trim();
-    const kind = usageKind(value);
+    const tokens = splitUsageTokens(value);
+    const custom = tokens
+      .filter((token) => !["gpt", "grok", "封号", "活跃"].includes(token))
+      .join(" ");
     control.dataset.usageLabel = value;
     control.querySelectorAll(".usage-choice").forEach((choice) => {
-      const selected =
-        choice.dataset.usageValue === kind ||
-        (choice.hasAttribute("data-usage-custom") && kind === "custom");
+      const selected = choice.hasAttribute("data-usage-custom")
+        ? Boolean(custom)
+        : tokens.includes(choice.dataset.usageValue || "");
       choice.setAttribute("aria-pressed", selected ? "true" : "false");
     });
     const usageCurrent = control.querySelector(".usage-current");
-    usageCurrent.textContent = kind === "custom" ? value : "";
-    usageCurrent.hidden = kind !== "custom";
+    usageCurrent.textContent = custom;
+    usageCurrent.hidden = !custom;
     const customInput = control.querySelector(".usage-custom-input");
-    customInput.value = kind === "custom" ? value : "";
+    customInput.value = custom;
     control.querySelector(".usage-clear").disabled = !value;
     const row = control.closest(".alias-row");
     if (row) {
@@ -386,13 +486,15 @@
 
     control.querySelectorAll(".usage-choice[data-usage-value]").forEach((button) => {
       button.addEventListener("click", async () => {
-        const value = button.dataset.usageValue;
-        if (control.dataset.usageLabel === value) {
-          feedback.textContent = `已标记 ${button.textContent.trim()}。`;
-          return;
-        }
+        const token = button.dataset.usageValue;
+        const nextValue = composeUsage(control.dataset.usageLabel || "", token);
         customForm.hidden = true;
-        await persistUsage(control, value, `已标记 ${button.textContent.trim()}。`);
+        const added = splitUsageTokens(nextValue).includes(token);
+        await persistUsage(
+          control,
+          nextValue,
+          added ? `已标记 ${button.textContent.trim()}。` : `已取消 ${button.textContent.trim()}。`,
+        );
       });
     });
 
@@ -411,13 +513,17 @@
 
     customForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const value = customInput.value.trim();
-      if (!value || value.length > 80 || /[\r\n\u0000]/u.test(value)) {
+      const customValue = customInput.value.trim();
+      if (!customValue || customValue.length > 80 || /[\r\n\u0000]/u.test(customValue)) {
         feedback.textContent = "请输入 1–80 个字符且不含换行的用途。";
         customInput.focus();
         return;
       }
-      if (await persistUsage(control, value, "自定义用途已保存。")) {
+      const tokens = splitUsageTokens(control.dataset.usageLabel || "").filter((token) =>
+        ["gpt", "grok", "封号", "活跃"].includes(token),
+      );
+      tokens.push(customValue);
+      if (await persistUsage(control, tokens.join(" "), "自定义用途已保存。")) {
         customForm.hidden = true;
       }
     });
@@ -716,6 +822,102 @@
     if (adminCodesEmpty) adminCodesEmpty.hidden = true;
   }
 
+  function clearAliasRowCodes() {
+    document.querySelectorAll(".alias-code").forEach((cell) => {
+      cell.replaceChildren();
+      const empty = document.createElement("span");
+      empty.className = "alias-code-empty muted-text";
+      empty.textContent = "—";
+      cell.append(empty);
+    });
+  }
+
+  function renderOneAliasCode(aliasId, item, { clearOthers = false } = {}) {
+    document.querySelectorAll(".alias-code").forEach((cell) => {
+      const cellId = cell.dataset.aliasId || "";
+      if (cellId !== aliasId) {
+        if (clearOthers) {
+          cell.replaceChildren();
+          const empty = document.createElement("span");
+          empty.className = "alias-code-empty muted-text";
+          empty.textContent = "—";
+          cell.append(empty);
+        }
+        return;
+      }
+      cell.replaceChildren();
+      if (!item || !item.code) {
+        const empty = document.createElement("span");
+        empty.className = "alias-code-empty muted-text";
+        empty.textContent = "等待中…";
+        cell.append(empty);
+        return;
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "alias-code-content";
+      const code = document.createElement("code");
+      code.className = "alias-code-value";
+      code.textContent = item.code;
+      code.title = item.received_at_display
+        ? `收到于 ${item.received_at_display}`
+        : "最近验证码";
+      const copy = createCopyButton(item.code, "复制");
+      copy.classList.add("small-button");
+      wrap.append(code, copy);
+      if (item.received_at_display) {
+        const time = document.createElement("time");
+        time.className = "alias-code-time";
+        time.dateTime = item.received_at || "";
+        time.textContent = item.received_at_display;
+        wrap.append(time);
+      }
+      cell.append(wrap);
+      const row = cell.closest(".alias-row");
+      if (row) {
+        const base = row.dataset.aliasBaseSearch || "";
+        row.dataset.aliasSearch = `${base} ${item.code}`.trim();
+      }
+    });
+  }
+
+  function renderAliasRowCodes(byAlias, { replaceMissing = true } = {}) {
+    const map = byAlias && typeof byAlias === "object" ? byAlias : {};
+    if (focusedAliasId && map[focusedAliasId]) {
+      renderOneAliasCode(focusedAliasId, map[focusedAliasId], { clearOthers: false });
+      return;
+    }
+    document.querySelectorAll(".alias-code").forEach((cell) => {
+      const aliasId = cell.dataset.aliasId || "";
+      const item = map[aliasId];
+      if (!item || !item.code) {
+        if (!replaceMissing) return;
+        cell.replaceChildren();
+        const empty = document.createElement("span");
+        empty.className = "alias-code-empty muted-text";
+        empty.textContent = "—";
+        cell.append(empty);
+        return;
+      }
+      renderOneAliasCode(aliasId, item);
+    });
+  }
+
+  function setFocusedAlias(aliasId, email, { pollNow = false } = {}) {
+    focusedAliasId = String(aliasId || "");
+    focusedAliasEmail = String(email || "");
+    document.querySelectorAll(".alias-row").forEach((row) => {
+      row.classList.toggle("is-code-focus", row.dataset.aliasId === focusedAliasId);
+    });
+    if (adminCodesMessage && focusedAliasEmail) {
+      adminCodesMessage.textContent = `只监听：${focusedAliasEmail}`;
+    }
+    if (pollNow) {
+      refreshAdminCodes({ quiet: true, focusedOnly: true }).finally(scheduleCodesRefresh);
+    } else {
+      scheduleCodesRefresh();
+    }
+  }
+
   function renderAdminCodes(items) {
     items.forEach((item) => {
       const row = document.createElement("div");
@@ -752,23 +954,58 @@
     });
   }
 
-  refreshCodesButton?.addEventListener("click", async () => {
-    clearAdminCodes();
-    adminCodesMessage.textContent = "正在读取最近验证码…";
-    refreshCodesButton.disabled = true;
-    refreshCodesButton.classList.add("is-busy");
+  function imapCodesEnabled() {
+    return Boolean(refreshCodesButton) && !(autoRefreshCodes?.disabled);
+  }
+
+  async function refreshAdminCodes({ quiet = false, focusedOnly = false } = {}) {
+    if (!imapCodesEnabled() || !adminCodesMessage) return;
+    if (codesRefreshInFlight) return;
+    codesRefreshInFlight = true;
+    const useFocused = Boolean(focusedOnly || focusedAliasId);
+    if (!quiet) {
+      if (!useFocused) clearAdminCodes();
+      adminCodesMessage.textContent = useFocused
+        ? `正在读取 ${focusedAliasEmail || "当前邮箱"}…`
+        : "正在读取最近验证码…";
+    }
+    if (refreshCodesButton) {
+      refreshCodesButton.disabled = true;
+      refreshCodesButton.classList.add("is-busy");
+    }
     try {
-      const data = await api("/admin/api/codes/recent", { method: "POST" });
-      if (data.codes.length) {
-        renderAdminCodes(data.codes);
-        adminCodesTable.hidden = false;
-      } else {
-        adminCodesEmpty.hidden = false;
+      const payload =
+        useFocused && focusedAliasId ? { alias_ids: [focusedAliasId] } : {};
+      const data = await api("/admin/api/codes/recent", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      if (!useFocused) {
+        clearAdminCodes();
+        if (data.codes?.length) {
+          renderAdminCodes(data.codes);
+          if (adminCodesTable) adminCodesTable.hidden = false;
+          if (adminCodesEmpty) adminCodesEmpty.hidden = true;
+        } else if (adminCodesEmpty) {
+          adminCodesEmpty.hidden = false;
+        }
       }
-      const suffix = data.truncated ? "，结果已达到扫描上限" : "";
-      adminCodesMessage.textContent = `扫描 ${data.scanned} 封，找到 ${data.codes.length} 条${suffix}。`;
+      if (useFocused && focusedAliasId) {
+        const item = (data.by_alias || {})[focusedAliasId] || null;
+        renderOneAliasCode(focusedAliasId, item, { clearOthers: false });
+        if (item?.code) {
+          adminCodesMessage.textContent = `当前：${focusedAliasEmail} → ${item.code}`;
+        } else {
+          adminCodesMessage.textContent = `只监听：${focusedAliasEmail || focusedAliasId}（暂无）`;
+        }
+      } else {
+        renderAliasRowCodes(data.by_alias || {});
+        const suffix = data.truncated ? "，结果已达到扫描上限" : "";
+        adminCodesMessage.textContent = `扫描 ${data.scanned} 封，找到 ${data.codes?.length || 0} 条${suffix}。`;
+      }
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
+      if (!quiet && !useFocused) clearAliasRowCodes();
       adminCodesMessage.textContent =
         error.message === "not_configured"
           ? "IMAP 尚未配置。"
@@ -776,12 +1013,60 @@
             ? "IMAP 正忙，请稍后重试。"
             : "验证码读取失败，请稍后重试。";
     } finally {
-      refreshCodesButton.disabled = false;
-      refreshCodesButton.classList.remove("is-busy");
+      codesRefreshInFlight = false;
+      if (refreshCodesButton) {
+        refreshCodesButton.disabled = Boolean(autoRefreshCodes?.disabled);
+        refreshCodesButton.classList.remove("is-busy");
+      }
+    }
+  }
+
+  function scheduleCodesRefresh() {
+    if (codesRefreshTimer) {
+      window.clearTimeout(codesRefreshTimer);
+      codesRefreshTimer = null;
+    }
+    if (!autoRefreshCodes?.checked || autoRefreshCodes.disabled) return;
+    // Only auto-poll while a specific alias is focused; full scans stay manual.
+    if (!focusedAliasId) return;
+    codesRefreshTimer = window.setTimeout(async () => {
+      await refreshAdminCodes({ quiet: true, focusedOnly: true });
+      scheduleCodesRefresh();
+    }, FOCUSED_POLL_MS);
+  }
+
+  refreshCodesButton?.addEventListener("click", async () => {
+    // Manual refresh: if focused, only that one; otherwise full scan.
+    await refreshAdminCodes({ quiet: false, focusedOnly: Boolean(focusedAliasId) });
+    scheduleCodesRefresh();
+  });
+
+  autoRefreshCodes?.addEventListener("change", () => {
+    if (autoRefreshCodes.checked) {
+      if (focusedAliasId) {
+        refreshAdminCodes({ quiet: true, focusedOnly: true }).finally(scheduleCodesRefresh);
+      } else if (adminCodesMessage) {
+        adminCodesMessage.textContent = "请先复制某个邮箱；将只扫描这一条。";
+      }
+    } else if (codesRefreshTimer) {
+      window.clearTimeout(codesRefreshTimer);
+      codesRefreshTimer = null;
     }
   });
 
-  window.addEventListener("pagehide", clearAdminCodes);
+  // Do not auto full-scan on load (slow). Wait until the user copies one alias.
+  if (refreshCodesButton && !refreshCodesButton.disabled && adminCodesMessage) {
+    adminCodesMessage.textContent = "复制某个邮箱后，将只扫描并监听这一条验证码。";
+  }
+
+  window.addEventListener("pagehide", () => {
+    clearAdminCodes();
+    clearAliasRowCodes();
+    if (codesRefreshTimer) {
+      window.clearTimeout(codesRefreshTimer);
+      codesRefreshTimer = null;
+    }
+  });
 
   const capture = document.querySelector("#capture-status");
   async function refreshCapture() {
@@ -815,11 +1100,13 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      composeUsage,
       emailList,
       firstNonTerminalJob,
       jobCounts,
       jobSummary,
       limitedVisibleSelectionCount,
+      splitUsageTokens,
       standardParameterList,
       standardParameters,
       usageKind,

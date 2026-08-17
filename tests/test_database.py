@@ -380,13 +380,15 @@ def test_alias_usage_is_canonicalized_and_survives_remote_refresh(database) -> N
 
     assert alias["usage_label"] == ""
     assert database.update_alias_usage(alias["id"], " GPT ")["usage_label"] == "gpt"
+    assert database.update_alias_usage(alias["id"], "gpt 封号")["usage_label"] == "gpt 封号"
+    assert database.update_alias_usage(alias["id"], "gpt 活跃")["usage_label"] == "gpt 活跃"
 
     refreshed = database.sync_remote_alias(
         email="usage@icloud.com",
         remote_metadata={"anonymousId": "usage", "isActive": True, "label": "Remote"},
         synced_at="2026-08-08T12:00:00.000Z",
     )
-    assert refreshed["usage_label"] == "gpt"
+    assert refreshed["usage_label"] == "gpt 活跃"
 
     assert database.update_alias_usage(alias["id"], "内部工具")["usage_label"] == "内部工具"
     database.issue_access_key(alias["id"])

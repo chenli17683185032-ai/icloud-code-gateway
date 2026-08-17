@@ -127,6 +127,7 @@ def service(settings) -> GatewayService:
     return GatewayService(
         settings,
         hme_client_factory=FakeHmeClient,
+        hme_session_refresher=lambda session: session,
         imap_reader_factory=FakeImapReader,
         clock=lambda: NOW,
         sleeper=lambda _seconds: None,
@@ -241,6 +242,10 @@ def test_public_code_api_states_and_safe_response_contract(client, service) -> N
     invalid = client.post("/api/code", json={"access_key": "not-a-key"})
     assert invalid.status_code == 404
     assert invalid.json() == {"status": "invalid_key"}
+
+    homepage = client.get("/")
+    assert homepage.status_code == 200
+    assert "仅 GPT / Grok" in homepage.text
 
 
 def test_public_api_maps_rate_limit_unavailable_and_timeout(client, service, monkeypatch) -> None:
@@ -1305,11 +1310,14 @@ def test_admin_script_classifies_usage_values() -> None:
 const noop = () => {};
 global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
 global.window = {location: {origin: "https://example.test"}, addEventListener: noop};
-const {usageKind} = require(process.argv[1]);
+const {composeUsage, splitUsageTokens, usageKind} = require(process.argv[1]);
 if (usageKind("") !== "empty") process.exit(1);
 if (usageKind("gpt") !== "gpt") process.exit(2);
 if (usageKind("grok") !== "grok") process.exit(3);
 if (usageKind("内部工具") !== "custom") process.exit(4);
+if (splitUsageTokens("gpt 封号").join(" ") !== "gpt 封号") process.exit(5);
+if (composeUsage("gpt", "封号") !== "gpt 封号") process.exit(6);
+if (composeUsage("gpt 封号", "封号") !== "gpt") process.exit(7);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 
@@ -1462,3 +1470,39 @@ def test_admin_one_click_edge_sync_disabled_reports_error(settings, service) -> 
         assert "notice=edge_sync_error" in resp.headers["location"]
         body = client.get(resp.headers["location"])
         assert "云端同步失败" in body.text
+
+
+def test_admin_refresh_tags_button_and_notice(client, settings, service, monkeypatch) -> None:
+    service.configure_imap(
+        {
+            "forwarding_email": "forwarding@example.com",
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "forwarding@example.com",
+            "password": "app-password",
+            "folder": "INBOX",
+            "junk_folder": "",
+            "proxy": "",
+        },
+        test=False,
+    )
+    monkeypatch.setattr(
+        service,
+        "refresh_usage_tags",
+        lambda: {"matched": 3, "updated": 2, "gpt_active": 1, "gpt_banned": 1},
+    )
+    csrf = _login(client, settings)
+    page = client.get("/admin")
+    assert 'action="/admin/tags/refresh"' in page.text
+    assert "更新标签" in page.text
+    resp = client.post(
+        "/admin/tags/refresh",
+        data={"csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert "notice=tags_done" in location
+    done = client.get(location)
+    assert "标签已更新" in done.text
+    assert "写入 2 个" in done.text

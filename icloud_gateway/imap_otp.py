@@ -6,6 +6,7 @@ import html
 import imaplib
 import re
 import ssl
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Iterator, Sequence
@@ -39,6 +40,11 @@ _GROK_SENDER_RE = re.compile(
     r"(?:^|@|\.)(?:x\.ai|xai\.com|grok\.com|xai)\b|\bgrok\b",
     re.IGNORECASE,
 )
+_GPT_SENDER_RE = re.compile(
+    r"(?:^|@|\.)(?:openai\.com|chatgpt\.com|oaistatic\.com)\b|\bchatgpt\b",
+    re.IGNORECASE,
+)
+PUBLIC_OTP_SENDER_POLICY = "gpt_grok"
 _CODE_CONTEXT_RE = re.compile(
     r"\b(?:verification|verify|one[- ]time(?:[- ](?:password|code))?|otp|code|"
     r"passcode|security[- ]code|confirmation(?:[- ]code)?|"
@@ -169,6 +175,86 @@ class RecentOtpBatch:
 ConnectionFactory = Callable[[ImapConfig, float], Any]
 
 
+class ImapConnectionPool:
+    """Keep a short-lived logged-in IMAP connection warm for rapid polling.
+
+    QQ IMAP's connect+login alone is ~400-500ms. Reusing one connection for
+    a few seconds cuts single-alias OTP poll latency roughly in half.
+    """
+
+    def __init__(self, *, idle_seconds: float = 12.0, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.monotonic = monotonic
+        self._lock = threading.Lock()
+        self._connection: Any | None = None
+        self._key: tuple[str, int, str, str, str, str, str] | None = None
+        self._last_used = 0.0
+
+    @staticmethod
+    def _key_for(config: ImapConfig) -> tuple[str, int, str, str, str, str, str]:
+        return (
+            config.host,
+            int(config.port),
+            config.username,
+            config.password,
+            config.folder,
+            config.junk_folder,
+            config.proxy,
+        )
+
+    def acquire(self, config: ImapConfig, timeout: float, connection_factory: ConnectionFactory) -> Any:
+        key = self._key_for(config)
+        with self._lock:
+            if self._connection is not None and self._key == key:
+                age = self.monotonic() - self._last_used
+                if age <= self.idle_seconds:
+                    connection = self._connection
+                    self._connection = None
+                    return connection
+            self._discard_unlocked()
+        connection = connection_factory(config, max(1.0, min(float(timeout), 30.0)))
+        try:
+            status, _ = connection.login(config.username, config.password)
+        except imaplib.IMAP4.error as exc:
+            _logout(connection)
+            raise ImapCredentialsError("IMAP rejected login") from exc
+        except Exception as exc:
+            _logout(connection)
+            raise ImapError("IMAP login failed") from exc
+        if str(status).upper() != "OK":
+            _logout(connection)
+            raise ImapCredentialsError("IMAP rejected login")
+        return connection
+
+    def release(self, config: ImapConfig, connection: Any, *, healthy: bool) -> None:
+        if connection is None:
+            return
+        key = self._key_for(config)
+        with self._lock:
+            if not healthy or self._connection is not None:
+                _logout(connection)
+                if not healthy:
+                    self._discard_unlocked()
+                return
+            self._connection = connection
+            self._key = key
+            self._last_used = self.monotonic()
+
+    def close(self) -> None:
+        with self._lock:
+            self._discard_unlocked()
+
+    def _discard_unlocked(self) -> None:
+        if self._connection is not None:
+            _logout(self._connection)
+        self._connection = None
+        self._key = None
+        self._last_used = 0.0
+
+
+_SHARED_IMAP_POOL = ImapConnectionPool()
+
+
 class ImapOtpReader:
     def __init__(
         self,
@@ -177,22 +263,28 @@ class ImapOtpReader:
         connection_factory: ConnectionFactory | None = None,
         scan_limit: int = 120,
         monotonic: Callable[[], float] = time.monotonic,
+        connection_pool: ImapConnectionPool | None = None,
+        reuse_connection: bool = True,
     ) -> None:
         config.validate()
         self.config = config
         self.connection_factory = connection_factory or _create_imap_connection
         self.scan_limit = max(1, min(int(scan_limit), 500))
         self.monotonic = monotonic
+        self.connection_pool = connection_pool or _SHARED_IMAP_POOL
+        self.reuse_connection = bool(reuse_connection)
 
     def check(self, *, timeout: float = 15.0) -> None:
         bounded_timeout = max(1.0, min(float(timeout), 30.0))
         deadline = self.monotonic() + bounded_timeout
         connection = self._login(bounded_timeout)
+        healthy = False
         try:
             for folder in self.config.folders:
                 self._select_folder(connection, folder, deadline)
+            healthy = True
         finally:
-            _logout(connection)
+            self._release(connection, healthy=healthy)
 
     def find_latest_code(
         self,
@@ -202,6 +294,7 @@ class ImapOtpReader:
         max_age_seconds: int = 300,
         future_skew_seconds: int = 60,
         sender_filter: str = "",
+        sender_policy: str = "",
         timeout: float = 20.0,
     ) -> OtpResult | None:
         target = _normalize_email(alias)
@@ -212,6 +305,7 @@ class ImapOtpReader:
         connection = self._login(bounded_timeout)
         candidates: list[OtpResult] = []
         last_folder_error: ImapError | None = None
+        healthy = False
         try:
             folder_uids: list[tuple[str, list[str]]] = []
             for folder in self.config.folders:
@@ -249,6 +343,7 @@ class ImapOtpReader:
                         oldest=oldest,
                         newest=newest,
                         sender_filter=sender_filter,
+                        sender_policy=sender_policy,
                         deadline=deadline,
                     )
                 except ImapError as exc:
@@ -258,11 +353,12 @@ class ImapOtpReader:
                 completed_folders += 1
             if completed_folders == 0:
                 raise last_folder_error or ImapError("IMAP folder is unavailable")
+            healthy = True
             if not candidates:
                 return None
             return max(candidates, key=lambda item: (item.received_at, _uid_sort_key(item.uid)))
         finally:
-            _logout(connection)
+            self._release(connection, healthy=healthy)
 
     def find_recent_codes(
         self,
@@ -287,6 +383,7 @@ class ImapOtpReader:
         connection = self._login(bounded_timeout)
         candidates: list[RecentOtpResult] = []
         last_folder_error: ImapError | None = None
+        healthy = False
         try:
             folder_uids: list[tuple[str, list[str]]] = []
             for folder in self.config.folders:
@@ -359,13 +456,14 @@ class ImapOtpReader:
             if len(candidates) > bounded_results:
                 truncated = True
                 candidates = candidates[:bounded_results]
+            healthy = True
             return RecentOtpBatch(
                 items=tuple(candidates),
                 scanned=scanned,
                 truncated=truncated,
             )
         finally:
-            _logout(connection)
+            self._release(connection, healthy=healthy)
 
     def _latest_results_from_uids(
         self,
@@ -376,6 +474,7 @@ class ImapOtpReader:
         oldest: float,
         newest: float,
         sender_filter: str,
+        sender_policy: str = "",
         deadline: float,
     ) -> list[OtpResult]:
         candidates: list[OtpResult] = []
@@ -387,6 +486,8 @@ class ImapOtpReader:
             if not _message_matches_alias(message, target):
                 continue
             if sender_filter and not _message_matches_sender(message, sender_filter):
+                continue
+            if not _message_matches_sender_policy(message, sender_policy):
                 continue
             timestamp = internal_timestamp
             if timestamp is None:
@@ -415,6 +516,15 @@ class ImapOtpReader:
             raise ImapError("IMAP folder is unavailable")
 
     def _login(self, timeout: float) -> Any:
+        if self.reuse_connection:
+            try:
+                return self.connection_pool.acquire(
+                    self.config,
+                    timeout,
+                    self.connection_factory,
+                )
+            except (OSError, TimeoutError, socks.ProxyError) as exc:
+                raise ImapError("IMAP connection failed") from exc
         try:
             connection = self.connection_factory(self.config, max(1.0, min(float(timeout), 30.0)))
         except (OSError, TimeoutError, socks.ProxyError) as exc:
@@ -432,6 +542,14 @@ class ImapOtpReader:
             raise ImapCredentialsError("IMAP rejected login")
         return connection
 
+    def _release(self, connection: Any, *, healthy: bool) -> None:
+        if connection is None:
+            return
+        if self.reuse_connection:
+            self.connection_pool.release(self.config, connection, healthy=healthy)
+            return
+        _logout(connection)
+
     def _candidate_uids(
         self,
         connection: Any,
@@ -442,22 +560,34 @@ class ImapOtpReader:
     ) -> list[str]:
         matched: set[str] = set()
         window = list(self._window_terms(connection, oldest, now_ts - oldest))
-        combined = _recipient_search_terms(alias)
-        self._set_operation_timeout(connection, deadline)
-        status, data = self._search(connection, window + combined)
-        searched = status is not None and str(status).upper() == "OK"
-        if searched:
+        searched = False
+        # Fast path for common providers (QQ/iCloud): To + Delivered-To only.
+        for header in ("To", "Delivered-To", "X-Original-To"):
+            self._set_operation_timeout(connection, deadline)
+            status, data = self._search(connection, [*window, "HEADER", header, alias])
+            if status is None or str(status).upper() != "OK":
+                continue
+            searched = True
             matched.update(_uids_from_search(data))
-        else:
-            # Not every server accepts a deeply nested OR; fall back to one
-            # SEARCH per recipient header.
-            for header in RECIPIENT_HEADERS:
-                self._set_operation_timeout(connection, deadline)
-                status, data = self._search(connection, [*window, "HEADER", header, alias])
-                if status is None or str(status).upper() != "OK":
-                    continue
-                searched = True
+            if matched:
+                break
+        if not matched:
+            combined = _recipient_search_terms(alias)
+            self._set_operation_timeout(connection, deadline)
+            status, data = self._search(connection, window + combined)
+            searched = status is not None and str(status).upper() == "OK"
+            if searched:
                 matched.update(_uids_from_search(data))
+            else:
+                # Not every server accepts a deeply nested OR; fall back to one
+                # SEARCH per recipient header.
+                for header in RECIPIENT_HEADERS:
+                    self._set_operation_timeout(connection, deadline)
+                    status, data = self._search(connection, [*window, "HEADER", header, alias])
+                    if status is None or str(status).upper() != "OK":
+                        continue
+                    searched = True
+                    matched.update(_uids_from_search(data))
         if not matched:
             self._set_operation_timeout(connection, deadline)
             status, data = self._search(connection, window)
@@ -621,6 +751,16 @@ def _message_matches_alias(message: Message, alias: str) -> bool:
     return any(pattern.search(value) for value in values)
 
 
+def _message_matches_sender_policy(message: Message, sender_policy: str) -> bool:
+    policy = str(sender_policy or "").strip().casefold()
+    if not policy or policy in {"any", "all"}:
+        return True
+    if policy != PUBLIC_OTP_SENDER_POLICY:
+        raise ValueError("sender policy is invalid")
+    from_header = " ".join(str(value) for value in message.get_all("From", []))
+    return _is_gpt_sender(from_header) or _is_grok_sender(from_header)
+
+
 def _message_matches_sender(message: Message, sender_filter: str) -> bool:
     expected = str(sender_filter or "").strip().casefold()
     if not expected:
@@ -695,6 +835,14 @@ def _extract_message_code(message: Message) -> str:
     if not candidates:
         return ""
     return min(candidates)[-1]
+
+
+def _is_gpt_sender(from_header: str) -> bool:
+    return _GPT_SENDER_RE.search(from_header) is not None
+
+
+def _is_grok_sender(from_header: str) -> bool:
+    return _GROK_SENDER_RE.search(from_header) is not None
 
 
 def _is_grok_message(*, from_header: str, subject: str, body: str) -> bool:
@@ -889,10 +1037,12 @@ def _logout(connection: Any) -> None:
 
 __all__ = [
     "ImapConfig",
+    "ImapConnectionPool",
     "ImapCredentialsError",
     "ImapError",
     "ImapOtpReader",
     "OtpResult",
+    "PUBLIC_OTP_SENDER_POLICY",
     "RECIPIENT_HEADERS",
     "RecentOtpBatch",
     "RecentOtpResult",

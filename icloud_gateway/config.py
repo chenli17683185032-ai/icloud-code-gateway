@@ -74,11 +74,18 @@ class Settings:
     hme_freshness_seconds: int = 60 * 60
     hme_retry_max_seconds: int = 60 * 60
     alias_batch_limit: int = 100
+    # After Apple HME returns -41015, wait this long before continuing create jobs.
+    # Matches community tooling (hidemyemail-generator): about 30 minutes.
+    # 0 means no extra cooldown; keep retrying immediately with the normal throttle.
+    hme_create_cooldown_seconds: int = 30 * 60
     deployment_mode: Literal["full", "control", "edge"] = "full"
     control_plane_token: str = ""
     edge_base_url: str = ""
     edge_sync_enabled: bool = True
     edge_timeout_seconds: int = 20
+    # Control mode: periodically reconcile all active aliases/keys to the edge so a
+    # missed creation-time push heals itself. 0 disables the background loop.
+    edge_reconcile_seconds: int = 30 * 60
     # Local-only convenience: skip admin password UI/auth. Must never be enabled on
     # public edge/full deployments.
     admin_open: bool = False
@@ -188,12 +195,24 @@ class Settings:
             alias_batch_limit=_integer_environment(
                 "ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT", 100, minimum=1, maximum=100
             ),
+            hme_create_cooldown_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_HME_CREATE_COOLDOWN_SECONDS",
+                30 * 60,
+                minimum=0,
+                maximum=6 * 60 * 60,
+            ),
             deployment_mode=mode,  # type: ignore[arg-type]
             control_plane_token=control_plane_token,
             edge_base_url=edge_base_url,
             edge_sync_enabled=_boolean_environment("ICLOUD_GATEWAY_EDGE_SYNC_ENABLED", True),
             edge_timeout_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120
+            ),
+            edge_reconcile_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_EDGE_RECONCILE_SECONDS",
+                30 * 60,
+                minimum=0,
+                maximum=24 * 60 * 60,
             ),
             admin_open=admin_open,
         )

@@ -445,9 +445,10 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 
 ## 验证码格式支持
 
-- 通用：最近 5 分钟内的 6 位数字，要求验证语境（verification/验证码等）。
-- Grok / xAI：额外支持 `XXX-XXX` 字母数字码（如 `A1B-2C3`），优先识别来自 `x.ai` / `xai` / `grok` 的邮件；HTML 与纯文本均可。
-- 仍支持对 Alias 设置发件人过滤，例如 `@x.ai`。
+- 公开页 / `/api/code`：只返回 GPT 与 Grok 验证码。发件人须匹配 `openai.com` / `chatgpt.com` / `oaistatic.com`，或 `x.ai` / `xai.com` / `grok.com`。Cursor 及其他来源对用户显示为等待。
+- 管理页取码不受该白名单限制，仍可读全部验证码。
+- Grok / xAI：额外支持 `XXX-XXX` 字母数字码（如 `A1B-2C3`）；HTML 与纯文本均可。
+- 仍支持对 Alias 设置发件人过滤，例如 `@x.ai`；公开白名单与 Alias 过滤同时生效。
 
 ## 运维记录 · 2026-08-03 Grok 验证码支持上线
 
@@ -457,6 +458,18 @@ ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 - 服务器验收：容器内提取 `A1B-2C3` 成功，通用 6 位 `777777` 仍成功。
 - 回滚目录：`/opt/new-api/icloud-code-gateway/backups/grok-otp-20260803T075144Z-ebd0638`
 - 镜像回滚标签：`icloud-code-gateway-app:rollback-pre-grok-otp-20260803T075144Z`
+
+## 运维记录 · 2026-08-17 创建同步闭环修复 + 云端 Junk 扫描
+
+- 事故：云端 7 天内 173 次 `invalid_key`。根因是批量创建任务用 `database.issue_access_key` 直接落库，从不推送云端；手动“同步云端”又跳过无密钥 Alias。实测云端缺 30 个本地 Alias（含 5 个已签发密钥）。
+- 修复（本地 control，无需改云端代码）：
+  1. `jobs.py` 创建成功后在 HME 锁外立即 `_push_alias_to_edge`（upsert 带 key），失败只审计不影响本地结果。
+  2. `push_all_access_keys_to_edge` 重写：包含无密钥活跃 Alias（云端保留既有 key）、8 线程并行、首个请求网络失败时快速中止。444 个 Alias 实测 21~26 秒推完（原串行且遗漏）。
+  3. 新增 30 分钟自动对账线程（`ICLOUD_GATEWAY_EDGE_RECONCILE_SECONDS`，0 关闭），启动后 30 秒先跑一次。
+- 云端配置变更：edge IMAP 配置补 `junk_folder=Junk`（`configure_imap` 只读校验通过后保存）。原公开取码只扫 INBOX，QQ 常把 HME 转发投进 Junk，导致“本地能看到码、公开页暂无验证码”。
+- 管理页降频：聚焦轮询 800ms→5s（`admin.js`），找到验证码后服务端 4 秒正缓存。原每 2 秒一次完整 QQ IMAP 登录扫描（实测 7.3 分钟 200 次），历史 2607 次 `admin_code_scan=imap_error` 与 QQ 限流相符。
+- 验收：修复后云端 469 个 Alias，本地活跃 Alias 0 缺失、密钥哈希 0 不一致；夜间自动对账连续 8+ 次 444/0 失败；新建 5 项批任务逐项 Apple generate 0.9~1.4s、reserve 0.7~1.5s、创建后推送均 HTTP 200，新密钥即时可在公开页使用。
+- 附带：`scripts/sync-local-keys-to-edge.py` 与 `连接云贝服务器.command` 的旧“桌面/云贝”路径已改为“鲨鱼工具库”现路径（带回退）。
 
 ## 运维记录 · 2026-08-03 云端 edge + 本地 control 落地
 
