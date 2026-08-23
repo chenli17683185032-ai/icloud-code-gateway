@@ -133,7 +133,7 @@
         {% endif %}
         <form method="post" action="/admin/tags/refresh">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描 QQ 邮箱，按开通/封号邮件更新 GPT、封号、活跃标签" {% if not imap.configured %}disabled{% endif %}>
+          <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描邮箱：收到过 OpenAI 邮件即标记已使用，开通标记活跃，停用标记封号" {% if not imap.configured %}disabled{% endif %}>
             <img src="/static/icons/mail.svg" alt="" aria-hidden="true">
             <span>更新标签</span>
           </button>
@@ -179,7 +179,7 @@
       {% set usage_tokens = alias.usage_label.split() if alias.usage_label else [] %}
       {% set ns = namespace(custom_parts=[]) %}
       {% for token in usage_tokens %}
-        {% if token not in ['gpt', 'grok', '封号', '活跃'] %}
+        {% if token not in ['gpt', 'grok', '封号', '活跃', '已使用'] %}
           {% set ns.custom_parts = ns.custom_parts + [token] %}
         {% endif %}
       {% endfor %}
@@ -236,6 +236,12 @@
                 data-usage-value="活跃"
                 aria-pressed="{{ 'true' if '活跃' in usage_tokens else 'false' }}"
               >活跃</button>
+              <button
+                class="usage-choice"
+                type="button"
+                data-usage-value="已使用"
+                aria-pressed="{{ 'true' if '已使用' in usage_tokens else 'false' }}"
+              >已使用</button>
               <button
                 class="usage-choice"
                 type="button"

@@ -12,6 +12,7 @@ from .database import _clean_usage_label
 from .imap_otp import (
     RECIPIENT_HEADERS,
     _create_imap_connection,
+    _is_gpt_sender,
     _mailbox_argument,
     _message_body,
     _messages_from_fetch,
@@ -49,25 +50,41 @@ _HEADER_FIELDS = (
 )
 _HEADER_BATCH = 60
 _BODY_BATCH = 20
+# Every OpenAI mail now carries a signal, so the body pass can no longer be
+# assumed small. Bound it per folder and report the remainder rather than
+# letting one click sit on the mailbox for minutes.
+_BODY_FETCH_LIMIT = 400
 
 ConnectionFactory = Callable[..., Any]
 
 
-def merge_usage(existing: str, *, plan: bool, banned: bool) -> str:
+def merge_usage(existing: str, *, plan: bool, banned: bool, used: bool = False) -> str:
     tokens = set(_clean_usage_label(existing).split()) if existing else set()
+    # The three account states are mutually exclusive, so clear the two that
+    # can be superseded before deciding which one applies now.
     tokens.discard("活跃")
-    if plan:
+    tokens.discard("已使用")
+    if plan or banned or used:
         tokens.add("gpt")
     if banned:
         tokens.add("封号")
     elif plan:
         tokens.add("活跃")
+    elif used:
+        tokens.add("已使用")
     return _clean_usage_label(" ".join(sorted(tokens)))
 
 
 def classify_message(message: Message) -> set[str]:
     subject = _decode_header(str(message.get("Subject") or "")).casefold()
     kinds: set[str] = set()
+    from_header = " ".join(str(value) for value in message.get_all("From", []))
+    if _is_gpt_sender(from_header):
+        # Any mail from OpenAI means the alias was used to register, even if
+        # the account never subscribed. Signup and verification-code mail is
+        # the permanent record of that; the audit log only keeps seven days,
+        # and matching on subjects alone misses every state we did not list.
+        kinds.add("used")
     if any(hint in subject for hint in PLAN_SUBJECTS):
         kinds.add("plan")
     if any(hint in subject for hint in BAN_SUBJECTS):
@@ -98,17 +115,21 @@ def scan_usage_hits(
     connection: imaplib.IMAP4,
     folders: tuple[str, ...] | list[str],
     known: set[str],
-) -> tuple[dict[str, set[str]], int, int]:
+) -> tuple[dict[str, set[str]], int, int, int]:
     combined: dict[str, set[str]] = {}
     scanned = 0
     classified = 0
+    deferred = 0
     for folder in folders:
-        hits, folder_scanned, folder_classified = _scan_folder(connection, folder, known)
+        hits, folder_scanned, folder_classified, folder_deferred = _scan_folder(
+            connection, folder, known
+        )
         scanned += folder_scanned
         classified += folder_classified
+        deferred += folder_deferred
         for address, kinds in hits.items():
             combined.setdefault(address, set()).update(kinds)
-    return combined, scanned, classified
+    return combined, scanned, classified, deferred
 
 
 def apply_usage_hits(
@@ -120,6 +141,7 @@ def apply_usage_hits(
     updated = 0
     plan_only = 0
     banned = 0
+    used_only = 0
     for address, kinds in hits.items():
         alias = by_email.get(address)
         if alias is None:
@@ -128,6 +150,7 @@ def apply_usage_hits(
             str(alias.get("usage_label") or ""),
             plan="plan" in kinds,
             banned="ban" in kinds,
+            used="used" in kinds,
         )
         if next_label == str(alias.get("usage_label") or ""):
             continue
@@ -137,11 +160,14 @@ def apply_usage_hits(
             banned += 1
         elif "plan" in kinds:
             plan_only += 1
+        elif "used" in kinds:
+            used_only += 1
     return {
         "matched": len(hits),
         "updated": updated,
         "gpt_active": plan_only,
         "gpt_banned": banned,
+        "gpt_used": used_only,
     }
 
 
@@ -161,13 +187,16 @@ def refresh_usage_tags(
         if str(status).upper() != "OK":
             raise RuntimeError("IMAP login failed")
         # scan_folders, not folders: QQ files a lot of this mail into Junk.
-        hits, scanned, classified = scan_usage_hits(connection, config.scan_folders, known)
+        hits, scanned, classified, deferred = scan_usage_hits(
+            connection, config.scan_folders, known
+        )
     finally:
         with suppress(Exception):
             connection.logout()
     stats = apply_usage_hits(aliases, hits, updater)
     stats["scanned"] = scanned
     stats["classified"] = classified
+    stats["deferred"] = deferred
     return stats
 
 
@@ -245,7 +274,10 @@ def _scan_folder(
             else:
                 needs_body[uid] = kinds
 
-    pending = list(needs_body)
+    # Newest first: a truncated pass should keep the most recent accounts.
+    pending = sorted(needs_body, key=lambda uid: int(uid) if uid.isdigit() else 0, reverse=True)
+    deferred = max(0, len(pending) - _BODY_FETCH_LIMIT)
+    pending = pending[:_BODY_FETCH_LIMIT]
     for start in range(0, len(pending), _BODY_BATCH):
         chunk = pending[start : start + _BODY_BATCH]
         for uid, message in _fetch_messages(connection, chunk, "(UID BODY.PEEK[])").items():
@@ -255,7 +287,7 @@ def _scan_folder(
             for address in extract_hidden_emails(message, known):
                 hits.setdefault(address, set()).update(kinds)
 
-    return hits, scanned, classified
+    return hits, scanned, classified, deferred
 
 
 __all__ = [

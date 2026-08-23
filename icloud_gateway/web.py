@@ -112,13 +112,16 @@ def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) ->
         banned = _notice_int(params.get("banned"))
         scanned = _notice_int(params.get("scanned"))
         classified = _notice_int(params.get("classified"))
+        used = _notice_int(params.get("used"))
+        deferred = _notice_int(params.get("deferred"))
         # Without the scan counts there is no way to tell "the mailbox only
         # holds this many accounts" from "the sweep is missing mail", which is
         # exactly the question a zero-write result raises.
+        tail = f"，另有 {deferred} 封超出本次正文抓取上限，可再点一次继续" if deferred else ""
         return (
-            f"标签已更新：扫描 {scanned} 封邮件，识别 {classified} 封开通/封号通知，"
+            f"标签已更新：扫描 {scanned} 封邮件，识别 {classified} 封 GPT 邮件，"
             f"匹配 {matched} 个账号，写入 {updated} 个"
-            f"（GPT 活跃 {active}，封号 {banned}）。",
+            f"（活跃 {active}，封号 {banned}，已使用 {used}）{tail}。",
             "success",
         )
     message = NOTICE_MESSAGES.get(notice, "")
@@ -761,6 +764,8 @@ def create_app(
             banned=int(result.get("gpt_banned") or 0),
             scanned=int(result.get("scanned") or 0),
             classified=int(result.get("classified") or 0),
+            used=int(result.get("gpt_used") or 0),
+            deferred=int(result.get("deferred") or 0),
         )
 
     @app.post("/admin/edge/sync")

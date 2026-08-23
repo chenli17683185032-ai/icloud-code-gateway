@@ -145,9 +145,11 @@
     grok: "grok",
     封号: "封号",
     活跃: "活跃",
+    已使用: "已使用",
     banned: "封号",
     ban: "封号",
     active: "活跃",
+    used: "已使用",
   };
 
   function splitUsageTokens(value) {
@@ -183,7 +185,12 @@
 
   function composeUsage(existing, nextFixedToken) {
     const tokens = splitUsageTokens(existing).filter(
-      (token) => token === "gpt" || token === "grok" || token === "封号" || token === "活跃",
+      (token) =>
+        token === "gpt" ||
+        token === "grok" ||
+        token === "封号" ||
+        token === "活跃" ||
+        token === "已使用",
     );
     if (tokens.includes(nextFixedToken)) {
       return tokens.filter((token) => token !== nextFixedToken).join(" ");
@@ -462,7 +469,7 @@
     const value = String(usageLabel || "").trim();
     const tokens = splitUsageTokens(value);
     const custom = tokens
-      .filter((token) => !["gpt", "grok", "封号", "活跃"].includes(token))
+      .filter((token) => !["gpt", "grok", "封号", "活跃", "已使用"].includes(token))
       .join(" ");
     control.dataset.usageLabel = value;
     control.querySelectorAll(".usage-choice").forEach((choice) => {
@@ -561,7 +568,7 @@
         return;
       }
       const tokens = splitUsageTokens(control.dataset.usageLabel || "").filter((token) =>
-        ["gpt", "grok", "封号", "活跃"].includes(token),
+        ["gpt", "grok", "封号", "活跃", "已使用"].includes(token),
       );
       tokens.push(customValue);
       if (await persistUsage(control, tokens.join(" "), "自定义用途已保存。")) {

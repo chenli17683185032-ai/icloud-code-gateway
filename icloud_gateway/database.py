@@ -92,9 +92,11 @@ _CANONICAL_USAGE_TOKENS = {
     "grok": "grok",
     "封号": "封号",
     "活跃": "活跃",
+    "已使用": "已使用",
     "banned": "封号",
     "ban": "封号",
     "active": "活跃",
+    "used": "已使用",
 }
 
 
