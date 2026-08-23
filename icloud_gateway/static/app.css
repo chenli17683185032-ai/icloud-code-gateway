@@ -725,6 +725,36 @@ a:focus-visible {
   font-size: 12.5px;
 }
 
+.action-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 60;
+  max-width: min(90vw, 520px);
+  padding: 13px 20px;
+  border-radius: var(--radius-pill);
+  background: var(--text);
+  color: var(--bg);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  box-shadow: var(--shadow-panel);
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.action-toast.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.action-toast[data-kind="error"] {
+  background: var(--danger);
+  color: #ffffff;
+}
+
 .brand-tag {
   margin-left: auto;
   padding: 4px 10px;

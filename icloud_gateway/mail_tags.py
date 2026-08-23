@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import email
 import imaplib
 import re
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from email.header import decode_header, make_header
 from email.message import Message
-from email.policy import default
 from typing import Any
 
 from .database import _clean_usage_label
-from .imap_otp import RECIPIENT_HEADERS, _create_imap_connection, _mailbox_argument
+from .imap_otp import (
+    RECIPIENT_HEADERS,
+    _create_imap_connection,
+    _mailbox_argument,
+    _message_body,
+    _messages_from_fetch,
+)
 
 PLAN_SUBJECTS = (
     "chatgpt - your new plan",
@@ -30,6 +35,20 @@ _SEARCH_QUERIES = (
     ("SUBJECT", "OpenAI - Access Deactivated"),
     ("SUBJECT", "OpenAI API - Access Deactivated"),
 )
+# A server-side SUBJECT match only works if the server decodes MIME-encoded
+# headers, which is not guaranteed and silently drops mail when it does not.
+# Sweeping the sender finds the same messages either way; classification still
+# happens locally against the decoded subject.
+_SENDER_QUERIES = (
+    ("FROM", "openai.com"),
+)
+_HEADER_FIELDS = (
+    "(UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DELIVERED-TO X-ORIGINAL-TO"
+    " ENVELOPE-TO RESENT-TO X-ENVELOPE-TO X-APPLE-FORWARD-TO"
+    " X-APPLE-ORIGINAL-RECIPIENT)])"
+)
+_HEADER_BATCH = 60
+_BODY_BATCH = 20
 
 ConnectionFactory = Callable[..., Any]
 
@@ -61,6 +80,12 @@ def extract_hidden_emails(message: Message, known: set[str]) -> set[str]:
     for name in RECIPIENT_HEADERS:
         values.extend(str(value) for value in message.get_all(name, []))
     values.append(str(message.get("Subject") or ""))
+    # An iCloud forward often carries the alias only in the body, so a
+    # header-only scan silently skipped those accounts. Empty for the
+    # header-only fetch pass, which keeps that pass cheap.
+    body = _message_body(message)
+    if body:
+        values.append(body)
     found: set[str] = set()
     for match in HIDDEN_EMAIL_RE.findall(" ".join(values)):
         address = match.strip().casefold()
@@ -135,12 +160,11 @@ def refresh_usage_tags(
         status, _ = connection.login(config.username, config.password)
         if str(status).upper() != "OK":
             raise RuntimeError("IMAP login failed")
-        hits, scanned, classified = scan_usage_hits(connection, config.folders, known)
+        # scan_folders, not folders: QQ files a lot of this mail into Junk.
+        hits, scanned, classified = scan_usage_hits(connection, config.scan_folders, known)
     finally:
-        try:
+        with suppress(Exception):
             connection.logout()
-        except Exception:
-            pass
     stats = apply_usage_hits(aliases, hits, updater)
     stats["scanned"] = scanned
     stats["classified"] = classified
@@ -166,6 +190,23 @@ def _search_all(connection: imaplib.IMAP4, terms: list[str]) -> list[str]:
     return [token.decode("ascii") for token in blob.split() if token]
 
 
+def _fetch_messages(
+    connection: imaplib.IMAP4,
+    uids: list[str],
+    spec: str,
+) -> dict[str, Message]:
+    if not uids:
+        return {}
+    try:
+        status, data = connection.uid("FETCH", ",".join(uids), spec)
+    except Exception:
+        return {}
+    if str(status).upper() != "OK" or not data:
+        return {}
+    parsed = _messages_from_fetch(data, fallback_uid=uids[0] if len(uids) == 1 else "")
+    return {uid: message for uid, (message, _internal) in parsed.items()}
+
+
 def _scan_folder(
     connection: imaplib.IMAP4,
     folder: str,
@@ -176,38 +217,44 @@ def _scan_folder(
         raise RuntimeError(f"cannot select folder {folder}")
     uids: list[str] = []
     seen: set[str] = set()
-    for key, value in _SEARCH_QUERIES:
+    for key, value in (*_SEARCH_QUERIES, *_SENDER_QUERIES):
         for uid in _search_all(connection, [key, value]):
             if uid not in seen:
                 seen.add(uid)
                 uids.append(uid)
+
     hits: dict[str, set[str]] = {}
     classified = 0
     scanned = 0
-    batch = 40
-    for start in range(0, len(uids), batch):
-        chunk = uids[start : start + batch]
-        status, data = connection.uid(
-            "FETCH",
-            ",".join(chunk),
-            "(UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DELIVERED-TO X-ORIGINAL-TO ENVELOPE-TO RESENT-TO X-ENVELOPE-TO X-APPLE-FORWARD-TO X-APPLE-ORIGINAL-RECIPIENT)])",
-        )
-        if str(status).upper() != "OK" or not data:
-            continue
-        for item in data:
-            if not isinstance(item, tuple) or len(item) < 2:
-                continue
-            raw = item[1]
-            if not isinstance(raw, (bytes, bytearray)):
-                continue
+    # Messages that classify but whose alias was not in any header. Their body
+    # is fetched in a second pass so the cheap header sweep stays cheap.
+    needs_body: dict[str, set[str]] = {}
+
+    for start in range(0, len(uids), _HEADER_BATCH):
+        chunk = uids[start : start + _HEADER_BATCH]
+        for uid, message in _fetch_messages(connection, chunk, _HEADER_FIELDS).items():
             scanned += 1
-            message = email.message_from_bytes(bytes(raw), policy=default)
             kinds = classify_message(message)
             if not kinds:
                 continue
             classified += 1
+            found = extract_hidden_emails(message, known)
+            if found:
+                for address in found:
+                    hits.setdefault(address, set()).update(kinds)
+            else:
+                needs_body[uid] = kinds
+
+    pending = list(needs_body)
+    for start in range(0, len(pending), _BODY_BATCH):
+        chunk = pending[start : start + _BODY_BATCH]
+        for uid, message in _fetch_messages(connection, chunk, "(UID BODY.PEEK[])").items():
+            kinds = needs_body.get(uid)
+            if not kinds:
+                continue
             for address in extract_hidden_emails(message, known):
                 hits.setdefault(address, set()).update(kinds)
+
     return hits, scanned, classified
 
 

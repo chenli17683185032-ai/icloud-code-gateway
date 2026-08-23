@@ -66,6 +66,32 @@
     return data;
   }
 
+  // Row actions have no message slot next to them, and window.alert() blocks
+  // the page and reads like a browser fault. One live region reports the
+  // outcome of every JSON action instead.
+  let toastTimer = null;
+  function toast(message, kind = "success") {
+    let host = document.querySelector("#action-toast");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "action-toast";
+      host.className = "action-toast";
+      host.setAttribute("role", "status");
+      host.setAttribute("aria-live", "polite");
+      document.body.append(host);
+    }
+    host.textContent = message;
+    host.dataset.kind = kind;
+    host.classList.add("is-visible");
+    if (toastTimer) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => host.classList.remove("is-visible"), 4200);
+  }
+
+  function reloadAfterToast(message) {
+    toast(message, "success");
+    window.setTimeout(() => window.location.reload(), 900);
+  }
+
   function emailList(items) {
     return items.map((item) => item.email).join("\n");
   }
@@ -367,10 +393,17 @@
     const summary = jobSummary(job);
     if (successfulKeys.length) {
       openModal(successfulKeys, summary);
-    } else {
-      messageElement.textContent = summary;
-      if (job.status !== "needs_reconcile") window.location.reload();
+      return;
     }
+    messageElement.textContent = summary;
+    if (job.status !== "needs_reconcile") {
+      reloadAfterToast(summary);
+      return;
+    }
+    // A reconcile job deliberately does not reload, so the controls have to be
+    // handed back or the toolbar stays dead until a manual refresh.
+    toast(summary, "error");
+    document.querySelectorAll(".bulk-action").forEach((item) => (item.disabled = false));
   }
 
   createForm?.addEventListener("submit", async (event) => {
@@ -552,7 +585,12 @@
         openModal([data], "密钥已签发，可在 Alias 列表再次查看。");
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
-        window.alert("密钥签发失败。");
+        toast(
+          error.message === "edge_sync_error"
+            ? "密钥已在本地签发，但同步云端失败，请稍后用「同步到云端」重试。"
+            : "密钥签发失败。",
+          "error",
+        );
         button.disabled = false;
       }
     });
@@ -569,10 +607,11 @@
         openModal([data], "当前有效密钥。");
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
-        window.alert(
+        toast(
           error.message === "conflict"
             ? "该密钥由旧版本签发，轮换后即可查看。"
             : "密钥读取失败。",
+          "error",
         );
         button.disabled = false;
       }
@@ -587,10 +626,10 @@
         await api(`/admin/api/aliases/${button.dataset.aliasId}/key`, {
           method: "DELETE",
         });
-        window.location.reload();
+        reloadAfterToast("密钥已撤销，旧密钥立即失效。");
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
-        window.alert("密钥撤销失败。");
+        toast("密钥撤销失败。", "error");
         button.disabled = false;
       }
     });
@@ -612,10 +651,10 @@
           method: "POST",
           body: JSON.stringify({ confirmed: true }),
         });
-        window.location.reload();
+        reloadAfterToast(`${email} 已在 iCloud 停用，密钥已撤销。`);
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
-        window.alert("Alias 停用失败，本地状态未改变。请刷新后重试。");
+        toast("Alias 停用失败，本地状态未改变。请刷新后重试。", "error");
         button.disabled = false;
       }
     });
@@ -631,10 +670,10 @@
           method: "POST",
           body: JSON.stringify({ confirmed: true }),
         });
-        window.location.reload();
+        reloadAfterToast(`${email} 已在 iCloud 恢复。`);
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
-        window.alert("Alias 恢复失败，本地状态未改变。请刷新后重试。");
+        toast("Alias 恢复失败，本地状态未改变。请刷新后重试。", "error");
         button.disabled = false;
       }
     });
@@ -656,11 +695,13 @@
     deleteMessage.textContent = "";
     deleteSubmit.disabled = true;
     try {
+      const email = deleteTarget.email;
       await api(`/admin/api/aliases/${deleteTarget.id}`, {
         method: "DELETE",
         body: JSON.stringify({ confirmation }),
       });
-      window.location.reload();
+      closeDeleteModal();
+      reloadAfterToast(`${email} 已从 iCloud 永久删除。`);
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
       deleteMessage.textContent = "永久删除失败，本地记录未删除。请刷新后重试。";
@@ -1060,6 +1101,35 @@
     }
   }
   if (capture?.dataset.active === "true") refreshCapture();
+
+  // Several of these POSTs block for a long time: a tag sweep reads the whole
+  // mailbox, an edge sync pushes every alias, an Apple reconcile lists every
+  // page. With no pending state the page looks frozen and people click again.
+  // JS-driven forms call preventDefault first, so they are skipped here.
+  document.addEventListener("submit", (event) => {
+    if (event.defaultPrevented) return;
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const submitter =
+      event.submitter instanceof HTMLButtonElement
+        ? event.submitter
+        : form.querySelector('button[type="submit"]');
+    if (!submitter || submitter.disabled) return;
+    const label = submitter.querySelector("span");
+    if (label) label.textContent = "处理中…";
+    submitter.classList.add("is-busy");
+    // Disable only after the browser has serialised and sent the form.
+    window.setTimeout(() => {
+      submitter.disabled = true;
+    }, 0);
+  });
+
+  // The result banner sits at the top of the page while most actions live far
+  // below it, so after a redirect the confirmation was easy to miss entirely.
+  const noticeBanner = document.querySelector(".notice");
+  if (noticeBanner) {
+    noticeBanner.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
