@@ -30,6 +30,7 @@ RECIPIENT_HEADERS = (
     "X-Apple-Forward-To",
     "X-Apple-Original-Recipient",
 )
+_ADDRESS_TOKEN_RE = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+[A-Za-z0-9]")
 _OTP_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 # Grok / xAI commonly emails alphanumeric codes like A1B-2C3.
 _GROK_OTP_RE = re.compile(
@@ -64,6 +65,17 @@ _FETCH_SPECS = ("(UID INTERNALDATE BODY.PEEK[])", "(UID INTERNALDATE RFC822)")
 # One FETCH per candidate turns a 120-message scan into 120 round trips, which
 # alone can exceed the public lookup budget on a remote mailbox.
 _FETCH_BATCH_SIZE = 25
+# Copying one already-generated alias only needs the newest matching code, so a
+# single-alias lookup examines a small window instead of the whole SINCE set.
+# SEARCH returns UID-descending but the winner is chosen by INTERNALDATE, so the
+# cap must stay comfortably above the fallback width below: a message that QQ
+# moved between folders keeps its arrival time while getting a lower UID, and
+# truncating too tightly would drop it.
+_LATEST_CANDIDATE_LIMIT = 24
+_LATEST_FETCH_BATCH_SIZE = 8
+# If recipient HEADER/TEXT search misses (common after iCloud→QQ forward),
+# peek only the newest window instead of downloading the whole SINCE set.
+_UNFILTERED_FALLBACK_LIMIT = 12
 # SEARCH SINCE only has day granularity. Where the server supports RFC 5032
 # WITHIN, YOUNGER narrows the candidate set to the OTP window plus a wide
 # allowance for server clock skew, rather than everything since midnight.
@@ -127,6 +139,20 @@ class ImapConfig:
         if self.junk_folder and self.junk_folder != self.folder:
             return (self.folder, self.junk_folder)
         return (self.folder,)
+
+    @property
+    def scan_folders(self) -> tuple[str, ...]:
+        """Folders to read verification codes from.
+
+        QQ regularly files iCloud HME forwards straight into Junk. Admin reads
+        already compensated for that; public lookups did not, so a buyer was
+        told "waiting" for a code the operator could see. Both share this list
+        now. Save-time validation still uses `folders`, so a mailbox without a
+        Junk folder never blocks saving credentials.
+        """
+        if self.junk_folder or "qq.com" not in self.host.casefold():
+            return self.folders
+        return (self.folder, "Junk")
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ImapConfig:
@@ -210,7 +236,11 @@ class ImapConnectionPool:
                 if age <= self.idle_seconds:
                     connection = self._connection
                     self._connection = None
-                    return connection
+                    # A pooled socket can die between uses. Handing out a
+                    # half-dead one made the *next* caller absorb the failure.
+                    if _connection_is_alive(connection):
+                        return connection
+                    _logout(connection)
             self._discard_unlocked()
         connection = connection_factory(config, max(1.0, min(float(timeout), 30.0)))
         try:
@@ -250,6 +280,17 @@ class ImapConnectionPool:
         self._connection = None
         self._key = None
         self._last_used = 0.0
+
+
+def _connection_is_alive(connection: Any) -> bool:
+    noop = getattr(connection, "noop", None)
+    if not callable(noop):
+        return True
+    try:
+        status, _ = noop()
+    except Exception:
+        return False
+    return str(status).upper() == "OK"
 
 
 _SHARED_IMAP_POOL = ImapConnectionPool()
@@ -308,7 +349,7 @@ class ImapOtpReader:
         healthy = False
         try:
             folder_uids: list[tuple[str, list[str]]] = []
-            for folder in self.config.folders:
+            for folder in self.config.scan_folders:
                 try:
                     self._select_folder(connection, folder, deadline)
                     uids = self._candidate_uids(
@@ -338,13 +379,14 @@ class ImapOtpReader:
                     self._select_folder(connection, folder, deadline)
                     folder_candidates = self._latest_results_from_uids(
                         connection,
-                        uids=uids,
+                        uids=uids[:_LATEST_CANDIDATE_LIMIT],
                         target=target,
                         oldest=oldest,
                         newest=newest,
                         sender_filter=sender_filter,
                         sender_policy=sender_policy,
                         deadline=deadline,
+                        batch_size=_LATEST_FETCH_BATCH_SIZE,
                     )
                 except ImapError as exc:
                     last_folder_error = exc
@@ -386,7 +428,7 @@ class ImapOtpReader:
         healthy = False
         try:
             folder_uids: list[tuple[str, list[str]]] = []
-            for folder in self.config.folders:
+            for folder in self.config.scan_folders:
                 try:
                     self._select_folder(connection, folder, deadline)
                     window = list(self._window_terms(connection, oldest, float(now_ts) - oldest))
@@ -476,12 +518,14 @@ class ImapOtpReader:
         sender_filter: str,
         sender_policy: str = "",
         deadline: float,
+        batch_size: int | None = None,
     ) -> list[OtpResult]:
         candidates: list[OtpResult] = []
         for uid, message, internal_timestamp in self._fetch_messages(
             connection,
             uids,
             deadline,
+            batch_size=batch_size,
         ):
             if not _message_matches_alias(message, target):
                 continue
@@ -590,18 +634,36 @@ class ImapOtpReader:
                     matched.update(_uids_from_search(data))
         if not matched:
             self._set_operation_timeout(connection, deadline)
+            status, data = self._search(connection, [*window, "TEXT", alias])
+            if status is not None and str(status).upper() == "OK":
+                searched = True
+                matched.update(_uids_from_search(data))
+        if not matched:
+            # Last resort only: newest messages in the OTP window. Never pull
+            # the entire SINCE set — that made "copy an existing alias" wait
+            # on a 100-message BODY.PEEK dump.
+            self._set_operation_timeout(connection, deadline)
             status, data = self._search(connection, window)
             if status is None:
                 if searched:
                     return []
                 raise ImapError("IMAP search failed")
             if str(status).upper() == "OK":
-                matched.update(_uids_from_search(data))
+                newest = sorted(
+                    _uids_from_search(data),
+                    key=_uid_sort_key,
+                    reverse=True,
+                )
+                matched.update(newest[:_UNFILTERED_FALLBACK_LIMIT])
         return sorted(matched, key=_uid_sort_key, reverse=True)
 
     @staticmethod
     def _window_terms(connection: Any, oldest: float, window_seconds: float) -> tuple[str, ...]:
-        since_date = datetime.fromtimestamp(oldest, tz=UTC).strftime("%d-%b-%Y")
+        # SEARCH SINCE has day granularity and servers resolve it against the
+        # mailbox timezone, not UTC. QQ runs on CST, so a UTC-derived date drops
+        # still-valid mail for the hours around Beijing midnight. Backing off a
+        # full day covers any offset; INTERNALDATE still enforces the real window.
+        since_date = datetime.fromtimestamp(oldest - 86400, tz=UTC).strftime("%d-%b-%Y")
         terms = ("SINCE", since_date)
         if not _supports_within(connection):
             return terms
@@ -620,9 +682,11 @@ class ImapOtpReader:
         connection: Any,
         uids: Sequence[str],
         deadline: float,
+        batch_size: int | None = None,
     ) -> Iterator[tuple[str, Message, float | None]]:
-        for start in range(0, len(uids), _FETCH_BATCH_SIZE):
-            batch = list(uids[start : start + _FETCH_BATCH_SIZE])
+        size = max(1, int(batch_size or _FETCH_BATCH_SIZE))
+        for start in range(0, len(uids), size):
+            batch = list(uids[start : start + size])
             fetched = self._fetch_batch(connection, batch, deadline)
             if fetched is None and len(batch) > 1:
                 # A server that rejects UID sets still answers one UID at a time.
@@ -751,23 +815,22 @@ def _message_matches_alias(message: Message, alias: str) -> bool:
     return any(pattern.search(value) for value in values)
 
 
-def _message_matches_sender_policy(message: Message, sender_policy: str) -> bool:
+def sender_matches_policy(from_header: str, sender_policy: str) -> bool:
     policy = str(sender_policy or "").strip().casefold()
     if not policy or policy in {"any", "all"}:
         return True
     if policy != PUBLIC_OTP_SENDER_POLICY:
         raise ValueError("sender policy is invalid")
-    from_header = " ".join(str(value) for value in message.get_all("From", []))
     return _is_gpt_sender(from_header) or _is_grok_sender(from_header)
 
 
-def _message_matches_sender(message: Message, sender_filter: str) -> bool:
+def sender_matches_filter(from_header: str, sender_filter: str) -> bool:
     expected = str(sender_filter or "").strip().casefold()
     if not expected:
         return True
     senders = [
         str(address or "").strip().casefold()
-        for _name, address in getaddresses(message.get_all("From", []))
+        for _name, address in getaddresses([from_header])
         if str(address or "").strip()
     ]
     if "@" in expected and not expected.startswith("@"):
@@ -777,6 +840,65 @@ def _message_matches_sender(message: Message, sender_filter: str) -> bool:
         sender.rsplit("@", 1)[-1] == domain or sender.rsplit("@", 1)[-1].endswith(f".{domain}")
         for sender in senders
         if "@" in sender
+    )
+
+
+def _from_header(message: Message) -> str:
+    return " ".join(str(value) for value in message.get_all("From", []))
+
+
+def _message_matches_sender_policy(message: Message, sender_policy: str) -> bool:
+    return sender_matches_policy(_from_header(message), sender_policy)
+
+
+def _message_matches_sender(message: Message, sender_filter: str) -> bool:
+    return sender_matches_filter(_from_header(message), sender_filter)
+
+
+@dataclass(frozen=True)
+class ParsedMessage:
+    """One mail parsed exactly once.
+
+    The watcher ingests each message a single time and indexes it by every
+    recipient address it carries, so serving N viewers costs no extra parsing.
+    Sender data is kept verbatim so the public (`gpt_grok` + per-alias filter)
+    and admin (unfiltered) views can both be derived at read time.
+    """
+
+    recipients: frozenset[str]
+    code: str
+    from_header: str
+    received_at: float
+
+
+def message_recipients(message: Message) -> frozenset[str]:
+    """Every address this mail was delivered to, across all forwarding headers.
+
+    Mirrors `_message_matches_alias`: structured addresses first, then raw
+    address-shaped tokens so a malformed header still resolves to its alias.
+    """
+    values: list[str] = []
+    for name in RECIPIENT_HEADERS:
+        values.extend(str(value) for value in message.get_all(name, []))
+    found: set[str] = set()
+    for _display_name, address in getaddresses(values):
+        cleaned = str(address or "").strip().casefold()
+        if cleaned.count("@") == 1 and not any(item.isspace() for item in cleaned):
+            found.add(cleaned)
+    for value in values:
+        for match in _ADDRESS_TOKEN_RE.finditer(value):
+            cleaned = match.group(0).strip().casefold()
+            if cleaned.count("@") == 1:
+                found.add(cleaned)
+    return frozenset(found)
+
+
+def parse_message(message: Message, *, received_at: float) -> ParsedMessage:
+    return ParsedMessage(
+        recipients=message_recipients(message),
+        code=_extract_message_code(message),
+        from_header=_from_header(message),
+        received_at=float(received_at),
     )
 
 
@@ -1043,7 +1165,12 @@ __all__ = [
     "ImapOtpReader",
     "OtpResult",
     "PUBLIC_OTP_SENDER_POLICY",
+    "ParsedMessage",
     "RECIPIENT_HEADERS",
     "RecentOtpBatch",
     "RecentOtpResult",
+    "message_recipients",
+    "parse_message",
+    "sender_matches_filter",
+    "sender_matches_policy",
 ]

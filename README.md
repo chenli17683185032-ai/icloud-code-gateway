@@ -185,7 +185,9 @@ uv run python -m compileall -q icloud_gateway tests
 
 > 发布状态：`3030701` 已被并发与长任务审查标记为不可直接部署。修复分支必须完成 Alias 快照 CAS、SQLite 持久批任务、Compose 变量透传、有界停机及真实 Apple 会话的 validate/list 只读验收后，才能进入生产部署闭环。不要通过放宽 Cloudflare 超时部署同步批处理版本。
 
-德国云贝服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app/browser 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用联动小铺的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
+德国云贝服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用联动小铺的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
+
+云端 `edge` 不再运行 Chromium：`browser` 被放进 `legacy-browser` profile，`edge` 模式还会强制清空 `ICLOUD_GATEWAY_CDP_URL` 与浏览器 profile。**但 `cn-proxy` 必须保留**——edge 的 IMAP 在未单独配置代理时会继承 HME 代理经由它出中国。
 
 本次 IMAP 文件夹编码实现参考了 MIT 许可的
 [IC-VeilMail](https://github.com/Redmig110/ic-veilmail)。完整归属与许可文本见

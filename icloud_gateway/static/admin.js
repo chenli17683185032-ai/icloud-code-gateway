@@ -32,12 +32,9 @@
   let deleteTarget = null;
   let codesRefreshTimer = null;
   let codesRefreshInFlight = false;
-  let focusedAliasId = "";
-  let focusedAliasEmail = "";
-  const CODES_REFRESH_MS = 2000;
-  // Each poll is a full QQ IMAP login + scan (~1s server-side); QQ throttles
-  // frequent logins, so pace like the public page (5s) instead of hammering.
-  const FOCUSED_POLL_MS = 5000;
+  // A refresh is an in-memory read of the mailbox index the watcher maintains,
+  // not an IMAP login, so the whole list can stay live at this interval.
+  const CODES_REFRESH_MS = 3000;
 
   class AuthenticationRequiredError extends Error {}
 
@@ -73,9 +70,20 @@
     return items.map((item) => item.email).join("\n");
   }
 
+  // The buyer opens this and the code appears with nothing to type. The key
+  // rides in the fragment so it never reaches the server as a logged query.
+  function deliveryLink(item) {
+    const base = String(item.public_url || publicUrl).replace(/\/+$/, "");
+    return `${base}/#key=${encodeURIComponent(item.access_key)}`;
+  }
+
+  function deliveryLinkList(items) {
+    return items.map(deliveryLink).join("\n");
+  }
+
   function standardParameters(item) {
     const url = item.public_url || publicUrl;
-    return `邮箱：${item.email}；网站：${url}；密钥：${item.access_key}`;
+    return `邮箱：${item.email}；网站：${url}；密钥：${item.access_key}；取码链接：${deliveryLink(item)}`;
   }
 
   function standardParameterList(items) {
@@ -187,6 +195,7 @@
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
     issuedList.replaceChildren();
+    issuedList.append(createCopyButton(deliveryLinkList(items), "复制取码链接"));
     issuedList.append(createCopyButton(emailList(items), "一键复制"));
     issuedList.append(createCopyButton(standardParameterList(items), "导出信息"));
     items.forEach((item) => {
@@ -204,7 +213,7 @@
       const key = document.createElement("code");
       key.textContent = standardParameters(item);
 
-      const copy = createCopyButton(standardParameters(item));
+      const copy = createCopyButton(deliveryLink(item), "取码链接");
 
       row.append(identity, key, copy);
       issuedList.append(row);
@@ -400,17 +409,15 @@
   document.querySelectorAll(".alias-email-copy").forEach((button) => {
     button.addEventListener("click", async () => {
       const feedback = button.parentElement.querySelector(".alias-copy-feedback");
-      const row = button.closest(".alias-row");
-      const aliasId = row?.dataset.aliasId || "";
       const email = button.dataset.copyEmail || "";
+      // Clipboard only. Copying used to also pin the page to this one alias and
+      // kick off an IMAP scan, which made it feel like a network round-trip and
+      // left no way back to watching the whole list.
       try {
         await writeClipboard(email);
         feedback.textContent = "已复制";
       } catch (_error) {
         feedback.textContent = "复制失败";
-      }
-      if (aliasId) {
-        setFocusedAlias(aliasId, email, { pollNow: true });
       }
       window.setTimeout(() => {
         feedback.textContent = "";
@@ -439,7 +446,8 @@
     control.querySelector(".usage-clear").disabled = !value;
     const row = control.closest(".alias-row");
     if (row) {
-      row.dataset.aliasSearch = `${row.dataset.aliasBaseSearch || ""} ${value}`.trim();
+      row.dataset.searchUsage = value;
+      composeRowSearch(row);
     }
   }
 
@@ -824,6 +832,7 @@
 
   function clearAliasRowCodes() {
     document.querySelectorAll(".alias-code").forEach((cell) => {
+      cell.dataset.code = "";
       cell.replaceChildren();
       const empty = document.createElement("span");
       empty.className = "alias-code-empty muted-text";
@@ -832,90 +841,69 @@
     });
   }
 
-  function renderOneAliasCode(aliasId, item, { clearOthers = false } = {}) {
-    document.querySelectorAll(".alias-code").forEach((cell) => {
-      const cellId = cell.dataset.aliasId || "";
-      if (cellId !== aliasId) {
-        if (clearOthers) {
-          cell.replaceChildren();
-          const empty = document.createElement("span");
-          empty.className = "alias-code-empty muted-text";
-          empty.textContent = "—";
-          cell.append(empty);
-        }
-        return;
-      }
-      cell.replaceChildren();
-      if (!item || !item.code) {
-        const empty = document.createElement("span");
-        empty.className = "alias-code-empty muted-text";
-        empty.textContent = "等待中…";
-        cell.append(empty);
-        return;
-      }
-      const wrap = document.createElement("div");
-      wrap.className = "alias-code-content";
-      const code = document.createElement("code");
-      code.className = "alias-code-value";
-      code.textContent = item.code;
-      code.title = item.received_at_display
-        ? `收到于 ${item.received_at_display}`
-        : "最近验证码";
-      const copy = createCopyButton(item.code, "复制");
-      copy.classList.add("small-button");
-      wrap.append(code, copy);
-      if (item.received_at_display) {
-        const time = document.createElement("time");
-        time.className = "alias-code-time";
-        time.dateTime = item.received_at || "";
-        time.textContent = item.received_at_display;
-        wrap.append(time);
-      }
-      cell.append(wrap);
-      const row = cell.closest(".alias-row");
-      if (row) {
-        const base = row.dataset.aliasBaseSearch || "";
-        row.dataset.aliasSearch = `${base} ${item.code}`.trim();
-      }
-    });
+  // Usage labels and verification codes both feed the row filter. They used to
+  // write `data-alias-search` directly and overwrite each other, so a row that
+  // received a code silently stopped matching a search for "gpt" or "封号".
+  function composeRowSearch(row) {
+    const parts = [
+      row.dataset.aliasBaseSearch || "",
+      row.dataset.searchUsage || "",
+      row.dataset.searchCode || "",
+    ];
+    row.dataset.aliasSearch = parts.join(" ").trim().replace(/\s+/g, " ");
   }
 
-  function renderAliasRowCodes(byAlias, { replaceMissing = true } = {}) {
-    const map = byAlias && typeof byAlias === "object" ? byAlias : {};
-    if (focusedAliasId && map[focusedAliasId]) {
-      renderOneAliasCode(focusedAliasId, map[focusedAliasId], { clearOthers: false });
+  function setRowSearchCode(cell, code) {
+    const row = cell.closest(".alias-row");
+    if (!row) return;
+    row.dataset.searchCode = String(code || "");
+    composeRowSearch(row);
+  }
+
+  function renderOneAliasCode(aliasId, item) {
+    const cell = document.querySelector(`.alias-code[data-alias-id="${CSS.escape(aliasId)}"]`);
+    if (!cell) return;
+    // Repainting an unchanged cell would restart the copy button animation and
+    // fight the operator's cursor, so only touch cells whose code moved.
+    if (cell.dataset.code === (item?.code || "")) return;
+    cell.dataset.code = item?.code || "";
+    cell.replaceChildren();
+    if (!item || !item.code) {
+      const empty = document.createElement("span");
+      empty.className = "alias-code-empty muted-text";
+      empty.textContent = "—";
+      cell.append(empty);
+      setRowSearchCode(cell, "");
       return;
     }
-    document.querySelectorAll(".alias-code").forEach((cell) => {
-      const aliasId = cell.dataset.aliasId || "";
-      const item = map[aliasId];
-      if (!item || !item.code) {
-        if (!replaceMissing) return;
-        cell.replaceChildren();
-        const empty = document.createElement("span");
-        empty.className = "alias-code-empty muted-text";
-        empty.textContent = "—";
-        cell.append(empty);
-        return;
-      }
-      renderOneAliasCode(aliasId, item);
-    });
+    const wrap = document.createElement("div");
+    wrap.className = "alias-code-content";
+    const code = document.createElement("code");
+    code.className = "alias-code-value";
+    code.textContent = item.code;
+    code.title = item.received_at_display
+      ? `收到于 ${item.received_at_display}`
+      : "最近验证码";
+    const copy = createCopyButton(item.code, "复制");
+    copy.classList.add("small-button");
+    wrap.append(code, copy);
+    if (item.received_at_display) {
+      const time = document.createElement("time");
+      time.className = "alias-code-time";
+      time.dateTime = item.received_at || "";
+      time.textContent = item.received_at_display;
+      wrap.append(time);
+    }
+    cell.append(wrap);
+    setRowSearchCode(cell, item.code);
   }
 
-  function setFocusedAlias(aliasId, email, { pollNow = false } = {}) {
-    focusedAliasId = String(aliasId || "");
-    focusedAliasEmail = String(email || "");
-    document.querySelectorAll(".alias-row").forEach((row) => {
-      row.classList.toggle("is-code-focus", row.dataset.aliasId === focusedAliasId);
+  function renderAliasRowCodes(byAlias) {
+    const map = byAlias && typeof byAlias === "object" ? byAlias : {};
+    document.querySelectorAll(".alias-code").forEach((cell) => {
+      const aliasId = cell.dataset.aliasId || "";
+      renderOneAliasCode(aliasId, map[aliasId] || null);
     });
-    if (adminCodesMessage && focusedAliasEmail) {
-      adminCodesMessage.textContent = `只监听：${focusedAliasEmail}`;
-    }
-    if (pollNow) {
-      refreshAdminCodes({ quiet: true, focusedOnly: true }).finally(scheduleCodesRefresh);
-    } else {
-      scheduleCodesRefresh();
-    }
   }
 
   function renderAdminCodes(items) {
@@ -958,54 +946,35 @@
     return Boolean(refreshCodesButton) && !(autoRefreshCodes?.disabled);
   }
 
-  async function refreshAdminCodes({ quiet = false, focusedOnly = false } = {}) {
+  async function refreshAdminCodes({ quiet = false } = {}) {
     if (!imapCodesEnabled() || !adminCodesMessage) return;
     if (codesRefreshInFlight) return;
     codesRefreshInFlight = true;
-    const useFocused = Boolean(focusedOnly || focusedAliasId);
-    if (!quiet) {
-      if (!useFocused) clearAdminCodes();
-      adminCodesMessage.textContent = useFocused
-        ? `正在读取 ${focusedAliasEmail || "当前邮箱"}…`
-        : "正在读取最近验证码…";
-    }
-    if (refreshCodesButton) {
+    if (!quiet && refreshCodesButton) {
+      adminCodesMessage.textContent = "正在读取最近验证码…";
       refreshCodesButton.disabled = true;
       refreshCodesButton.classList.add("is-busy");
     }
     try {
-      const payload =
-        useFocused && focusedAliasId ? { alias_ids: [focusedAliasId] } : {};
       const data = await api("/admin/api/codes/recent", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({}),
       });
-      if (!useFocused) {
-        clearAdminCodes();
-        if (data.codes?.length) {
-          renderAdminCodes(data.codes);
-          if (adminCodesTable) adminCodesTable.hidden = false;
-          if (adminCodesEmpty) adminCodesEmpty.hidden = true;
-        } else if (adminCodesEmpty) {
-          adminCodesEmpty.hidden = false;
-        }
+      clearAdminCodes();
+      if (data.codes?.length) {
+        renderAdminCodes(data.codes);
+        if (adminCodesTable) adminCodesTable.hidden = false;
+        if (adminCodesEmpty) adminCodesEmpty.hidden = true;
+      } else if (adminCodesEmpty) {
+        adminCodesEmpty.hidden = false;
       }
-      if (useFocused && focusedAliasId) {
-        const item = (data.by_alias || {})[focusedAliasId] || null;
-        renderOneAliasCode(focusedAliasId, item, { clearOthers: false });
-        if (item?.code) {
-          adminCodesMessage.textContent = `当前：${focusedAliasEmail} → ${item.code}`;
-        } else {
-          adminCodesMessage.textContent = `只监听：${focusedAliasEmail || focusedAliasId}（暂无）`;
-        }
-      } else {
-        renderAliasRowCodes(data.by_alias || {});
-        const suffix = data.truncated ? "，结果已达到扫描上限" : "";
-        adminCodesMessage.textContent = `扫描 ${data.scanned} 封，找到 ${data.codes?.length || 0} 条${suffix}。`;
-      }
+      renderAliasRowCodes(data.by_alias || {});
+      const found = data.codes?.length || 0;
+      adminCodesMessage.textContent = found
+        ? `${found} 个邮箱有最近验证码。`
+        : "最近没有收到验证码。";
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
-      if (!quiet && !useFocused) clearAliasRowCodes();
       adminCodesMessage.textContent =
         error.message === "not_configured"
           ? "IMAP 尚未配置。"
@@ -1027,36 +996,30 @@
       codesRefreshTimer = null;
     }
     if (!autoRefreshCodes?.checked || autoRefreshCodes.disabled) return;
-    // Only auto-poll while a specific alias is focused; full scans stay manual.
-    if (!focusedAliasId) return;
     codesRefreshTimer = window.setTimeout(async () => {
-      await refreshAdminCodes({ quiet: true, focusedOnly: true });
+      await refreshAdminCodes({ quiet: true });
       scheduleCodesRefresh();
-    }, FOCUSED_POLL_MS);
+    }, CODES_REFRESH_MS);
   }
 
   refreshCodesButton?.addEventListener("click", async () => {
-    // Manual refresh: if focused, only that one; otherwise full scan.
-    await refreshAdminCodes({ quiet: false, focusedOnly: Boolean(focusedAliasId) });
+    await refreshAdminCodes({ quiet: false });
     scheduleCodesRefresh();
   });
 
   autoRefreshCodes?.addEventListener("change", () => {
     if (autoRefreshCodes.checked) {
-      if (focusedAliasId) {
-        refreshAdminCodes({ quiet: true, focusedOnly: true }).finally(scheduleCodesRefresh);
-      } else if (adminCodesMessage) {
-        adminCodesMessage.textContent = "请先复制某个邮箱；将只扫描这一条。";
-      }
+      refreshAdminCodes({ quiet: true }).finally(scheduleCodesRefresh);
     } else if (codesRefreshTimer) {
       window.clearTimeout(codesRefreshTimer);
       codesRefreshTimer = null;
     }
   });
 
-  // Do not auto full-scan on load (slow). Wait until the user copies one alias.
-  if (refreshCodesButton && !refreshCodesButton.disabled && adminCodesMessage) {
-    adminCodesMessage.textContent = "复制某个邮箱后，将只扫描并监听这一条验证码。";
+  // The server answers from the warm mailbox index, so showing codes for every
+  // alias costs no IMAP work and needs no pinning by the operator.
+  if (imapCodesEnabled()) {
+    refreshAdminCodes({ quiet: true }).finally(scheduleCodesRefresh);
   }
 
   window.addEventListener("pagehide", () => {
@@ -1101,6 +1064,8 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       composeUsage,
+      deliveryLink,
+      deliveryLinkList,
       emailList,
       firstNonTerminalJob,
       jobCounts,

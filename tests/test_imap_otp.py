@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import email.utils
 import imaplib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -655,25 +655,59 @@ def mailbox(count: int, *, match_from: int = 0) -> dict:
     }
 
 
-def test_recipient_headers_are_searched_in_one_round_trip() -> None:
+class FastHeaderMissImap(FakeImap):
+    """Server where the common delivery headers carry nothing for the alias."""
+
+    FAST_HEADERS = ("To", "Delivered-To", "X-Original-To")
+
+    def uid(self, command, *args):
+        if command == "search":
+            terms = tuple(str(item) for item in args if item is not None)
+            targets_fast_header = any(
+                terms[index] == "HEADER" and terms[index + 1] in self.FAST_HEADERS
+                for index in range(len(terms) - 1)
+            )
+            if targets_fast_header and "OR" not in terms:
+                self.searches.append(terms)
+                return "OK", [b""]
+        return super().uid(command, *args)
+
+
+def test_common_recipient_header_resolves_in_one_round_trip() -> None:
     connection = FakeImap(mailbox(3))
 
     reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
 
+    # QQ and iCloud both set To, so the fast path stops at the first hit rather
+    # than paying for the OR-composed search across all eight headers.
     assert len(connection.searches) == 1
     terms = connection.searches[0]
-    assert terms.count("OR") == len(RECIPIENT_HEADERS) - 1
-    for header in RECIPIENT_HEADERS:
-        assert header in terms
+    assert "HEADER" in terms
+    assert "To" in terms
+    assert "OR" not in terms
 
 
-def test_combined_search_falls_back_to_one_search_per_header() -> None:
-    connection = FakeImap(mailbox(3), reject_combined_search=True)
+def test_or_composed_search_covers_every_header_when_the_fast_path_misses() -> None:
+    connection = FastHeaderMissImap(mailbox(3))
 
     result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
 
     assert result is not None
-    assert len(connection.searches) == 1 + len(RECIPIENT_HEADERS)
+    combined = next(terms for terms in connection.searches if "OR" in terms)
+    assert combined.count("OR") == len(RECIPIENT_HEADERS) - 1
+    for header in RECIPIENT_HEADERS:
+        assert header in combined
+
+
+def test_combined_search_falls_back_to_one_search_per_header() -> None:
+    connection = FastHeaderMissImap(mailbox(3), reject_combined_search=True)
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    per_header = [terms for terms in connection.searches if "OR" not in terms]
+    for header in RECIPIENT_HEADERS:
+        assert any(header in terms for terms in per_header)
 
 
 def test_candidates_are_fetched_in_batches_not_one_message_per_round_trip() -> None:
@@ -682,9 +716,12 @@ def test_candidates_are_fetched_in_batches_not_one_message_per_round_trip() -> N
     result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
 
     assert result is not None
-    assert len(connection.searches) + len(connection.fetches) == 6
-    assert len(connection.fetches) == 5
-    assert sum(len(batch) for batch in connection.fetches) == 120
+    # A single-alias lookup examines a bounded newest-first window instead of
+    # dumping the whole SINCE set, which is what made "copy an already
+    # generated email" feel like a full inbox scan.
+    assert sum(len(batch) for batch in connection.fetches) == 24
+    assert len(connection.fetches) == 3
+    assert connection.fetches[0] == [str(uid) for uid in range(120, 112, -1)]
 
 
 def test_batched_fetch_falls_back_to_single_uids_when_the_server_refuses_sets() -> None:
@@ -930,3 +967,60 @@ def test_reader_rejects_xxx_xxx_without_context_for_non_grok_mail() -> None:
     )
 
     assert reader(connection).find_latest_code("target@icloud.com", now_ts=NOW) is None
+
+
+def test_since_window_backs_off_a_day_for_mailbox_local_time() -> None:
+    connection = FakeImap(mailbox(2))
+
+    reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    terms = connection.searches[0]
+    since_value = terms[terms.index("SINCE") + 1]
+    # SEARCH SINCE is day-granular and servers resolve it against the mailbox
+    # timezone. QQ runs on CST, so a UTC-derived date silently dropped mail for
+    # the hours around Beijing midnight.
+    oldest = datetime.fromtimestamp(NOW - 300, tz=UTC)
+    assert since_value == (oldest - timedelta(days=1)).strftime("%d-%b-%Y")
+
+
+def test_public_lookup_scans_qq_junk_without_explicit_configuration() -> None:
+    connection = FakeImap(
+        folders={
+            "INBOX": {},
+            "Junk": {"2": (raw_message(recipient="target@icloud.com", code="202020"), NOW - 2)},
+        }
+    )
+    values = config().as_secret_dict()
+    values["host"] = "imap.qq.com"
+    value = ImapOtpReader(
+        ImapConfig(**values),
+        connection_factory=lambda _config, _timeout: connection,
+        reuse_connection=False,
+    )
+
+    # Admin reads already compensated for QQ filing HME forwards into Junk;
+    # buyers were told "waiting" for a code the operator could see.
+    result = value.find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result.code == "202020"
+
+
+def test_header_and_text_miss_only_peeks_the_newest_window() -> None:
+    class HeaderMissImap(FakeImap):
+        def uid(self, command, *args):
+            if command == "search":
+                terms = tuple(str(item) for item in args if item is not None)
+                self.searches.append(terms)
+                if "HEADER" in terms or "TEXT" in terms:
+                    return "OK", [b""]
+            return super().uid(command, *args)
+
+    connection = HeaderMissImap(mailbox(40))
+
+    result = reader(connection).find_latest_code("target@icloud.com", now_ts=NOW)
+
+    assert result is not None
+    # Bounded fallback: newest 12 only, never the whole SINCE set.
+    fetched = [uid for batch in connection.fetches for uid in batch]
+    assert fetched == [str(uid) for uid in range(40, 28, -1)]
+    assert any("TEXT" in terms for terms in connection.searches)

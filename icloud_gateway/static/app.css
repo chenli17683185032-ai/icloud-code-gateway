@@ -1,51 +1,66 @@
 :root {
   color-scheme: light dark;
-  --bg: #f2f5f3;
-  --surface: #fbfdfc;
-  --surface-muted: #e7ece9;
-  --surface-strong: #dbe3df;
-  --text: #17211c;
-  --text-soft: #526159;
-  --text-faint: #748079;
-  --line: #c9d2cd;
-  --line-strong: #aebbb4;
-  --accent: #00785b;
-  --accent-hover: #006149;
-  --accent-soft: #d8eee6;
+  /* Apple system palette: their neutral greys, near-black ink, and system
+     blue as the single accent. Separators stay light and shadows stay soft;
+     the weight comes from whitespace and type, not from borders. */
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --surface-muted: #f5f5f7;
+  --surface-strong: #e8e8ed;
+  --text: #1d1d1f;
+  --text-soft: #6e6e73;
+  --text-faint: #86868b;
+  --line: #e3e3e8;
+  --line-strong: #d2d2d7;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-soft: #eaf3fd;
   --accent-text: #ffffff;
-  --danger: #b42318;
-  --danger-soft: #f8ddd9;
+  --danger: #d70015;
+  --danger-soft: #fdecee;
   --danger-text: #ffffff;
-  --warning: #7a5d00;
-  --focus: #009f78;
-  --shadow: 0 18px 60px rgb(20 42 32 / 0.12);
-  --radius: 6px;
+  --warning: #a05a00;
+  --focus: #0071e3;
+  --shadow: 0 24px 70px rgb(0 0 0 / 0.10);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 6px 18px rgb(0 0 0 / 0.05);
+  --shadow-panel: 0 2px 6px rgb(0 0 0 / 0.04), 0 18px 44px rgb(0 0 0 / 0.08);
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.10), 0 2px 6px rgb(0 0 0 / 0.08);
+  --radius: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 980px;
   --header-height: 68px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  /* SF Pro on Apple devices, PingFang SC for Chinese — the same pairing
+     apple.com/cn ships. Nothing is downloaded. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #101613;
-    --surface: #151d19;
-    --surface-muted: #1d2822;
-    --surface-strong: #26332c;
-    --text: #edf4f0;
-    --text-soft: #b7c5bd;
-    --text-faint: #8c9a92;
-    --line: #34433b;
-    --line-strong: #4a5c52;
-    --accent: #4fd1aa;
-    --accent-hover: #79ddbe;
-    --accent-soft: #173d31;
-    --accent-text: #0c1b15;
-    --danger: #ff8d82;
-    --danger-soft: #4a211f;
-    --danger-text: #2a0f0c;
-    --warning: #e8c85d;
-    --focus: #64dfb8;
-    --shadow: 0 20px 70px rgb(0 0 0 / 0.34);
+    /* Apple dark: true black field, elevated graphite cards, brighter blue. */
+    --bg: #000000;
+    --surface: #1d1d1f;
+    --surface-muted: #2c2c2e;
+    --surface-strong: #3a3a3c;
+    --text: #f5f5f7;
+    --text-soft: #a1a1a6;
+    --text-faint: #86868b;
+    --line: #38383d;
+    --line-strong: #48484d;
+    --accent: #2997ff;
+    --accent-hover: #47a4ff;
+    --accent-soft: #14263a;
+    --accent-text: #ffffff;
+    --danger: #ff6961;
+    --danger-soft: #2c1618;
+    --danger-text: #ffffff;
+    --warning: #ffb340;
+    --focus: #2997ff;
+    --shadow: 0 24px 80px rgb(0 0 0 / 0.5);
+    --shadow-card: 0 1px 1px rgb(0 0 0 / 0.4), 0 4px 14px rgb(0 0 0 / 0.3);
+    --shadow-panel: 0 1px 1px rgb(0 0 0 / 0.4), 0 14px 40px rgb(0 0 0 / 0.4);
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.4);
   }
 }
 
@@ -68,6 +83,10 @@ body {
   line-height: 1.5;
   letter-spacing: 0;
   text-rendering: optimizeLegibility;
+  /* Thinner stems at these sizes; the default synthetic weight looks muddy. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-variant-numeric: tabular-nums;
 }
 
 button,
@@ -131,6 +150,19 @@ img {
   font-variant-numeric: tabular-nums;
 }
 
+.brand-mark img {
+  width: 17px;
+  height: 17px;
+  /* Icons ship as dark strokes; force them onto the accent tile. */
+  filter: brightness(0) invert(1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .brand-mark img {
+    filter: brightness(0);
+  }
+}
+
 .field {
   display: grid;
   align-content: start;
@@ -161,8 +193,8 @@ img {
 
 .field input,
 .field select {
-  height: 44px;
-  padding: 0 12px;
+  height: 48px;
+  padding: 0 15px;
 }
 
 .field textarea {
@@ -176,7 +208,8 @@ img {
 .field textarea:focus,
 .search-control:focus-within {
   border-color: var(--focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 22%, transparent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 16%, transparent);
 }
 
 .field input::placeholder,
@@ -221,7 +254,7 @@ img {
   gap: 8px;
   border-radius: var(--radius);
   cursor: pointer;
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
   transition: background-color 150ms ease, border-color 150ms ease,
     color 150ms ease, transform 100ms ease, opacity 150ms ease;
@@ -229,9 +262,12 @@ img {
 
 .primary-button,
 .secondary-button {
-  min-height: 42px;
-  padding: 0 15px;
+  /* Apple's control shape: a full pill, flat fill, no border. */
+  min-height: 44px;
+  padding: 0 21px;
   border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  letter-spacing: -0.01em;
 }
 
 .primary-button {
@@ -254,14 +290,14 @@ img {
 }
 
 .secondary-button {
-  border-color: var(--line-strong);
-  background: var(--surface);
+  border-color: transparent;
+  background: var(--surface-strong);
   color: var(--text);
 }
 
 .secondary-button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--line-strong);
+  color: var(--text);
 }
 
 .primary-button:active:not(:disabled),
@@ -314,7 +350,9 @@ a:focus-visible {
   .input-icon-button img,
   .status-icon img,
   .notice img,
-  .search-control img {
+  .search-control img,
+  .panel-badge img,
+  .info-badge img {
     filter: brightness(0) invert(1);
   }
 }
@@ -365,7 +403,8 @@ a:focus-visible {
 
 .public-header,
 .public-footer {
-  width: min(100% - 40px, 1120px);
+  /* Same column as .public-stack so the brand lines up with the cards. */
+  width: min(100% - 40px, 760px);
   margin: 0 auto;
 }
 
@@ -379,37 +418,321 @@ a:focus-visible {
   display: grid;
   width: min(100% - 40px, 1120px);
   margin: 0 auto;
-  place-items: center;
+  place-items: start center;
   padding: 28px 0 48px;
 }
 
-.lookup-panel {
+.public-stack {
+  display: grid;
+  gap: 18px;
   width: min(100%, 760px);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+}
+
+.public-hero {
+  text-align: center;
+  padding: 26px 0 6px;
+}
+
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.hero-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.public-hero h1 {
+  margin: 0;
+  /* Apple display type: large, semibold, tightly tracked. */
+  font-size: 52px;
+  line-height: 1.07;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.hero-sub {
+  margin: 15px auto 0;
+  max-width: 32em;
+  color: var(--text-soft);
+  font-size: 17px;
+  line-height: 1.47;
+  letter-spacing: -0.012em;
+}
+
+.lookup-panel {
+  width: 100%;
+  /* Apple separates surfaces with elevation, not outlines. */
+  border: 0;
+  border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-panel);
   overflow: hidden;
 }
 
 .lookup-heading {
-  padding: 34px 36px 22px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 26px 30px 22px;
   border-bottom: 1px solid var(--line);
 }
 
-.window-label {
-  margin: 0 0 8px;
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 750;
+.panel-badge {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent-soft);
 }
 
-.lookup-heading h1,
+.panel-badge img {
+  width: 20px;
+  height: 20px;
+}
+
+.window-label {
+  margin: 0 0 3px;
+  color: var(--text-faint);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.008em;
+}
+
+.lookup-heading h2,
 .login-heading h1 {
   margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+
+.login-heading h1 {
   font-size: 40px;
-  line-height: 1.15;
-  font-weight: 760;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+.info-card {
+  padding: 24px 26px 26px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.info-head {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.info-badge {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent-soft);
+}
+
+.info-badge img {
+  width: 15px;
+  height: 15px;
+}
+
+.info-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.notice-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: -0.01em;
+  color: var(--text-soft);
+}
+
+.notice-list li {
+  position: relative;
+  padding-left: 19px;
+}
+
+.notice-list li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  opacity: 0.55;
+}
+
+.notice-list .notice-warn::before,
+.notice-list .notice-danger::before {
+  opacity: 1;
+}
+
+.notice-list .notice-warn::before {
+  background: var(--warning);
+}
+
+.notice-list .notice-danger::before {
+  background: var(--danger);
+}
+
+.notice-list .notice-danger {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.callout {
+  padding: 15px 17px;
+  border-radius: 11px;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.callout p {
+  margin: 0;
+}
+
+.callout-title {
+  margin-bottom: 7px !important;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.callout-ok {
+  /* Monochrome affirmation: a solid ink rule carries the emphasis that a
+     coloured fill used to. */
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--text);
+  background: var(--surface-muted);
+  color: var(--text-soft);
+}
+
+.callout-ok .callout-title {
+  color: var(--text);
+}
+
+.callout-danger {
+  margin-top: 18px;
+  border: 1px solid color-mix(in srgb, var(--danger) 26%, transparent);
+  background: var(--danger-soft);
+  color: var(--text-soft);
+}
+
+.callout-danger .callout-title {
+  color: var(--danger);
+}
+
+.info-subtitle {
+  margin: 20px 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.step-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: step;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-soft);
+}
+
+.step-list li {
+  position: relative;
+  padding-left: 30px;
+  counter-increment: step;
+}
+
+.step-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exclusion-list {
+  display: grid;
+  gap: 9px;
+  margin: 12px 0 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.exclusion-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  align-items: baseline;
+}
+
+.exclusion-list strong {
+  flex: none;
+  min-width: 4.5em;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.info-footnote {
+  margin: 18px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.brand-tag {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .lookup-form {
@@ -417,7 +740,7 @@ a:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
   align-items: end;
-  padding: 26px 36px 28px;
+  padding: 22px 28px 22px;
 }
 
 .field-grow {
@@ -449,10 +772,10 @@ a:focus-visible {
 }
 
 .lookup-result {
-  min-height: 228px;
+  min-height: 190px;
   border-top: 1px solid var(--line);
   background: var(--surface-muted);
-  padding: 30px 36px;
+  padding: 24px 28px;
 }
 
 .result-idle,
@@ -460,7 +783,7 @@ a:focus-visible {
   display: grid;
   gap: 12px;
   align-content: center;
-  min-height: 168px;
+  min-height: 138px;
 }
 
 .idle-line,
@@ -514,23 +837,33 @@ a:focus-visible {
 
 .code-digits {
   display: grid;
-  width: min(100%, 430px);
+  width: min(100%, 452px);
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
 .code-digit {
   display: grid;
-  aspect-ratio: 0.82;
+  aspect-ratio: 0.84;
   min-width: 0;
   place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  border: 0;
+  border-radius: 14px;
+  /* The code is the one thing the buyer came for. Apple would give it a plain
+     elevated tile: no border, just a surface and a soft contact shadow. */
   background: var(--surface);
+  box-shadow: var(--shadow-card);
   color: var(--text);
-  font-size: 36px;
-  font-weight: 760;
+  font-size: 40px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+@media (prefers-color-scheme: dark) {
+  .code-digit {
+    background: var(--surface-muted);
+  }
 }
 
 .code-actions {
@@ -538,11 +871,13 @@ a:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  margin-top: 20px;
 }
 
 .code-expiry {
   margin: 0;
-  color: var(--text-soft);
+  color: var(--text-faint);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -550,7 +885,8 @@ a:focus-visible {
   display: flex;
   min-height: 54px;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
+  gap: 14px;
 }
 
 .public-footer a {
@@ -889,15 +1225,16 @@ a:focus-visible {
 
 .alias-row {
   align-items: start;
+  /* The list is server-rendered in full (hundreds of rows). Letting the browser
+     skip layout and paint for off-screen rows keeps scrolling and the live code
+     updates smooth without windowing the DOM, which the bulk-selection and
+     usage handlers bind against. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 84px;
 }
 
 .alias-row[hidden] {
   display: none;
-}
-
-.alias-row.is-code-focus {
-  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .alias-identity,

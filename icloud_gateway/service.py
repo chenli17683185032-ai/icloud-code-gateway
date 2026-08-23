@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,12 +26,14 @@ from .hme import (
     validate_icloud_setup_session,
 )
 from .imap_otp import (
+    PUBLIC_OTP_SENDER_POLICY,
     ImapConfig,
     ImapCredentialsError,
     ImapError,
     ImapOtpReader,
 )
 from .mail_tags import refresh_usage_tags as _refresh_usage_tags
+from .mailbox_watcher import MailboxWatcher
 from .rate_limit import SlidingWindowRateLimiter
 from .security import SecretBox, SecurityError, hash_access_key
 
@@ -95,6 +97,20 @@ class CodeLookupResult:
     received_at: str | None = None
     expires_at: str | None = None
     retry_after: int | None = None
+
+
+@dataclass(frozen=True)
+class PreparedLookup:
+    """A key already rate-limited and resolved to its alias.
+
+    Long polling re-checks the index many times per request; without this split
+    each re-check would spend another token from the 12-per-minute key limiter.
+    """
+
+    alias_id: str
+    email: str
+    sender_filter: str
+    client_ip: str
 
 
 @dataclass(frozen=True)
@@ -227,7 +243,10 @@ class GatewayService:
         }
         self._last_validated_ts: float | None = None
         self._maintenance_thread: threading.Thread | None = None
+        # Separate quotas: an admin full scan used to consume the same four
+        # slots as public lookups and could starve paying buyers outright.
         self._imap_slots = threading.BoundedSemaphore(4)
+        self._admin_imap_slots = threading.BoundedSemaphore(2)
         self._admin_code_cache_lock = threading.Lock()
         self._admin_code_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.capture_manager = CaptureManager(
@@ -239,6 +258,13 @@ class GatewayService:
             profile_dir=settings.browser_profile_dir,
         )
         self._bootstrap_imap_from_environment()
+        # One warm mailbox connection serves every reader. Constructed always so
+        # callers can query it, but only started where codes are actually served;
+        # an unstarted watcher reports `ready is False` and every read falls back
+        # to the original on-demand scan.
+        self.mailbox_watcher = MailboxWatcher(self._watcher_imap_config)
+        if start_maintenance:
+            self.mailbox_watcher.start()
         self._edge_push_lock = threading.Lock()
         self._edge_reconcile_thread: threading.Thread | None = None
         if start_maintenance and settings.manages_hme:
@@ -276,6 +302,7 @@ class GatewayService:
     def shutdown(self, *, timeout: float = 10.0, close_database: bool = True) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout))
         self.request_stop()
+        self.mailbox_watcher.stop(timeout=max(0.0, deadline - time.monotonic()))
         thread = self._maintenance_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
@@ -1006,11 +1033,30 @@ class GatewayService:
             )
         self.database.set_secret(IMAP_SETTING_KEY, config.as_secret_dict())
         self.database.record_audit_event("imap_config", "saved")
+        self.mailbox_watcher.refresh_soon()
         return config
+
+    def _watcher_imap_config(self) -> ImapConfig | None:
+        """Config provider for the watcher thread; never raises into the loop."""
+        try:
+            return self.get_imap_config()
+        except (ImapCredentialsError, SecurityError, DatabaseError):
+            return None
 
     def get_imap_config(self) -> ImapConfig | None:
         value = self.database.get_secret(IMAP_SETTING_KEY)
-        return None if value is None else ImapConfig.from_mapping(value)
+        if value is None:
+            return None
+        config = ImapConfig.from_mapping(value)
+        # Edge runs in Germany. QQ IMAP without the existing CN proxy is the
+        # slow path users feel when they copy an already-generated alias.
+        if (
+            self.settings.is_edge
+            and not config.proxy
+            and self.settings.hme_proxy
+        ):
+            return replace(config, proxy=self.settings.hme_proxy)
+        return config
 
     def test_imap(self) -> None:
         config = self.get_imap_config()
@@ -1483,7 +1529,12 @@ class GatewayService:
                 self._close_client(client)
             self._finish_remote_write()
 
-    def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
+    def prepare_lookup(self, access_key: str, *, client_ip: str) -> PreparedLookup | None:
+        """Charge the rate limiters once and resolve the key to its alias.
+
+        Returns None for an unusable key, which the caller reports as
+        `invalid_key`; both cases are already audited here.
+        """
         self._require_public_otp()
         ip_key = str(client_ip or "unknown")
         ip_decision = self.rate_limiter.check("code-ip", ip_key, limit=30, window_seconds=60)
@@ -1498,7 +1549,7 @@ class GatewayService:
             if not invalid_decision.allowed:
                 raise GatewayRateLimitedError(invalid_decision.retry_after) from None
             self._audit_lookup("invalid_key", client_ip=ip_key)
-            return CodeLookupResult(status="invalid_key")
+            return None
         key_identifier = digest.hex()
         key_decision = self.rate_limiter.check(
             "code-key", key_identifier, limit=12, window_seconds=60
@@ -1508,42 +1559,111 @@ class GatewayService:
         alias = self.database.find_alias_by_access_key_hash(digest)
         if alias is None:
             self._audit_lookup("invalid_key", client_ip=ip_key)
-            return CodeLookupResult(status="invalid_key")
+            return None
+        if self.get_imap_config() is None:
+            self._audit_lookup("not_configured", alias_id=str(alias["id"]), client_ip=ip_key)
+            raise GatewayNotConfiguredError("IMAP is not configured")
+        return PreparedLookup(
+            alias_id=str(alias["id"]),
+            email=str(alias["email"]),
+            sender_filter=str(alias["sender_filter"] or ""),
+            client_ip=ip_key,
+        )
+
+    def _found_result(self, code: str, received_at: datetime) -> CodeLookupResult:
+        expires_at = received_at + timedelta(seconds=self.settings.otp_max_age_seconds)
+        return CodeLookupResult(
+            status="found",
+            code=code,
+            received_at=received_at.isoformat().replace("+00:00", "Z"),
+            expires_at=expires_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    def read_indexed_code(self, prepared: PreparedLookup) -> CodeLookupResult | None:
+        """Answer from the warm mailbox index: no IMAP, no audit on a miss.
+
+        A long poll calls this repeatedly, so misses stay silent; only the final
+        give-up is audited by `note_lookup_exhausted`.
+        """
+        watcher = self.mailbox_watcher
+        if not watcher.ready:
+            return None
+        found = watcher.latest(
+            prepared.email,
+            now_ts=float(self.clock()),
+            max_age_seconds=self.settings.otp_max_age_seconds,
+            future_skew_seconds=self.settings.otp_future_skew_seconds,
+            sender_filter=prepared.sender_filter,
+            sender_policy=PUBLIC_OTP_SENDER_POLICY,
+        )
+        if found is None:
+            return None
+        self._audit_lookup("found", alias_id=prepared.alias_id, client_ip=prepared.client_ip)
+        return self._found_result(found.code, found.received_at_utc)
+
+    def read_scanned_code(self, prepared: PreparedLookup) -> CodeLookupResult:
+        """On-demand IMAP scan, used whenever the watcher is not warm."""
         config = self.get_imap_config()
         if config is None:
-            self._audit_lookup("not_configured", alias_id=alias["id"], client_ip=ip_key)
+            self._audit_lookup(
+                "not_configured", alias_id=prepared.alias_id, client_ip=prepared.client_ip
+            )
             raise GatewayNotConfiguredError("IMAP is not configured")
         if not self._imap_slots.acquire(timeout=0.1):
             raise GatewayBusyError("IMAP reader is busy")
         try:
             result = self.imap_reader_factory(config).find_latest_code(
-                alias["email"],
+                prepared.email,
                 now_ts=float(self.clock()),
                 max_age_seconds=self.settings.otp_max_age_seconds,
                 future_skew_seconds=self.settings.otp_future_skew_seconds,
-                sender_filter=alias["sender_filter"],
-                sender_policy="gpt_grok",
+                sender_filter=prepared.sender_filter,
+                sender_policy=PUBLIC_OTP_SENDER_POLICY,
                 timeout=self.settings.otp_request_timeout_seconds,
             )
         except ImapCredentialsError:
-            self._audit_lookup("imap_invalid", alias_id=alias["id"], client_ip=ip_key)
+            self._audit_lookup(
+                "imap_invalid", alias_id=prepared.alias_id, client_ip=prepared.client_ip
+            )
             raise GatewayNotConfiguredError("IMAP is unavailable") from None
         except ImapError:
-            self._audit_lookup("imap_error", alias_id=alias["id"], client_ip=ip_key)
+            self._audit_lookup(
+                "imap_error", alias_id=prepared.alias_id, client_ip=prepared.client_ip
+            )
             raise GatewayError("IMAP lookup failed") from None
         finally:
             self._imap_slots.release()
         if result is None:
-            self._audit_lookup("no_code", alias_id=alias["id"], client_ip=ip_key)
-            return CodeLookupResult(status="waiting", retry_after=5)
-        expires_at = result.received_at + timedelta(seconds=self.settings.otp_max_age_seconds)
-        self._audit_lookup("found", alias_id=alias["id"], client_ip=ip_key)
-        return CodeLookupResult(
-            status="found",
-            code=result.code,
-            received_at=result.received_at.isoformat().replace("+00:00", "Z"),
-            expires_at=expires_at.isoformat().replace("+00:00", "Z"),
-        )
+            return self.note_lookup_exhausted(prepared)
+        self._audit_lookup("found", alias_id=prepared.alias_id, client_ip=prepared.client_ip)
+        return self._found_result(result.code, result.received_at)
+
+    def note_lookup_exhausted(self, prepared: PreparedLookup) -> CodeLookupResult:
+        self._audit_lookup("no_code", alias_id=prepared.alias_id, client_ip=prepared.client_ip)
+        return CodeLookupResult(status="waiting", retry_after=5)
+
+    def lookup_code(self, access_key: str, *, client_ip: str) -> CodeLookupResult:
+        prepared = self.prepare_lookup(access_key, client_ip=client_ip)
+        if prepared is None:
+            return CodeLookupResult(status="invalid_key")
+        indexed = self.read_indexed_code(prepared)
+        if indexed is not None:
+            return indexed
+        if self.mailbox_watcher.ready:
+            # The index is authoritative while warm; rescanning would just
+            # re-read the same mailbox the watcher already ingested.
+            return self.note_lookup_exhausted(prepared)
+        return self.read_scanned_code(prepared)
+
+    @property
+    def admin_scan_timeout_seconds(self) -> int:
+        """Upper bound on one admin IMAP scan.
+
+        The HTTP handler must allow strictly more than this, or a tuned-down
+        `otp_request_timeout_seconds` makes the request 503 while the scan is
+        still running.
+        """
+        return max(12, min(25, int(self.settings.otp_request_timeout_seconds)))
 
     def _admin_code_payload(self, alias: Mapping[str, Any], *, code: str, received_at: datetime) -> dict[str, Any]:
         value = received_at
@@ -1566,18 +1686,6 @@ class GatewayService:
         if config is None:
             self.database.record_audit_event("admin_code_scan", "not_configured")
             raise GatewayNotConfiguredError("IMAP is not configured")
-        # QQ often deposits HME forwards in Junk; auto-scan it for admin reads.
-        if not config.junk_folder and "qq.com" in config.host.casefold():
-            config = ImapConfig(
-                forwarding_email=config.forwarding_email,
-                host=config.host,
-                port=config.port,
-                username=config.username,
-                password=config.password,
-                folder=config.folder or "INBOX",
-                junk_folder="Junk",
-                proxy=config.proxy,
-            )
         aliases = self.database.list_aliases()
         wanted_ids = tuple(
             dict.fromkeys(str(item or "").strip() for item in (alias_ids or ()) if str(item or "").strip())
@@ -1595,6 +1703,44 @@ class GatewayService:
         # Local admin needs a wider window than the public 5-minute API: iCloud
         # forward to QQ can lag, and the operator often copies the mail a bit late.
         admin_max_age = max(int(self.settings.otp_max_age_seconds), 30 * 60)
+
+        # While the watcher is warm every alias is answered from memory, so the
+        # console can show codes for the whole list continuously instead of
+        # making the operator pin one alias and wait on a scan.
+        if self.mailbox_watcher.ready:
+            now = float(self.clock())
+            indexed = self.mailbox_watcher.snapshot(
+                tuple(aliases_by_email),
+                now_ts=now,
+                max_age_seconds=admin_max_age,
+                future_skew_seconds=self.settings.otp_future_skew_seconds,
+            )
+            codes: list[dict[str, Any]] = []
+            by_alias: dict[str, dict[str, Any]] = {}
+            for email, entry in indexed.items():
+                alias = aliases_by_email.get(email)
+                if alias is None:
+                    continue
+                payload = self._admin_code_payload(
+                    alias, code=entry.code, received_at=entry.received_at_utc
+                )
+                codes.append(payload)
+                by_alias[str(alias["id"])] = payload
+            codes.sort(key=lambda item: item["received_at"], reverse=True)
+            # Deliberately unaudited. The console refreshes this every few
+            # seconds and it touches no mailbox, so recording it would add a row
+            # per tick (tens of thousands a day with a tab left open) and drown
+            # the real scan/lookup history it shares a table with.
+            return {
+                "codes": codes,
+                "by_alias": by_alias,
+                "scanned": len(aliases),
+                "truncated": False,
+                "scope": "single" if len(aliases) == 1 else "all",
+                "alias_ids": [str(item["id"]) for item in aliases],
+                "max_age_seconds": admin_max_age,
+                "source": "watcher",
+            }
 
         # Positive cache only. Never cache empty results — that made the UI look
         # "stuck" with no code while a mail was already in the mailbox.
@@ -1618,13 +1764,13 @@ class GatewayService:
                     "cached": True,
                 }
 
-        if not self._imap_slots.acquire(timeout=0.1):
+        if not self._admin_imap_slots.acquire(timeout=0.1):
             self.database.record_audit_event("admin_code_scan", "busy")
             raise GatewayBusyError("IMAP reader is busy")
         scanned = 0
         truncated = False
-        codes: list[dict[str, Any]] = []
-        by_alias: dict[str, dict[str, Any]] = {}
+        codes = []
+        by_alias = {}
         try:
             reader = self.imap_reader_factory(config)
             if len(aliases) == 1:
@@ -1654,7 +1800,7 @@ class GatewayService:
                     now_ts=float(self.clock()),
                     max_age_seconds=admin_max_age,
                     future_skew_seconds=self.settings.otp_future_skew_seconds,
-                    timeout=max(12, min(25, int(self.settings.otp_request_timeout_seconds))),
+                    timeout=self.admin_scan_timeout_seconds,
                     scan_limit=120,
                     result_limit=80,
                 )
@@ -1676,7 +1822,7 @@ class GatewayService:
             self.database.record_audit_event("admin_code_scan", "imap_error")
             raise GatewayError("IMAP lookup failed") from None
         finally:
-            self._imap_slots.release()
+            self._admin_imap_slots.release()
 
         outcome = "truncated" if truncated else ("found" if codes else "empty")
         self.database.record_audit_event("admin_code_scan", outcome)

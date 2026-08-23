@@ -7,9 +7,9 @@ from fastapi.testclient import TestClient
 
 from icloud_gateway.config import ConfigurationError, Settings, decode_master_key
 from icloud_gateway.edge_sync import EdgeSyncClient, EdgeSyncError
-from icloud_gateway.security import generate_access_key
+from icloud_gateway.security import AdminSessionCodec, generate_access_key
 from icloud_gateway.service import GatewayService
-from icloud_gateway.web import create_app
+from icloud_gateway.web import ADMIN_COOKIE, create_app
 
 
 def _master_key() -> bytes:
@@ -89,6 +89,40 @@ def test_edge_mode_registers_alias_and_serves_public_code_mapping(tmp_path: Path
     assert issue.status_code == 200
 
     service.shutdown(timeout=1, close_database=True)
+
+
+def test_edge_admin_hides_browser_and_create_controls(tmp_path: Path):
+    settings = _settings(tmp_path, deployment_mode="edge", edge_sync_enabled=False, cdp_url="")
+    service = GatewayService(settings, start_maintenance=False)
+    app = create_app(settings, service=service)
+    client = TestClient(app)
+    token, _session = AdminSessionCodec(settings.master_key, lifetime_seconds=3600).issue()
+    client.cookies.set(ADMIN_COOKIE, token)
+    dashboard = client.get("/admin")
+    assert dashboard.status_code == 200
+    assert "打开 iCloud 浏览器" not in dashboard.text
+    assert "创建隐藏邮箱" not in dashboard.text
+    assert "浏览器捕获" not in dashboard.text
+    assert "云端 edge" in dashboard.text
+    assert "点击邮箱只做复制" in dashboard.text
+    service.shutdown(timeout=1, close_database=True)
+
+
+def test_edge_environment_ignores_leftover_cdp_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ICLOUD_GATEWAY_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ICLOUD_GATEWAY_ADMIN_PASSWORD", "x" * 16)
+    monkeypatch.setenv("ICLOUD_GATEWAY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ICLOUD_GATEWAY_DEPLOYMENT_MODE", "edge")
+    monkeypatch.setenv("ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN", "control-token-abcdefghijklmnop")
+    monkeypatch.setenv("ICLOUD_GATEWAY_CDP_URL", "http://browser:9222")
+    monkeypatch.setenv("ICLOUD_GATEWAY_BROWSER_PROFILE_DIR", str(tmp_path / "profile"))
+    settings = Settings.from_environment()
+    assert settings.deployment_mode == "edge"
+    assert settings.cdp_url == ""
+    assert settings.browser_profile_dir is None
+    assert settings.manages_hme is False
 
 
 def test_control_mode_hides_public_otp_and_requires_edge_url(

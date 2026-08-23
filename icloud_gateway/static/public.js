@@ -19,11 +19,18 @@
   const expiry = document.querySelector("#code-expiry");
   const copyButton = document.querySelector("#copy-code");
 
+  // The server holds each request open until the code arrives, so a round trip
+  // returns the moment mail lands instead of on a fixed poll tick. These are
+  // only the outer bounds for how long we keep re-opening that connection.
+  const MAX_WAIT_MS = 3 * 60 * 1000;
+  const BUSY_RETRY_SECONDS = 2;
+
   let activeKey = "";
   let activeCode = "";
   let pollTimer = null;
   let expiryTimer = null;
-  let attempts = 0;
+  let waitDeadline = 0;
+  let waitStartedAt = 0;
 
   function setPanel(panel) {
     [idle, loading, message, codePanel].forEach((item) => {
@@ -50,12 +57,16 @@
   }
 
   function schedulePoll(seconds) {
-    if (attempts >= 12 || !activeKey) {
+    if (!activeKey || Date.now() >= waitDeadline) {
       setBusy(false);
       showMessage("暂未收到验证码", "可以再次查询。");
       return;
     }
-    pollTimer = window.setTimeout(() => queryCode(false), Math.max(1, seconds) * 1000);
+    pollTimer = window.setTimeout(() => queryCode(false), Math.max(0, seconds) * 1000);
+  }
+
+  function waitedSeconds() {
+    return Math.max(0, Math.round((Date.now() - waitStartedAt) / 1000));
   }
 
   function showCode(code, expiresAt) {
@@ -88,15 +99,15 @@
     if (reset) {
       stopTimers();
       activeKey = keyInput.value.trim();
-      attempts = 0;
       error.textContent = "";
       if (!activeKey) {
         error.textContent = "请输入访问密钥。";
         keyInput.focus();
         return;
       }
+      waitStartedAt = Date.now();
+      waitDeadline = waitStartedAt + MAX_WAIT_MS;
     }
-    attempts += 1;
     setBusy(true);
     setPanel(loading);
     try {
@@ -113,8 +124,9 @@
         return;
       }
       if (data.status === "waiting") {
-        showMessage("正在等待验证码", `第 ${attempts} 次查询`);
-        schedulePoll(data.retry_after || 5);
+        // The request already waited server-side; reopen it straight away.
+        showMessage("正在等待验证码", `已等待 ${waitedSeconds()} 秒，收到后自动显示`);
+        schedulePoll(0);
         return;
       }
       if (data.status === "invalid_key") {
@@ -130,7 +142,7 @@
       }
       if (data.status === "busy") {
         showMessage("收件箱正忙", "稍后自动重试。");
-        schedulePoll(data.retry_after || 3);
+        schedulePoll(data.retry_after || BUSY_RETRY_SECONDS);
         return;
       }
       setBusy(false);
@@ -154,18 +166,69 @@
     toggleIcon.src = showing ? "/static/icons/eye.svg" : "/static/icons/eye-off.svg";
   });
 
+  async function writeClipboard(value) {
+    const text = String(value ?? "");
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (_error) {
+        // Fall through for older or non-secure contexts.
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.append(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("copy_failed");
+  }
+
   copyButton.addEventListener("click", async () => {
     if (!activeCode) return;
+    const label = copyButton.querySelector("span");
     try {
-      await navigator.clipboard.writeText(activeCode);
-      copyButton.querySelector("span").textContent = "已复制";
-      window.setTimeout(() => {
-        copyButton.querySelector("span").textContent = "复制";
-      }, 1600);
+      await writeClipboard(activeCode);
+      label.textContent = "已复制";
     } catch (_error) {
-      showMessage("无法复制", "请手动记录验证码。");
+      // Never swap the panel away: that used to hide the digits the user was
+      // about to type in by hand.
+      label.textContent = "复制失败";
     }
+    window.setTimeout(() => {
+      label.textContent = "复制";
+    }, 1600);
   });
+
+  // A delivered link carries the key so the buyer never types anything. The key
+  // travels in the URL *fragment*, which browsers never send to the server, so
+  // it stays out of Caddy and Cloudflare access logs. A `?key=` query is also
+  // accepted for links pasted by hand, but it is rewritten to a fragment right
+  // away so it is not carried into any later request.
+  function consumeKeyFromUrl() {
+    const fromHash = new URLSearchParams(
+      (window.location.hash || "").replace(/^#/, ""),
+    ).get("key");
+    const fromQuery = new URLSearchParams(window.location.search).get("key");
+    const key = (fromHash || fromQuery || "").trim();
+    if (!key) return "";
+    // Drop it from the address bar so a screenshot or a forwarded tab does not
+    // hand the key to someone else.
+    window.history.replaceState(null, "", window.location.pathname);
+    return key;
+  }
+
+  const deliveredKey = consumeKeyFromUrl();
+  if (deliveredKey) {
+    keyInput.value = deliveredKey;
+    queryCode(true);
+  }
 
   window.addEventListener("pagehide", stopTimers, { once: true });
 })();

@@ -32,11 +32,14 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "standalone-caddy" in overlay
     assert "external: true" in overlay
     assert "icloud-code-gateway-app" in overlay
-    assert "icloud-code-gateway-browser" in overlay
-    assert "forward_auth icloud-code-gateway-app:8080" in caddy_site
-    assert "header_up -Connection" in caddy_site
-    assert "header_up -Upgrade" in caddy_site
-    assert "reverse_proxy icloud-code-gateway-browser:6080" in caddy_site
+    assert "legacy-browser" in overlay
+    assert 'ICLOUD_GATEWAY_CDP_URL: ""' in overlay
+    assert "condition: service_started" not in overlay
+    # Edge still needs the China egress: IMAP inherits the HME proxy there.
+    assert "cn-proxy" in overlay
+    assert "forward_auth icloud-code-gateway-app:8080" not in caddy_site
+    assert "reverse_proxy icloud-code-gateway-browser:6080" not in caddy_site
+    assert "reverse_proxy icloud-code-gateway-app:8080" in caddy_site
     assert "health_uri /healthz" in caddy_site
     assert "health_headers {" in caddy_site
     assert "Host icloud.yunbay.xyz" in caddy_site
@@ -74,6 +77,17 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
         interpolation = f"{name}: ${{{name}:-{default}}}"
         assert interpolation in base
         assert interpolation in server
+
+
+def test_app_does_not_depend_on_the_browser_so_the_edge_profile_can_drop_it() -> None:
+    root = Path(__file__).resolve().parents[1]
+    base = (root / "docker-compose.yml").read_text()
+
+    app_block = base.split("\n  app:", 1)[1].split("\n  caddy:", 1)[0]
+    # Compose merges depends_on across files rather than replacing it, so a
+    # browser dependency declared in the base would still start Chromium on the
+    # VPS despite the overlay's legacy-browser profile.
+    assert "    depends_on:" not in app_block.splitlines()
 
 
 def test_proxy_defaults_fail_closed_and_build_context_excludes_secrets() -> None:

@@ -34,6 +34,7 @@
   {% endif %}
 
   <section class="status-band" aria-label="系统状态">
+    {% if manages_hme %}
     <div class="status-item">
       <div class="status-icon"><img src="/static/icons/cloud.svg" alt="" aria-hidden="true"></div>
       <div>
@@ -44,6 +45,16 @@
         {% if hme.last_validated_at %}<p class="status-meta">最近验证 {{ hme.last_validated_at }}</p>{% elif hme.host %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
       </div>
     </div>
+    {% else %}
+    <div class="status-item">
+      <div class="status-icon"><img src="/static/icons/cloud.svg" alt="" aria-hidden="true"></div>
+      <div>
+        <p class="status-name">部署模式</p>
+        <p class="status-value status-good">云端 edge</p>
+        <p class="status-meta">Apple 浏览器与创建邮箱只在本地 control</p>
+      </div>
+    </div>
+    {% endif %}
     <div class="status-item">
       <div class="status-icon"><img src="/static/icons/mail.svg" alt="" aria-hidden="true"></div>
       <div>
@@ -54,6 +65,7 @@
         {% if imap.host %}<p class="status-meta">{{ imap.host }}</p>{% endif %}
       </div>
     </div>
+    {% if manages_hme %}
     <div class="status-item" id="capture-status" data-active="{{ 'true' if capture.active else 'false' }}">
       <div class="status-icon"><img src="/static/icons/radio-tower.svg" alt="" aria-hidden="true"></div>
       <div>
@@ -62,8 +74,10 @@
         <p class="status-meta" data-capture-message>{{ capture.message_label }}</p>
       </div>
     </div>
+    {% endif %}
   </section>
 
+  {% if manages_hme %}
   <section class="workspace-section create-section" aria-labelledby="create-title">
     <div class="section-heading">
       <h1 id="create-title">创建隐藏邮箱</h1>
@@ -94,6 +108,7 @@
       <p class="form-message field-wide" id="create-message" aria-live="polite"></p>
     </form>
   </section>
+  {% endif %}
 
   <section class="workspace-section" id="aliases" aria-labelledby="aliases-title">
     <div class="section-toolbar">
@@ -107,6 +122,7 @@
           <span class="sr-only">筛选 Alias</span>
           <input id="alias-filter" type="search" autocomplete="off">
         </label>
+        {% if manages_hme %}
         <form method="post" action="/admin/hme/sync">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="secondary-button" type="submit" aria-label="从 iCloud 导入 / 刷新" title="从 iCloud 导入 / 刷新" {% if not hme.configured %}disabled{% endif %}>
@@ -114,6 +130,7 @@
             <span>导入 / 刷新</span>
           </button>
         </form>
+        {% endif %}
         <form method="post" action="/admin/tags/refresh">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描 QQ 邮箱，按开通/封号邮件更新 GPT、封号、活跃标签" {% if not imap.configured %}disabled{% endif %}>
@@ -336,7 +353,7 @@
     <div class="section-toolbar admin-codes-toolbar">
       <div class="section-heading">
         <h2 id="admin-codes-title">验证码</h2>
-        <p>复制某个邮箱后只扫这一条，验证码显示在该行后面；“刷新验证码”可全量扫描。</p>
+        <p>全部邮箱的最近验证码自动显示并刷新；点击邮箱只做复制，不触发查询。</p>
       </div>
       <div class="toolbar-actions">
         <label class="auto-refresh-control" for="auto-refresh-codes">
@@ -361,7 +378,7 @@
       </div>
       <div id="admin-codes-list"></div>
     </div>
-    <div class="empty-state" id="admin-codes-empty" hidden>最近 5 分钟暂无验证码。</div>
+    <div class="empty-state" id="admin-codes-empty" hidden>最近 30 分钟暂无验证码。</div>
   </section>
 
   <section class="workspace-section" id="query-history" aria-labelledby="query-history-title">
@@ -415,10 +432,11 @@
   <section class="workspace-section" id="connections" aria-labelledby="connections-title">
     <div class="section-heading">
       <h2 id="connections-title">连接配置</h2>
-      <p>Apple HME 与转发邮箱完全隔离。</p>
+      <p>{% if manages_hme %}Apple HME 与转发邮箱完全隔离。{% else %}云端只配置转发邮箱 IMAP；Apple 登录与创建在本地 control。{% endif %}</p>
     </div>
 
     <div class="connection-grid">
+      {% if manages_hme %}
       <details class="config-panel" {% if not hme.configured %}open{% endif %}>
         <summary>
           <span>HME Session</span>
@@ -469,6 +487,7 @@
           </form>
         </div>
       </details>
+      {% endif %}
 
       <details class="config-panel" {% if not imap.configured %}open{% endif %}>
         <summary>

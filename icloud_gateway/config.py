@@ -163,12 +163,18 @@ class Settings:
             raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is invalid")
         profile_raw = str(os.environ.get("ICLOUD_GATEWAY_BROWSER_PROFILE_DIR") or "").strip()
         browser_profile_dir = Path(profile_raw).expanduser() if profile_raw else None
+        cdp_url = str(os.environ.get("ICLOUD_GATEWAY_CDP_URL") or "").strip()
+        if mode == "edge":
+            # Cloud edge is IMAP + access keys only. Chromium stays on the
+            # local control plane even if a leftover CDP URL is still in .env.
+            cdp_url = ""
+            browser_profile_dir = None
         return cls(
             data_dir=data_dir,
             master_key=master_key,
             admin_password=admin_password,
             cookie_secure=_boolean_environment("ICLOUD_GATEWAY_COOKIE_SECURE", True),
-            cdp_url=str(os.environ.get("ICLOUD_GATEWAY_CDP_URL") or "").strip(),
+            cdp_url=cdp_url,
             browser_profile_dir=browser_profile_dir,
             hme_proxy="" if hme_proxy is None else hme_proxy.requests_url,
             public_base_url=public_base_url,

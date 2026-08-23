@@ -55,9 +55,11 @@ services:
       ICLOUD_GATEWAY_TRUSTED_HOSTS: ${ICLOUD_GATEWAY_TRUSTED_HOSTS:-${GATEWAY_DOMAIN},app,localhost,127.0.0.1}
     volumes:
       - gateway-data:/data
-    depends_on:
-      browser:
-        condition: service_started
+    # No depends_on browser. Compose merges mapping keys instead of replacing
+    # them, so a dependency declared here survives into the server overlay and
+    # drags Chromium up on the cloud edge even though that deployment puts the
+    # browser behind a profile. The app only reaches CDP lazily during an
+    # explicit capture, so start order never mattered.
     restart: unless-stopped
     read_only: true
     tmpfs:

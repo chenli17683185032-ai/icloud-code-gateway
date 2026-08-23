@@ -6,12 +6,21 @@
 
 - `app`：FastAPI 与 SQLite，非 root，根文件系统只读，数据卷为 `icloud-code-gateway_gateway-data`。
 - `browser`：独立 Chromium/Xvfb/noVNC，固定非 root UID 102，profile 卷为 `icloud-code-gateway_browser-data`。
-- `caddy`：公网 80/443、自动 HTTPS、管理员认证后的 noVNC 反向代理。
+  **只在本地 `full` / `control` 使用**；云端 `edge` 把它放在 `legacy-browser` profile 里，`up -d` 不会启动。
+- `cn-proxy`：云端必需，不可与 browser 一起删除。edge 的 IMAP 会继承 HME 代理走它出中国。
+- `caddy`：公网 80/443、自动 HTTPS、管理员认证后的 noVNC 反向代理（云端由共享 Caddy 承担，且不再反代 noVNC）。
 - 原始 noVNC：只监听宿主 `127.0.0.1:${BROWSER_NOVNC_PORT}`。
-- CDP：只 `expose` 给 Docker 网络，不发布宿主端口。
+- CDP：只 `expose` 给 Docker 网络，不发布宿主端口；`edge` 模式下 `Settings` 会强制清空 CDP 与 profile。
 - iCloud browser 与 HME API：共用 `CN_PROXY_*`；`CN_PROXY_REQUIRED=1` 时配置缺失或代理故障均失败关闭。
-- IMAP：在管理页单独配置；是否走代理按邮箱可达性决定，不自动继承 HME 代理。可选
-  填写一个垃圾邮件文件夹，保存时会与主文件夹一并执行只读验证。
+- IMAP：在管理页单独配置。**`edge` 模式下若未单独填写代理，会自动继承 HME 代理**，否则德国直连 QQ 很慢甚至不通。
+  可选填写一个垃圾邮件文件夹，保存时会与主文件夹一并执行只读验证；QQ 主机即使未填写也会自动扫描 `Junk`。
+
+## 1.1 验证码读取路径
+
+进程内有一个常驻邮箱监听器（`icloud_gateway/mailbox_watcher.py`）：单条 IMAP 长连接，增量拉取新
+UID，每封邮件只解析一次，按收件别名建内存索引。公开 `/api/code` 与管理页验证码都读这个索引，
+不再各自登录扫描。`/api/code` 在未命中时会挂起请求最多 `ICLOUD_GATEWAY_OTP_REQUEST_TIMEOUT`
+秒，邮件一到立刻返回。监听器未就绪（未配置 IMAP、正在重连）时自动回退到原来的按需扫描。
 
 数据库中的密文依赖 `ICLOUD_GATEWAY_MASTER_KEY`。丢失该主密钥时，数据库备份无法恢复 Apple Session、IMAP 密码、Alias 远端 ID 和新版本签发的访问密钥明文。
 
@@ -145,9 +154,11 @@ docker run --rm --name icg-proxy-failclosed-check \
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.server.yml build app
-docker compose -f docker-compose.yml -f docker-compose.server.yml build browser
-docker compose -f docker-compose.yml -f docker-compose.server.yml up -d cn-proxy browser app
+docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
 ```
+
+该命令只会启动 `cn-proxy` 与 `app`；`browser` 在 `legacy-browser` profile 中，云端不再运行 Chromium。
+如需临时恢复（仅排障），追加 `--profile legacy-browser`。
 
 覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信；主动健康检查必须携带 `Host: icloud.yunbay.xyz`，否则应用的 Trusted Host 中间件会把 Docker 别名 Host 拒绝为 400。站点片段只在直连对端属于 Cloudflare 官方网段时采用 `CF-Connecting-IP`；部署前应与 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6` 核对网段，不能无条件信任该请求头。
 

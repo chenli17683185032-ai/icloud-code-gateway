@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -19,8 +20,8 @@ from icloud_gateway.imap_otp import (
     ImapCredentialsError,
     OtpResult,
     RecentOtpBatch,
-    RecentOtpResult,
 )
+from icloud_gateway.mailbox_watcher import IndexedCode
 from icloud_gateway.security import AdminSessionCodec, hash_access_key
 from icloud_gateway.service import (
     GatewayNotConfiguredError,
@@ -248,11 +249,90 @@ def test_public_code_api_states_and_safe_response_contract(client, service) -> N
     assert "仅 GPT / Grok" in homepage.text
 
 
+class _WarmWatcher:
+    """Stands in for a MailboxWatcher whose index is already live."""
+
+    def __init__(self):
+        self.ready = True
+        self.entry = None
+        self.listeners = []
+
+    def latest(self, _email, **_kwargs):
+        return self.entry
+
+    def add_listener(self, callback):
+        self.listeners.append(callback)
+        return lambda: self.listeners.remove(callback)
+
+    def deliver(self, entry):
+        self.entry = entry
+        for callback in list(self.listeners):
+            callback()
+
+
+def test_public_api_holds_the_request_until_the_code_lands(client, service, monkeypatch) -> None:
+    _configure_imap(service)
+    _alias, issued = _create_keyed_alias(service)
+    # No on-demand scan may answer this; only the watcher broadcast can.
+    FakeImapReader.result = None
+    watcher = _WarmWatcher()
+    monkeypatch.setattr(service, "mailbox_watcher", watcher)
+
+    def deliver_once_parked():
+        for _ in range(500):
+            if watcher.listeners:
+                break
+            time.sleep(0.01)
+        watcher.deliver(
+            IndexedCode(
+                code="135791",
+                received_at=NOW - 1,
+                uid="9",
+                folder="INBOX",
+                from_header="ChatGPT <noreply@openai.com>",
+            )
+        )
+
+    thread = threading.Thread(target=deliver_once_parked)
+    started = time.monotonic()
+    thread.start()
+    try:
+        response = client.post("/api/code", json={"access_key": issued.access_key})
+    finally:
+        thread.join(timeout=5)
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "found"
+    assert response.json()["code"] == "135791"
+    # Woken by the delivery rather than burning the full 20s budget.
+    assert elapsed < 10
+
+
+def test_public_api_falls_back_to_scanning_when_the_watcher_is_cold(client, service) -> None:
+    _configure_imap(service)
+    _alias, issued = _create_keyed_alias(service)
+    FakeImapReader.result = OtpResult(
+        code="864209",
+        uid="12",
+        received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
+    )
+
+    # The service fixture never starts the watcher, so `ready` is False.
+    assert service.mailbox_watcher.ready is False
+    response = client.post("/api/code", json={"access_key": issued.access_key})
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "864209"
+
+
 def test_public_api_maps_rate_limit_unavailable_and_timeout(client, service, monkeypatch) -> None:
+    # Rate limiting and key resolution happen in prepare_lookup so a long poll
+    # charges the limiter once rather than on every index re-check.
     def rate_limited(_access_key, *, client_ip):
         raise GatewayRateLimitedError(17)
 
-    monkeypatch.setattr(service, "lookup_code", rate_limited)
+    monkeypatch.setattr(service, "prepare_lookup", rate_limited)
     response = client.post("/api/code", json={"access_key": "x"})
     assert response.status_code == 429
     assert response.json() == {"status": "rate_limited", "retry_after": 17}
@@ -261,7 +341,7 @@ def test_public_api_maps_rate_limit_unavailable_and_timeout(client, service, mon
     def unavailable(_access_key, *, client_ip):
         raise GatewayNotConfiguredError("not configured")
 
-    monkeypatch.setattr(service, "lookup_code", unavailable)
+    monkeypatch.setattr(service, "prepare_lookup", unavailable)
     response = client.post("/api/code", json={"access_key": "x"})
     assert response.status_code == 503
     assert response.json() == {"status": "unavailable"}
@@ -552,17 +632,11 @@ def test_admin_recent_codes_do_not_require_alias_access_keys(client, settings, s
         remote_metadata={"anonymousId": "unkeyed", "isActive": True},
         label="No public key",
     )
-    FakeImapReader.recent_batch = RecentOtpBatch(
-        items=(
-            RecentOtpResult(
-                alias="unkeyed@icloud.com",
-                code="246810",
-                uid="44",
-                received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
-            ),
-        ),
-        scanned=8,
-        truncated=False,
+    # A lone alias takes the single-lookup path, not the batch scan.
+    FakeImapReader.result = OtpResult(
+        code="246810",
+        uid="44",
+        received_at=datetime.fromtimestamp(NOW - 2, tz=UTC),
     )
 
     unauthenticated = client.post(
@@ -581,21 +655,20 @@ def test_admin_recent_codes_do_not_require_alias_access_keys(client, settings, s
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {
-        "status": "ok",
-        "codes": [
-            {
-                "alias_id": alias["id"],
-                "email": "unkeyed@icloud.com",
-                "label": "No public key",
-                "code": "246810",
-                "received_at": "2027-01-15T07:59:58Z",
-                "received_at_display": "2027-01-15 15:59:58",
-            }
-        ],
-        "scanned": 8,
-        "truncated": False,
-    }
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["truncated"] is False
+    assert body["codes"] == [
+        {
+            "alias_id": alias["id"],
+            "email": "unkeyed@icloud.com",
+            "label": "No public key",
+            "code": "246810",
+            "received_at": "2027-01-15T07:59:58Z",
+            "received_at_display": "2027-01-15 15:59:58",
+        }
+    ]
+    assert body["by_alias"][alias["id"]]["code"] == "246810"
     dashboard = client.get("/admin")
     assert "246810" not in dashboard.text
     assert 'id="admin-codes"' in dashboard.text
@@ -1158,6 +1231,11 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "class AuthenticationRequiredError extends Error" in script
     assert script.count("instanceof AuthenticationRequiredError") >= 9
     assert "邮箱：${item.email}；网站：${url}；密钥：${item.access_key}" in script
+    # A delivered link carries the key in the fragment, so it never reaches the
+    # server as a logged query string.
+    assert "function deliveryLink" in script
+    assert "#key=${encodeURIComponent(item.access_key)}" in script
+    assert 'createCopyButton(deliveryLinkList(items), "复制取码链接")' in script
     assert 'createCopyButton(emailList(items), "一键复制")' in script
     assert 'createCopyButton(standardParameterList(items), "导出信息")' in script
     assert "localStorage" not in script
@@ -1179,6 +1257,16 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "async function writeClipboard" in script
     assert 'document.execCommand("copy")' in script
     assert 'querySelectorAll(".alias-email-copy")' in script
+    assert "if (!quiet && refreshCodesButton)" in script
+    # Copying an email is a clipboard action only; it must not pin the page to
+    # one alias or start a scan.
+    assert "focusedAliasId" not in script
+    assert "FOCUSED_POLL_MS" not in script
+    assert "setFocusedAlias" not in script
+    # Usage and code no longer overwrite each other's search haystack.
+    assert "function composeRowSearch" in script
+    assert "row.dataset.searchUsage" in script
+    assert "row.dataset.searchCode" in script
     assert "/usage`" in script
     assert "usageCurrent.textContent" in script
     assert "innerHTML" not in script
@@ -1215,6 +1303,7 @@ const noop = () => {};
 global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
 global.window = {location: {origin: "https://gateway.example"}, addEventListener: noop};
 const {
+  deliveryLinkList,
   emailList,
   jobCounts,
   jobSummary,
@@ -1249,15 +1338,19 @@ const items = [
     public_url: "https://gateway.example",
   },
 ];
-const expectedOutput = "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one";
-if (standardParameters(items[0]) !== expectedOutput) process.exit(5);
+const one = "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one"
+  + "；取码链接：https://gateway.example/#key=icg_one";
+const two = "邮箱：two@icloud.com；网站：https://gateway.example；密钥：icg_two"
+  + "；取码链接：https://gateway.example/#key=icg_two";
+if (standardParameters(items[0]) !== one) process.exit(5);
 const expectedEmails = "one@icloud.com\ntwo@icloud.com";
 if (emailList(items) !== expectedEmails) process.exit(6);
-const expectedExport = [
-  "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one",
-  "邮箱：two@icloud.com；网站：https://gateway.example；密钥：icg_two",
+if (standardParameterList(items) !== [one, two].join("\n")) process.exit(7);
+const expectedLinks = [
+  "https://gateway.example/#key=icg_one",
+  "https://gateway.example/#key=icg_two",
 ].join("\n");
-if (standardParameterList(items) !== expectedExport) process.exit(7);
+if (deliveryLinkList(items) !== expectedLinks) process.exit(8);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 

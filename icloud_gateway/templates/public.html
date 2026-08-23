@@ -5,69 +5,151 @@
 {% block body %}
 <header class="public-header">
   <a class="brand" href="/" aria-label="五分钟信箱首页">
-    <span class="brand-mark" aria-hidden="true">5</span>
+    <span class="brand-mark" aria-hidden="true">
+      <img src="/static/icons/mail.svg" alt="">
+    </span>
     <span>五分钟信箱</span>
   </a>
+  <span class="brand-tag">iCloud 隐藏邮箱</span>
 </header>
 
 <main class="public-main">
-  <section class="lookup-panel" aria-labelledby="lookup-title">
-    <div class="lookup-heading">
-      <p class="window-label">查询窗口 5 分钟 · 仅 GPT / Grok</p>
-      <h1 id="lookup-title">领取验证码</h1>
+  <div class="public-stack">
+    <div class="public-hero">
+      <p class="hero-eyebrow"><span class="hero-dot" aria-hidden="true"></span>验证码收件箱</p>
+      <h1>验证码查询</h1>
+      <p class="hero-sub">输入访问密钥即可领取验证码 · 查询窗口 5 分钟 · 仅 GPT / Grok</p>
     </div>
 
-    <form class="lookup-form" id="lookup-form" novalidate>
-      <div class="field field-grow">
-        <label for="access-key">访问密钥</label>
-        <div class="secret-input">
-          <input
-            id="access-key"
-            name="access_key"
-            type="password"
-            autocomplete="off"
-            autocapitalize="none"
-            spellcheck="false"
-            maxlength="128"
-            required
-          >
-          <button class="input-icon-button" id="toggle-key" type="button" aria-label="显示密钥" title="显示密钥">
-            <img src="/static/icons/eye.svg" alt="" aria-hidden="true">
-          </button>
+    <section class="lookup-panel" aria-labelledby="lookup-title">
+      <div class="lookup-heading">
+        <span class="panel-badge" aria-hidden="true">
+          <img src="/static/icons/shield-check.svg" alt="">
+        </span>
+        <div>
+          <p class="window-label">安全验证码入口</p>
+          <h2 id="lookup-title">获取最新验证码</h2>
         </div>
-        <p class="field-error" id="key-error" aria-live="polite"></p>
       </div>
-      <button class="primary-button lookup-button" id="lookup-button" type="submit">
-        <img src="/static/icons/search.svg" alt="" aria-hidden="true">
-        <span>查询</span>
-      </button>
-    </form>
 
-    <div class="lookup-result" id="lookup-result" aria-live="polite" aria-atomic="true">
-      <div class="result-idle" id="result-idle">
-        <span class="idle-line"></span>
-        <span class="idle-line idle-line-short"></span>
-      </div>
-      <div class="result-loading" id="result-loading" hidden>
-        <span class="loading-line"></span>
-        <span class="loading-line loading-line-short"></span>
-      </div>
-      <div class="result-message" id="result-message" hidden>
-        <p class="result-title" id="result-title"></p>
-        <p class="result-detail" id="result-detail"></p>
-      </div>
-      <div class="result-code" id="result-code" hidden>
-        <div class="code-digits" id="code-digits" aria-label="验证码"></div>
-        <div class="code-actions">
-          <p class="code-expiry" id="code-expiry"></p>
-          <button class="secondary-button" id="copy-code" type="button">
-            <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
-            <span>复制</span>
-          </button>
+      <form class="lookup-form" id="lookup-form" novalidate>
+        <div class="field field-grow">
+          <label for="access-key">访问密钥</label>
+          <div class="secret-input">
+            <input
+              id="access-key"
+              name="access_key"
+              type="password"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              maxlength="128"
+              required
+            >
+            <button class="input-icon-button" id="toggle-key" type="button" aria-label="显示密钥" title="显示密钥">
+              <img src="/static/icons/eye.svg" alt="" aria-hidden="true">
+            </button>
+          </div>
+          <p class="field-error" id="key-error" aria-live="polite"></p>
+        </div>
+        <button class="primary-button lookup-button" id="lookup-button" type="submit">
+          <img src="/static/icons/search.svg" alt="" aria-hidden="true">
+          <span>查询验证码</span>
+        </button>
+      </form>
+
+      <div class="lookup-result" id="lookup-result" aria-live="polite" aria-atomic="true">
+        <div class="result-idle" id="result-idle">
+          <span class="idle-line"></span>
+          <span class="idle-line idle-line-short"></span>
+        </div>
+        <div class="result-loading" id="result-loading" hidden>
+          <span class="loading-line"></span>
+          <span class="loading-line loading-line-short"></span>
+        </div>
+        <div class="result-message" id="result-message" hidden>
+          <p class="result-title" id="result-title"></p>
+          <p class="result-detail" id="result-detail"></p>
+        </div>
+        <div class="result-code" id="result-code" hidden>
+          <div class="code-digits" id="code-digits" aria-label="验证码"></div>
+          <div class="code-actions">
+            <p class="code-expiry" id="code-expiry"></p>
+            <button class="secondary-button" id="copy-code" type="button">
+              <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
+              <span>复制</span>
+            </button>
+          </div>
         </div>
       </div>
+    </section>
+
+    <div class="info-grid">
+      <section class="info-card" aria-labelledby="notice-security">
+        <div class="info-head">
+          <span class="info-badge" aria-hidden="true">
+            <img src="/static/icons/shield-check.svg" alt="">
+          </span>
+          <h2 id="notice-security">安全使用建议</h2>
+        </div>
+        <ul class="notice-list">
+          <li class="notice-info">建议使用全新的 Chrome 配置文件登录。</li>
+          <li class="notice-info">登录时请使用稳定、可信的网络，避免频繁切换或使用共享网络。</li>
+          <li class="notice-warn">请务必登录账号后，新增 2FA 和密保验证，预防邮箱封禁或临时系统故障。</li>
+          <li class="notice-danger">但是千万千万不要修改邮箱。</li>
+        </ul>
+      </section>
+
+      <section class="info-card" aria-labelledby="notice-usage">
+        <div class="info-head">
+          <span class="info-badge" aria-hidden="true">
+            <img src="/static/icons/mail.svg" alt="">
+          </span>
+          <h2 id="notice-usage">查询说明</h2>
+        </div>
+        <ul class="notice-list">
+          <li class="notice-info">验证码会在邮件到达后自动显示，通常几秒内完成。</li>
+          <li class="notice-info">没有结果时，请先核对访问密钥，再重新发送验证邮件。</li>
+          <li class="notice-info">页面只保留当前查询会话中的验证码，不展示旧邮件列表。</li>
+          <li class="notice-warn">如持续异常，请提供发生时间和错误提示，不要提供访问密钥。</li>
+        </ul>
+      </section>
     </div>
-  </section>
+
+    <section class="info-card" aria-labelledby="notice-warranty">
+      <div class="info-head">
+        <span class="info-badge" aria-hidden="true">
+          <img src="/static/icons/circle-check.svg" alt="">
+        </span>
+        <h2 id="notice-warranty">售后质保政策</h2>
+      </div>
+
+      <div class="callout callout-ok">
+        <p class="callout-title">质保承诺</p>
+        <p>质保期内，若因我方渠道或卡片问题掉订阅，直接免费更换全新号。</p>
+      </div>
+
+      <p class="info-subtitle">质保申请流程</p>
+      <ol class="step-list">
+        <li>出现订阅异常时，请先截图账号当前状态，并告知大概的异常时间。</li>
+        <li>我方会核对后台记录，确认符合质保条件后立即安排换号。</li>
+      </ol>
+
+      <div class="callout callout-danger">
+        <p class="callout-title">以下情况不予质保</p>
+        <ul class="exclusion-list">
+          <li><strong>违规使用</strong><span>反代使用、破限行为、违反平台使用条款。</span></li>
+          <li><strong>账号操作</strong><span>人工取消订阅、尝试升级订阅、触发 KYC 验证。</span></li>
+          <li><strong>安全风险</strong><span>邮件欺诈、网络滥用。</span></li>
+          <li><strong>自行改邮</strong><span>擅自更改邮箱，我方无法查证滥用情况，视为放弃质保。</span></li>
+          <li><strong>环境关联</strong><span>因平台风控或登录环境导致新号被连带封禁。</span></li>
+          <li><strong>换号期掉线</strong><span>7 天换号期内掉订阅，属于平台行为，不予质保。</span></li>
+        </ul>
+      </div>
+
+      <p class="info-footnote">下单即视为已了解并接受以上售后规则。</p>
+    </section>
+  </div>
 </main>
 
 <footer class="public-footer">

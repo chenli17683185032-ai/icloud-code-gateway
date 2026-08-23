@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import time
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlencode
@@ -38,6 +38,7 @@ from .security import (
     verify_admin_password,
 )
 from .service import (
+    CodeLookupResult,
     GatewayBusyError,
     GatewayEdgeSyncError,
     GatewayError,
@@ -45,6 +46,7 @@ from .service import (
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
     GatewayService,
+    PreparedLookup,
 )
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -174,6 +176,48 @@ class AliasUsageRequest(BaseModel):
 
 def _client_ip(request: Request) -> str:
     return "unknown" if request.client is None else str(request.client.host or "unknown")
+
+
+async def _wait_for_code(
+    gateway: GatewayService,
+    prepared: PreparedLookup,
+    budget: float,
+) -> CodeLookupResult:
+    """Hold the request open until the code lands, instead of answering "waiting".
+
+    The mailbox watcher already keeps a warm index, so a hit costs a dict lookup.
+    On a miss we park on an asyncio.Event that the watcher thread sets, which
+    means a waiting buyer consumes no worker thread and sees the code within a
+    poll interval of it arriving rather than on their next manual retry.
+    """
+    watcher = gateway.mailbox_watcher
+    found = await asyncio.to_thread(gateway.read_indexed_code, prepared)
+    if found is not None:
+        return found
+    if not watcher.ready:
+        # No warm index: fall back to the original on-demand scan.
+        return await asyncio.to_thread(gateway.read_scanned_code, prepared)
+
+    loop = asyncio.get_running_loop()
+    event = asyncio.Event()
+    unsubscribe = watcher.add_listener(lambda: loop.call_soon_threadsafe(event.set))
+    deadline = loop.time() + float(budget)
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return await asyncio.to_thread(gateway.note_lookup_exhausted, prepared)
+            # Clear before reading so mail that lands mid-read still wakes us.
+            event.clear()
+            found = await asyncio.to_thread(gateway.read_indexed_code, prepared)
+            if found is not None:
+                return found
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except TimeoutError:
+                return await asyncio.to_thread(gateway.note_lookup_exhausted, prepared)
+    finally:
+        unsubscribe()
 
 
 def _admin_session(
@@ -412,15 +456,19 @@ def create_app(
     async def code_lookup(request: Request, payload: CodeRequest):
         if not settings.serves_public_otp:
             return JSONResponse({"status": "not_allowed"}, status_code=404)
+        budget = max(1, settings.otp_request_timeout_seconds)
         try:
-            result = await asyncio.wait_for(
+            prepared = await asyncio.wait_for(
                 asyncio.to_thread(
-                    gateway.lookup_code,
+                    gateway.prepare_lookup,
                     payload.access_key,
                     client_ip=_client_ip(request),
                 ),
-                timeout=max(1, settings.otp_request_timeout_seconds) + 1,
+                timeout=budget + 1,
             )
+            if prepared is None:
+                return JSONResponse({"status": "invalid_key"}, status_code=404)
+            result = await _wait_for_code(gateway, prepared, budget)
         except TimeoutError:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         except GatewayRateLimitedError as exc:
@@ -530,21 +578,29 @@ def create_app(
         gateway.database.record_audit_event("admin_login", "succeeded")
         return response
 
+    def _refresh_aliases_quietly() -> None:
+        # Detached from the response, so a failed reconcile stays invisible here
+        # and surfaces through the explicit refresh button instead.
+        with suppress(Exception):
+            gateway.ensure_remote_aliases()
+
     @app.get("/admin", response_class=HTMLResponse)
     async def admin_dashboard(request: Request, notice: str = ""):
         session = _admin_session(request, session_codec, settings=settings)
         if session is None:
             return RedirectResponse("/admin/login", status_code=303)
-        auto_notice = ""
-        if not notice:
-            try:
-                auto_notice = await asyncio.to_thread(gateway.ensure_remote_aliases)
-            except Exception:
-                auto_notice = ""
+        if not notice and settings.manages_hme:
+            # Never render behind Apple. This used to be awaited inline with no
+            # timeout, so a stale snapshot meant a blank page for as long as a
+            # session validate plus a full HME listing took. The refresh now
+            # runs detached (it is single-flight and rate-limited internally)
+            # and shows up on the next load; "import / refresh" still forces a
+            # synchronous reconcile when the operator wants one.
+            asyncio.get_running_loop().run_in_executor(None, _refresh_aliases_quietly)
         context = gateway.dashboard()
         context["capture"] = _capture_view(context["capture"])
         notice_params = {key: str(value) for key, value in request.query_params.multi_items()}
-        notice_message, notice_kind = _build_admin_notice(notice or auto_notice, notice_params)
+        notice_message, notice_kind = _build_admin_notice(notice, notice_params)
         context.update(
             {
                 "page_title": "iCloud 验证码网关",
@@ -556,6 +612,7 @@ def create_app(
                 "alias_batch_limit": settings.alias_batch_limit,
                 "public_base_url": settings.public_base_url,
                 "deployment_mode": settings.deployment_mode,
+                "manages_hme": settings.manages_hme,
                 "edge_sync_enabled": bool(context.get("edge_sync", {}).get("enabled")),
             }
         )
@@ -902,7 +959,7 @@ def create_app(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(gateway.admin_recent_codes, alias_ids or None),
-                timeout=max(1, settings.otp_request_timeout_seconds) + 1,
+                timeout=gateway.admin_scan_timeout_seconds + 2,
             )
         except TimeoutError:
             return JSONResponse({"status": "unavailable"}, status_code=503)

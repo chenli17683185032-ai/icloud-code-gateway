@@ -1291,6 +1291,33 @@ def test_imap_bootstrap_from_environment(tmp_path, monkeypatch) -> None:
     assert config.host == "imap.example.com"
 
 
+def test_watcher_backed_admin_reads_are_not_audited(tmp_path) -> None:
+    value = service(tmp_path)
+    configure_imap(value)
+    alias = value.database.upsert_alias(
+        email="watched@icloud.com",
+        remote_metadata={"anonymousId": "watched"},
+        label="Watched",
+    )
+
+    class WarmWatcher:
+        ready = True
+
+        def snapshot(self, _emails, **_kwargs):
+            return {}
+
+    value.mailbox_watcher = WarmWatcher()
+    before = len(value.database.list_audit_events(limit=500))
+
+    for _ in range(5):
+        value.admin_recent_codes()
+
+    # The console polls this continuously; a row per tick would swamp the
+    # shared audit table within a day.
+    assert len(value.database.list_audit_events(limit=500)) == before
+    assert value.database.get_alias(alias["id"])["email"] == "watched@icloud.com"
+
+
 def test_admin_recent_codes_single_alias_uses_latest_lookup(tmp_path) -> None:
     value = service(tmp_path)
     configure_imap(value)
