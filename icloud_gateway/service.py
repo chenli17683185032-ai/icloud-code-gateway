@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1047,16 +1047,13 @@ class GatewayService:
         value = self.database.get_secret(IMAP_SETTING_KEY)
         if value is None:
             return None
-        config = ImapConfig.from_mapping(value)
-        # Edge runs in Germany. QQ IMAP without the existing CN proxy is the
-        # slow path users feel when they copy an already-generated alias.
-        if (
-            self.settings.is_edge
-            and not config.proxy
-            and self.settings.hme_proxy
-        ):
-            return replace(config, proxy=self.settings.hme_proxy)
-        return config
+        # Never inject the HME proxy here. Whether the mailbox is reachable
+        # directly is a property of the mailbox, not of the Apple API: the
+        # production edge reaches QQ IMAP from Germany in about two seconds
+        # while the CN proxy cannot reach it at all, so inheriting turned
+        # every public lookup into imap_error. Set a proxy on the IMAP form
+        # when one is actually needed.
+        return ImapConfig.from_mapping(value)
 
     def test_imap(self) -> None:
         config = self.get_imap_config()
