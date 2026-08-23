@@ -1599,3 +1599,8 @@ def test_admin_refresh_tags_button_and_notice(client, settings, service, monkeyp
     done = client.get(location)
     assert "标签已更新" in done.text
     assert "写入 2 个" in done.text
+    # The scan counts distinguish "the mailbox holds no more accounts" from
+    # "the sweep found nothing", which a zero-write result cannot show alone.
+    assert "scanned=" in location
+    assert "classified=" in location
+    assert "扫描" in done.text and "识别" in done.text

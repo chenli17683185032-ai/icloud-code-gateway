@@ -110,8 +110,14 @@ def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) ->
         matched = _notice_int(params.get("matched"))
         active = _notice_int(params.get("active"))
         banned = _notice_int(params.get("banned"))
+        scanned = _notice_int(params.get("scanned"))
+        classified = _notice_int(params.get("classified"))
+        # Without the scan counts there is no way to tell "the mailbox only
+        # holds this many accounts" from "the sweep is missing mail", which is
+        # exactly the question a zero-write result raises.
         return (
-            f"标签已更新：匹配 {matched} 个账号，写入 {updated} 个"
+            f"标签已更新：扫描 {scanned} 封邮件，识别 {classified} 封开通/封号通知，"
+            f"匹配 {matched} 个账号，写入 {updated} 个"
             f"（GPT 活跃 {active}，封号 {banned}）。",
             "success",
         )
@@ -753,6 +759,8 @@ def create_app(
             matched=int(result.get("matched") or 0),
             active=int(result.get("gpt_active") or 0),
             banned=int(result.get("gpt_banned") or 0),
+            scanned=int(result.get("scanned") or 0),
+            classified=int(result.get("classified") or 0),
         )
 
     @app.post("/admin/edge/sync")
