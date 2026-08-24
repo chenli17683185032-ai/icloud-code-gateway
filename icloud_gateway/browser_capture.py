@@ -12,7 +12,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .hme import HmeSessionError, ICloudHmeSession, parse_hme_request
+from .hme import (
+    HmeError,
+    HmeNetworkError,
+    HmeSessionError,
+    ICloudHmeSession,
+    parse_hme_request,
+)
 
 DEFAULT_CAPTURE_URL = "https://www.icloud.com.cn/icloudplus/"
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 15 * 60
@@ -498,6 +504,36 @@ class CaptureManager:
                 state="cancelled" if cancelled else "failed",
                 message=("iCloud capture cancelled" if cancelled else str(exc)),
                 error_code=(None if cancelled else exc.code),
+                started_at=started_at,
+            )
+            return
+        except HmeNetworkError:
+            self._finish(
+                job,
+                state="failed",
+                message=(
+                    "captured session could not be verified because the iCloud "
+                    "network request failed"
+                ),
+                error_code="capture_save_network",
+                started_at=started_at,
+            )
+            return
+        except HmeSessionError:
+            self._finish(
+                job,
+                state="failed",
+                message="captured session was rejected during iCloud verification",
+                error_code="capture_save_session",
+                started_at=started_at,
+            )
+            return
+        except HmeError:
+            self._finish(
+                job,
+                state="failed",
+                message="captured session received an invalid iCloud verification response",
+                error_code="capture_save_validation",
                 started_at=started_at,
             )
             return

@@ -189,6 +189,8 @@ uv run python -m compileall -q icloud_gateway tests
 
 云端 `edge` 不再运行 Chromium：`browser` 被放进 `legacy-browser` profile，`edge` 模式还会强制清空 `ICLOUD_GATEWAY_CDP_URL` 与浏览器 profile。**但 `cn-proxy` 必须保留**——edge 的 IMAP 在未单独配置代理时会继承 HME 代理经由它出中国。
 
+如果 VPS 曾经以旧版 `full` 模式启动过，Compose profile 不会自动停止已经存在的 browser 容器。迁移到 `edge` 后应在服务器项目目录执行一次 `./scripts/remove-edge-browser.sh`；它只停止并移除经过 Compose 标签核验的遗留 browser 容器，不重启 app/cn-proxy，也不删除 browser-data 卷或镜像。
+
 本次 IMAP 文件夹编码实现参考了 MIT 许可的
 [IC-VeilMail](https://github.com/Redmig110/ic-veilmail)。完整归属与许可文本见
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

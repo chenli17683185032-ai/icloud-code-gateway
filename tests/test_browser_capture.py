@@ -14,7 +14,7 @@ from icloud_gateway.browser_capture import (
     _resolve_cdp_endpoint,
     _validate_capture_url,
 )
-from icloud_gateway.hme import ICloudHmeSession
+from icloud_gateway.hme import HmeNetworkError, ICloudHmeSession
 
 
 def captured_session() -> ICloudHmeSession:
@@ -182,3 +182,24 @@ def test_manager_sanitizes_unexpected_save_failure() -> None:
     assert terminal["state"] == "failed"
     assert terminal["error_code"] == "capture_save_failed"
     assert "database-password-canary" not in terminal["message"]
+
+
+def test_manager_distinguishes_network_failure_after_capture() -> None:
+    def runner(**_kwargs):
+        return captured_session()
+
+    def save(_session):
+        raise HmeNetworkError("proxy-password-canary")
+
+    manager = CaptureManager(
+        cdp_url="http://browser:9222",
+        on_session=save,
+        runner=runner,
+    )
+    manager.start()
+
+    terminal = wait_for_terminal(manager)
+
+    assert terminal["state"] == "failed"
+    assert terminal["error_code"] == "capture_save_network"
+    assert "proxy-password-canary" not in terminal["message"]

@@ -160,6 +160,14 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
 该命令只会启动 `cn-proxy` 与 `app`；`browser` 在 `legacy-browser` profile 中，云端不再运行 Chromium。
 如需临时恢复（仅排障），追加 `--profile legacy-browser`。
 
+注意：profile 只控制“以后是否启动”，不会停止迁移前已经存在的 browser 容器。首次从 `full` 切换到 `edge` 后执行一次：
+
+```bash
+./scripts/remove-edge-browser.sh
+```
+
+脚本会核验 deployment mode 与 Compose 标签，只移除 `icloud-code-gateway/browser` 容器；app、cn-proxy、SQLite、browser-data 卷和 browser 镜像均保持不变。确认不再需要云端回滚浏览器后，镜像清理由运维人员另行执行，不放进自动脚本。
+
 覆盖文件把项目内置 `caddy` 放入 `standalone-caddy` profile，因此不会与现有 80/443 冲突。把 `deploy/Caddyfile.icloud.yunbay.xyz` 追加到现有 Caddyfile，先执行 `caddy validate`，再优雅 reload。现有 Caddy 与 app/browser 通过 `app_yunbay-network` 上的唯一别名通信；主动健康检查必须携带 `Host: icloud.yunbay.xyz`，否则应用的 Trusted Host 中间件会把 Docker 别名 Host 拒绝为 400。站点片段只在直连对端属于 Cloudflare 官方网段时采用 `CF-Connecting-IP`；部署前应与 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6` 核对网段，不能无条件信任该请求头。
 
 ## 4. 在线 iCloud 维护
@@ -348,6 +356,9 @@ app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带
 
 ## 11. 运维记录
 
+- 2026-08-24：本地 control 会话捕获故障已修复。根因是启动器在本机 `127.0.0.1:7897` 无监听时仍无条件配置 HME SOCKS 代理；同一份已保存 Session 直连 Apple 可只读列出 582 条 Alias，经离线代理则返回 `HmeNetworkError`。启动器现仅在默认本地代理端口实际可连接时自动启用，否则直连；捕获状态另外区分 Apple API 网络、Session 拒绝、验证响应和本地保存失败。定向 140 项测试通过，重启本地 control 后真实“登录更新”约 11 秒进入 `captured`，原数据库和 browser profile 保留。
+- 2026-08-24：已有邮箱点击复制改为在原始点击手势中优先执行同步本地复制，成功后不等待 Clipboard 权限检查；静态合同继续证明该动作不调用后端、不固定单一 Alias、不触发 IMAP。新增 `scripts/remove-edge-browser.sh`，用于 `full -> edge` 迁移后一次性移除 Compose profile 不会自动停止的旧 browser 容器，严格核验 edge mode 和 Compose 标签，并保留 app/cn-proxy、SQLite、browser-data 卷与镜像。
+- 2026-08-24：公网 `https://icloud.yunbay.xyz/healthz` 保持 200，但本轮没有进入 VPS。手册原放行节点 `US 33 AI加速 x1.0` 当前无法建立外网连接；FlClash 当前 Mixed 端口为 7890，当前新加坡及三个不同美国出口均在 SSH banner 阶段被服务器白名单丢弃。服务器未执行命令，未修改容器、防火墙、数据或部署标记；遗留 browser 容器的实时状态与清理仍待可用白名单出口恢复后完成。
 - 2026-08-09：Alias 用途状态、点击邮箱复制和本地单次建模 100 项已完成生产收口。云端 `edge` 继续显式保持批量上限 50；生产提交为 `83df4668e4ccbd606c47a0d97c1bee5c6118fa04`，其中 `b38773b` 承载功能适配，`83df466` 只修正 Docker healthcheck Host 合同并增加回归测试。最终新 app 镜像为 `sha256:d25512d051937fe161f697ed770040fdc207537d3297e9c57f7762e6c534e5f8`，固定为 `latest/prod/release-83df466`；旧镜像 `sha256:5defdf1f4b1b93b66187d97fe05e38ac4ffcb87a77948cba67f799a483c36f4a` 保留 `rollback-pre-alias-usage-83df466-20260809T162411Z`。watchdog 26 秒接受容器、内网、公网、Caddy-origin、SQLite/schema 和 edge=50 连续探针，最终 app/browser/cn-proxy/Caddy 均 `healthy/restart=0/OOM=false`，后三者 ID 未变。
 - 2026-08-09：生产 SQLite 前后均为 `quick_check=ok`，375 条 Alias、357 条 active/keyed、2 条 setting、1 条 metadata、2158 条 audit、22 个 job、156 个 item 及表摘要守恒；`usage_label TEXT NOT NULL DEFAULT ''` 存在，非空用途为 0，active job 为 0。候选迁移、用途 API/XSS、邮箱复制静态合同、OTP fixture、旧镜像读新 schema、无效 key 404、实时有效 key HTTP 200 `waiting`、公网/管理页/noVNC 边界全部通过，未执行真实 Apple 100 项创建。成功审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T162411Z-83df466`，最终清单 SHA-256 为 `01cf7b4c85b331d94cc411d3249d1888e82b83b0c8bc11f731d283f89f81d115`，候选资源为 0。
 - 2026-08-09：此前数次未接受切换均由 watchdog 自动恢复 `07a3534`，没有等待人工恢复。最终窄字段 `Health.Log` 证明新镜像原 healthcheck 连续返回 HTTP 400，而带可信 Host 的业务探针为 200；修复后新容器在正式切换中正常转为 `healthy`。共享 Caddy 未重建、未在最终发布中 reload，browser/profile 和 cn-proxy 未动。

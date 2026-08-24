@@ -149,6 +149,14 @@ CAPTURE_STATE_MESSAGES = {
     "cancelled": "捕获已取消。",
     "failed": "捕获失败，请检查浏览器连接、本机 Chromium 或会话状态。",
 }
+CAPTURE_ERROR_MESSAGES = {
+    "capture_save_network": (
+        "已捕获浏览器会话，但连接 Apple HME API 失败；请检查本机代理或网络后重试。"
+    ),
+    "capture_save_session": "已捕获浏览器会话，但 Apple 拒绝了该 Session；请重新登录后重试。",
+    "capture_save_validation": "已捕获浏览器会话，但 Apple 返回的数据未通过验证；请稍后重试。",
+    "capture_save_failed": "已捕获浏览器会话，但本地保存失败；原有 Session 未被覆盖。",
+}
 
 
 class CodeRequest(BaseModel):
@@ -341,10 +349,14 @@ class ControlStateRequest(BaseModel):
 
 def _capture_view(status: dict[str, Any]) -> dict[str, Any]:
     state = str(status.get("state") or "idle")
+    error_code = str(status.get("error_code") or "")
     return {
         **status,
         "state_label": CAPTURE_STATE_LABELS.get(state, state),
-        "message_label": CAPTURE_STATE_MESSAGES.get(state, "状态已更新。"),
+        "message_label": CAPTURE_ERROR_MESSAGES.get(
+            error_code,
+            CAPTURE_STATE_MESSAGES.get(state, "状态已更新。"),
+        ),
     }
 
 

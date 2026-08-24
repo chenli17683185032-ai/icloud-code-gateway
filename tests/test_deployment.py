@@ -90,6 +90,33 @@ def test_app_does_not_depend_on_the_browser_so_the_edge_profile_can_drop_it() ->
     assert "    depends_on:" not in app_block.splitlines()
 
 
+def test_local_control_only_auto_enables_a_live_proxy() -> None:
+    launcher = (
+        Path(__file__).resolve().parents[1] / "scripts" / "run-local-control.sh"
+    ).read_text()
+
+    assert 'local_proxy_is_listening "$HME_PROXY_DEFAULT"' in launcher
+    assert 'export ICLOUD_GATEWAY_HME_PROXY_SERVER="$HME_PROXY_DEFAULT"' in launcher
+    assert (
+        'ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$HME_PROXY_DEFAULT}"'
+        not in launcher
+    )
+
+
+def test_edge_browser_cleanup_is_scoped_and_preserves_recovery_assets() -> None:
+    cleanup = (
+        Path(__file__).resolve().parents[1] / "scripts" / "remove-edge-browser.sh"
+    ).read_text()
+
+    assert '"$deployment_mode" != "edge"' in cleanup
+    assert "com.docker.compose.project" in cleanup
+    assert "com.docker.compose.service" in cleanup
+    assert "--profile legacy-browser stop -t 10 browser" in cleanup
+    assert "--profile legacy-browser rm -f browser" in cleanup
+    assert "docker volume rm" not in cleanup
+    assert "docker image rm" not in cleanup
+
+
 def test_proxy_defaults_fail_closed_and_build_context_excludes_secrets() -> None:
     root = Path(__file__).resolve().parents[1]
     compose = (root / "docker-compose.yml").read_text()

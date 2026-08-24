@@ -12,10 +12,12 @@ LOG_FILE="${LOG_DIR}/control.log"
 ENV_FILE="${PROJECT_DIR}/.env"
 CREDS_FILE=""
 for candidate in \
+  "${HOME}/Desktop/鲨鱼工具库/云贝平台/服务器相关/icloud-control-plane.env" \
+  "${HOME}/Documents/鲨鱼项目资料/云贝/服务器相关/icloud-control-plane.env" \
+  "${HOME}/Desktop/云贝/服务器相关/icloud-control-plane.env" \
   "${PROJECT_DIR}/icloud-control-plane.env" \
   "${PROJECT_DIR}/../icloud-control-plane.env" \
-  "${HOME}/Desktop/鲨鱼工具库/iCloud管理工具/icloud-control-plane.env" \
-  "${HOME}/Desktop/云贝/服务器相关/icloud-control-plane.env"
+  "${HOME}/Desktop/鲨鱼工具库/iCloud管理工具/icloud-control-plane.env"
 do
   if [[ -f "$candidate" ]]; then
     CREDS_FILE="$candidate"
@@ -93,14 +95,41 @@ for line in path.read_text(encoding="utf-8").splitlines():
 PY
 }
 
+local_proxy_is_listening() {
+  local proxy_url="$1"
+  "$BOOTSTRAP_PY" - "$proxy_url" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    host = parsed.hostname
+    port = parsed.port
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if host not in {"127.0.0.1", "localhost", "::1"} or port is None:
+    raise SystemExit(1)
+try:
+    connection = socket.create_connection((host, port), timeout=0.5)
+except OSError:
+    raise SystemExit(1)
+connection.close()
+PY
+}
+
 ensure_venv() {
   if [[ -x "$VENV_PY" ]]; then
     return 0
   fi
+  if [[ -e "${PROJECT_DIR}/.venv" ]]; then
+    echo "虚拟环境已损坏（找不到 Python 可执行文件），正在删除后重建..."
+    rm -rf "${PROJECT_DIR}/.venv"
+  fi
   echo "首次准备 Python 环境..."
   echo "使用引导 Python：${BOOTSTRAP_PY}"
   if command -v uv >/dev/null 2>&1; then
-    (cd "$PROJECT_DIR" && UV_PYTHON="$BOOTSTRAP_PY" uv sync) || true
+    (cd "$PROJECT_DIR" && UV_PROJECT_ENVIRONMENT="${PROJECT_DIR}/.venv" UV_PYTHON="$BOOTSTRAP_PY" uv sync) || true
   fi
   if [[ ! -x "$VENV_PY" ]]; then
     "$BOOTSTRAP_PY" -m venv "${PROJECT_DIR}/.venv"
@@ -198,6 +227,40 @@ stop_control_process() {
   return 1
 }
 
+# 认领已在监听的本机 control 进程（避免启动脚本/rsync 冲掉 control.pid 后误判占用）
+claim_existing_control() {
+  local listen_pid=""
+  if command -v lsof >/dev/null 2>&1; then
+    listen_pid="$(lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+  fi
+  if [[ -n "$listen_pid" ]] && health_ok; then
+    echo "$listen_pid" >"$PID_FILE"
+    echo "本地 control 已在运行 (pid=${listen_pid})."
+    echo "管理页：${ADMIN_URL}"
+    if command -v open >/dev/null 2>&1; then
+      open "$ADMIN_URL" || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# 服务已健康时不要先去修 venv：损坏的 .venv 不该挡住打开管理页。
+if [[ -f "$PID_FILE" ]]; then
+  EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if is_running "${EXISTING_PID:-}" && health_ok; then
+    echo "本地 control 已在运行 (pid=${EXISTING_PID})."
+    echo "管理页：${ADMIN_URL}"
+    if command -v open >/dev/null 2>&1; then
+      open "$ADMIN_URL" || true
+    fi
+    exit 0
+  fi
+fi
+if claim_existing_control; then
+  exit 0
+fi
+
 ensure_venv
 ensure_playwright
 
@@ -234,8 +297,18 @@ export ICLOUD_GATEWAY_LOG_LEVEL=INFO
 export ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=100
 # 无 Docker 不走远程 CDP；清空避免误连 docker 主机名
 export ICLOUD_GATEWAY_CDP_URL=""
-# 本机 Clash 回国代理（HME + 云端 edge 同步共用；本机直连 Cloudflare 常失败）
-export ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$HME_PROXY_DEFAULT}"
+# 本机 Clash 回国代理。只有端口真的在线时才自动启用默认代理；否则
+# requests 会在“浏览器已捕获 Session”之后卡死/失败，造成误导性的捕获错误。
+# 显式传入的代理仍原样保留，便于有代理需求的环境自行控制。
+if [[ -n "${ICLOUD_GATEWAY_HME_PROXY_SERVER:-}" || -n "${ICLOUD_GATEWAY_HME_PROXY:-}" ]]; then
+  echo "HME 网络：使用显式代理配置"
+elif local_proxy_is_listening "$HME_PROXY_DEFAULT"; then
+  export ICLOUD_GATEWAY_HME_PROXY_SERVER="$HME_PROXY_DEFAULT"
+  echo "HME 网络：检测到本机代理，已启用"
+else
+  unset ICLOUD_GATEWAY_HME_PROXY_SERVER 2>/dev/null || true
+  echo "HME 网络：本机代理未运行，自动直连 Apple"
+fi
 export ICLOUD_GATEWAY_HME_PROXY_REQUIRED="${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
 
 
@@ -272,24 +345,6 @@ else
   echo "IMAP 本地取码：未配置（可在凭据文件写入 ICLOUD_GATEWAY_IMAP_USERNAME / PASSWORD）"
 fi
 
-
-# 认领已在监听的本机 control 进程（避免启动脚本/rsync 冲掉 control.pid 后误判占用）
-claim_existing_control() {
-  local listen_pid=""
-  if command -v lsof >/dev/null 2>&1; then
-    listen_pid="$(lsof -nP -iTCP:"$APP_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
-  fi
-  if [[ -n "$listen_pid" ]] && health_ok; then
-    echo "$listen_pid" >"$PID_FILE"
-    echo "本地 control 已在运行 (pid=${listen_pid})."
-    echo "管理页：${ADMIN_URL}"
-    if command -v open >/dev/null 2>&1; then
-      open "$ADMIN_URL" || true
-    fi
-    return 0
-  fi
-  return 1
-}
 
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"

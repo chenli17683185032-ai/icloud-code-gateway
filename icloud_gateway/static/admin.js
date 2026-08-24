@@ -118,14 +118,9 @@
 
   async function writeClipboard(value) {
     const text = String(value ?? "");
-    if (navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(text);
-        return;
-      } catch (_error) {
-        // Fall through to the selection-based copy path for older/insecure contexts.
-      }
-    }
+    // Run the synchronous path inside the original click gesture. Some browser
+    // clipboard permission checks take seconds even for plain text; execCommand
+    // completes immediately and keeps copying an existing email fully local.
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.readOnly = true;
@@ -135,9 +130,18 @@
     document.body.append(textarea);
     textarea.select();
     textarea.setSelectionRange(0, textarea.value.length);
-    const copied = document.execCommand("copy");
-    textarea.remove();
-    if (!copied) throw new Error("copy_failed");
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+    if (copied) return;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    throw new Error("copy_failed");
   }
 
   const CANONICAL_USAGE_TOKENS = {

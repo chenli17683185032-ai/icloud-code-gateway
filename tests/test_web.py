@@ -28,9 +28,22 @@ from icloud_gateway.service import (
     GatewayRateLimitedError,
     GatewayService,
 )
-from icloud_gateway.web import ADMIN_COOKIE, MAX_REQUEST_BYTES, create_app
+from icloud_gateway.web import ADMIN_COOKIE, MAX_REQUEST_BYTES, _capture_view, create_app
 
 NOW = 1_800_000_000.0
+
+
+def test_capture_view_explains_post_capture_network_failure() -> None:
+    view = _capture_view(
+        {
+            "state": "failed",
+            "error_code": "capture_save_network",
+            "message": "sanitized internal status",
+        }
+    )
+
+    assert "已捕获浏览器会话" in view["message_label"]
+    assert "代理或网络" in view["message_label"]
 
 
 class FakeHmeClient:
@@ -1256,6 +1269,10 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "尚未开始 ${counts.queued} 项" in script
     assert "async function writeClipboard" in script
     assert 'document.execCommand("copy")' in script
+    clipboard = script.split("async function writeClipboard", 1)[1].split(
+        "const CANONICAL_USAGE_TOKENS", 1
+    )[0]
+    assert clipboard.index('document.execCommand("copy")') < clipboard.index("navigator.clipboard")
     assert 'querySelectorAll(".alias-email-copy")' in script
     assert "if (!quiet && refreshCodesButton)" in script
     # Copying an email is a clipboard action only; it must not pin the page to
