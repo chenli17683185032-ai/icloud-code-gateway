@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      content="#f3efe5"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#171b1e"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta
+      name="description"
+      content="使用 iCloud 隐藏邮箱和 Token 查看最近收到的验证邮件。"
+    />
+    <title>隐邮收件箱</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <header class="site-header" aria-label="网站标题">
+      <a class="brand" href="/" aria-label="隐邮收件箱首页">
+        <span class="brand-stamp" aria-hidden="true">隐</span>
+        <span>
+          <strong>隐邮收件箱</strong>
+          <small>Private relay mailbox</small>
+        </span>
+      </a>
+      <div class="service-state" aria-label="服务状态">
+        <span class="state-dot" aria-hidden="true"></span>
+        Cloudflare 安全收信
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <section id="entry-view" class="entry-view" aria-labelledby="entry-title">
+        <div class="entry-intro">
+          <p class="eyebrow">你的临时邮件，只在需要时打开</p>
+          <h1 id="entry-title">查看隐藏邮箱<br />最近收到的邮件</h1>
+          <p class="entry-copy">
+            输入 iCloud 隐藏邮箱和配套
+            Token。无论是你自己的邮箱还是分享给他人的邮箱，
+            验证成功后都可以查看验证码、正文和收件时间。
+          </p>
+        </div>
+
+        <form id="lookup-form" class="lookup-form" novalidate>
+          <div class="form-heading">
+            <span class="sheet-number" aria-hidden="true">01</span>
+            <div>
+              <h2>打开收件箱</h2>
+              <p>Token 通常以 <code>icg_</code> 开头。</p>
+            </div>
+          </div>
+
+          <label class="field">
+            <span>隐藏邮箱</span>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              inputmode="email"
+              autocomplete="email"
+              maxlength="254"
+              placeholder="example@icloud.com"
+              required
+            />
+          </label>
+
+          <label class="field">
+            <span>查询 Token</span>
+            <input
+              id="token"
+              name="token"
+              type="password"
+              autocomplete="off"
+              maxlength="128"
+              placeholder="icg_…"
+              required
+            />
+          </label>
+
+          <button id="lookup-button" class="primary-button" type="submit">
+            查看最近邮件
+          </button>
+          <p
+            id="lookup-status"
+            class="form-status"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <p class="form-footnote">
+            邮箱和 Token 只通过加密连接发送，不会出现在网址中。
+          </p>
+        </form>
+
+        <dl class="privacy-notes">
+          <div>
+            <dt>24 小时</dt>
+            <dd>默认邮件保留时间</dd>
+          </div>
+          <div>
+            <dt>15 分钟</dt>
+            <dd>单次查询会话</dd>
+          </div>
+          <div>
+            <dt>不留浏览器</dt>
+            <dd>邮箱与 Token 不写入本地存储</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section
+        id="mailbox-view"
+        class="mailbox-view"
+        aria-labelledby="mailbox-title"
+        hidden
+      >
+        <div class="mailbox-toolbar">
+          <div>
+            <p class="eyebrow">已验证的私人收件箱</p>
+            <h1 id="mailbox-title" tabindex="-1">最近邮件</h1>
+            <p id="mailbox-email" class="mailbox-email"></p>
+          </div>
+          <div class="toolbar-actions">
+            <span
+              id="refresh-state"
+              class="refresh-state"
+              role="status"
+              aria-live="polite"
+            >
+              正在同步
+            </span>
+            <button id="refresh-button" class="quiet-button" type="button">
+              立即刷新
+            </button>
+            <button id="logout-button" class="quiet-button" type="button">
+              退出收件箱
+            </button>
+          </div>
+        </div>
+
+        <div class="mailbox-container">
+          <div class="mailbox-workspace">
+            <aside class="message-index" aria-label="邮件列表">
+              <div class="index-heading">
+                <span>收件记录</span>
+                <span id="message-count">0 封</span>
+              </div>
+              <div id="message-list" class="message-list"></div>
+              <div id="empty-mailbox" class="empty-mailbox" hidden>
+                <span class="empty-mark" aria-hidden="true">—</span>
+                <strong>还没有收到邮件</strong>
+                <p>页面会自动刷新。邮件到达后会立即出现在这里。</p>
+              </div>
+            </aside>
+
+            <article
+              id="message-reader"
+              class="message-reader"
+              aria-live="polite"
+            >
+              <div class="reader-placeholder">
+                <span aria-hidden="true">↙</span>
+                <p>选择左侧邮件查看验证码和正文。</p>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <p id="mailbox-error" class="mailbox-error" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>邮件正文以纯文本安全显示</span>
+      <span>附件不会保存</span>
+    </footer>
+  </body>
+</html>

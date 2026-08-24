@@ -1,10 +1,26 @@
 # iCloud Code Gateway
 
-一个独立部署的 iCloud Hide My Email 五分钟验证码网关。
+一个可拆分部署的 iCloud Hide My Email 管理与邮件查询系统。
 
-管理员可以导入并管理 Apple 账户中已有的全部隐藏邮箱，再把需要使用的活动 Alias 绑定到高强度访问密钥。使用者只需在公开页输入自己的密钥，系统会从 IMAP 实时读取该隐藏邮箱最近 300 秒内收到的最新 6 位验证码；公开接口不会返回 Alias、邮件正文、Apple Cookie 或 IMAP 凭据。
+管理员可以导入并管理 Apple 账户中已有的全部隐藏邮箱，再把需要使用的活动 Alias 绑定到高强度访问密钥。仓库同时保留传统 FastAPI + IMAP edge，并新增推荐的 Cloudflare Email Worker + D1 收件箱：iCloud 邮件转发到你的域名后由 Worker 加密保存，操作者和普通用户都通过“隐藏邮箱 + Token”查看验证码、纯文本正文和收件时间。
 
-## 拆分模式（本地 control + 云端 edge）
+## Cloudflare 收件箱（推荐替代 QQ / IMAP）
+
+[`cloudflare-mailbox/`](cloudflare-mailbox/) 是独立的 TypeScript Worker 子项目，完整链路为：
+
+```text
+iCloud Hide My Email
+  → otp@你的域名
+  → Cloudflare Email Worker
+  → 加密写入 D1
+  → 邮箱 + Token 查询网页
+```
+
+本地 `control` 的 `/control/v1/*` 同步合同保持不变，因此只需把 `ICLOUD_GATEWAY_EDGE_BASE_URL` 和 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 改成 Worker 自定义域名，再执行“同步到云端”。切换验证完成后可以移除本地 QQ IMAP 凭据，并下线旧 VPS edge、Chromium 和 `cn-proxy`。服务器 2 可以作为 Wrangler 部署机，但 Worker 与 D1 实际运行在 Cloudflare。
+
+部署、D1、Email Routing、Apple 转发和回滚步骤见 [cloudflare-mailbox/README.md](cloudflare-mailbox/README.md)。
+
+## 传统拆分模式（本地 control + FastAPI/IMAP edge）
 
 默认仍是单机 `full`。也可以按你的要求拆开：
 
@@ -73,7 +89,7 @@ ICLOUD_GATEWAY_ADMIN_OPEN=1
 
 即**本机管理页免管理员密码**。线上 edge 不设置该开关，生产管理员密码保持原样。无 Docker 本地也不再使用 noVNC，因此**没有 VNC 密码**。
 
-本地 control 现已支持管理端 IMAP 取码：配好转发邮箱 IMAP 后，主页 Alias 列表每一行会显示最近 5 分钟验证码，并支持自动刷新。公开 `/api/code` 仍只在云端 edge 提供。
+传统路径仍支持管理端 IMAP 取码：配好转发邮箱 IMAP 后，主页 Alias 列表每一行会显示最近 5 分钟验证码，并支持自动刷新。使用 Cloudflare 收件箱时不再需要这些 `ICLOUD_GATEWAY_IMAP_*` 配置。
 
 把下面这些写进 `~/Desktop/云贝/服务器相关/icloud-control-plane.env`（或项目 `.env`），本地启动脚本会自动注入：
 
@@ -107,7 +123,7 @@ ICLOUD_GATEWAY_IMAP_JUNK_FOLDER=
 - 以 IMAP `INTERNALDATE` 为主要时间依据，读取使用 `BODY.PEEK[]`，不把邮件标为已读。
 - 可选只读扫描一个垃圾邮件文件夹；主文件夹与垃圾邮件文件夹共用一次登录和总超时，
   跨文件夹返回收件时间最新的验证码，管理员批量扫描仍保持 500 封总上限。
-- OTP 和邮件正文不持久化；新签发的完整访问密钥使用环境主密钥进行 AES-GCM 加密保存，并继续以 SHA-256 哈希校验公开查询。
+- 传统 IMAP edge 不持久化 OTP 和邮件正文；Cloudflare 收件箱按独立 D1 策略加密保存纯文本邮件，默认 24 小时后删除。两条路径都不保存明文 Token。
 - Apple Session、IMAP 密码、Alias 远端 ID 和可恢复访问密钥密文均绑定用途加密；管理页初始 HTML 不包含完整密钥，只有显式查看动作才解密返回。
 - HME Session 保存后自动导入完整远端 Alias 快照；重复刷新按邮箱幂等对账并保留本地标签、过滤条件和有效密钥。
 - 停用、恢复和永久删除均在 Apple 写入后再次读取 HME 列表确认；确认前不改变本地状态，永久删除只允许失活 Alias 且需要输入完整邮箱。

@@ -17,3 +17,7 @@ backups/
 outputs/
 playwright-report/
 test-results/
+cloudflare-mailbox/.dev.vars
+cloudflare-mailbox/.wrangler/
+cloudflare-mailbox/node_modules/
+cloudflare-mailbox/dist/

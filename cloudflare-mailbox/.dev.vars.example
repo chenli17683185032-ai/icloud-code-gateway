@@ -1,0 +1,4 @@
+CONTROL_PLANE_TOKEN=replace-with-the-same-control-plane-token-used-by-local-control
+LOOKUP_HMAC_KEY=replace-with-32-random-bytes-in-base64
+DATA_ENCRYPTION_KEY=replace-with-32-random-bytes-in-base64
+SESSION_SIGNING_KEY=replace-with-32-random-bytes-in-base64

@@ -4,6 +4,8 @@
 
 ## 1. 生产边界
 
+推荐的新数据面位于 `cloudflare-mailbox/`：Cloudflare Email Worker 接收域名邮件，D1 加密保存，查询网页同时供操作者和普通用户使用。它验证完成后可以完整替代下述 VPS `app/cn-proxy` 与 QQ IMAP 路径；Worker/D1 不运行在 VPS，服务器 2 仅作为 Wrangler 部署机。
+
 - `app`：FastAPI 与 SQLite，非 root，根文件系统只读，数据卷为 `icloud-code-gateway_gateway-data`。
 - `browser`：独立 Chromium/Xvfb/noVNC，固定非 root UID 102，profile 卷为 `icloud-code-gateway_browser-data`。
   **只在本地 `full` / `control` 使用**；云端 `edge` 把它放在 `legacy-browser` profile 里，`up -d` 不会启动。
@@ -23,6 +25,15 @@ UID，每封邮件只解析一次，按收件别名建内存索引。公开 `/ap
 秒，邮件一到立刻返回。监听器未就绪（未配置 IMAP、正在重连）时自动回退到原来的按需扫描。
 
 数据库中的密文依赖 `ICLOUD_GATEWAY_MASTER_KEY`。丢失该主密钥时，数据库备份无法恢复 Apple Session、IMAP 密码、Alias 远端 ID 和新版本签发的访问密钥明文。
+
+### 1.2 Cloudflare Email Worker + D1 路径
+
+- iCloud Hide My Email 转发到 Cloudflare 域名地址，由 Email Worker 从原始收件头匹配 Alias。
+- Worker 保存加密的标题、发件人、纯文本正文和验证码；Token 与邮箱索引只保存 HMAC。
+- 操作者与用户使用同一“邮箱 + Token”网页；本地 control 继续签发 Token 和同步 Alias。
+- 默认邮件保留 24 小时、会话 15 分钟、清理 Cron 每 15 分钟运行一次。
+- 切换前必须证明 Apple 转发保留原始 iCloud Alias 头；否则不得下线 QQ 回滚链路。
+- 完整上线与回滚命令见 `cloudflare-mailbox/README.md`。
 
 ### 1.1 管理端静态资源与批任务结果
 
@@ -356,6 +367,9 @@ app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带
 
 ## 11. 运维记录
 
+- 2026-08-24：新增 `cloudflare-mailbox/`，实现 Cloudflare Email Worker + D1 收件箱，目标是完整替代 QQ/IMAP 与旧 VPS edge。Worker 兼容现有五个 `/control/v1/*` 同步合同；Email Worker 从 iCloud 转发头匹配 Alias，使用 AES-GCM 加密发件人、标题、纯文本正文和验证码，邮箱/Token/来源索引只保存 HMAC。操作者与普通用户共用“隐藏邮箱 + Token”网页，会话为 HttpOnly/Secure/SameSite=Strict，Token 轮换或 Alias 停用立即使旧会话失效；默认邮件保留 24 小时，15 分钟会话，15 分钟 Cron 清理，超过 5MB 的邮件不解析，附件不保存。
+- 2026-08-24：Cloudflare 子项目门禁为 Prettier、TypeScript 7、Workers runtime Vitest、真实 D1 migration 和 Wrangler dry-run；10 项测试覆盖加密上下文、验证码解析、HTML 转纯文本、控制面同步、Email Worker 入库/去重、查询会话、Token 轮换失效和静态资源隐私。1440×1000 与 390×844 的登录页、空收件箱和真实加密测试邮件状态均通过 Playwright，横向溢出和控制台错误为 0。Python 侧取码链接升级为 `#email=...&key=...`，本地启动器可从受限凭据文件读取 Worker 的 edge/public URL。
+- 2026-08-24：本轮只完成代码、迁移、文档和本地 Worker/D1 验收；没有登录或修改远端 Cloudflare，没有创建生产 D1、Email Routing、Worker route 或自定义域名，也没有修改 Apple 转发目标、QQ 配置、服务器 2 或旧 VPS。正式切换必须先用单个 Alias 证明 Apple→Cloudflare 邮件保留原始 iCloud 收件头，再同步全部 Alias/Token，并保留 QQ 回滚至少 24 小时。
 - 2026-08-24：本地 control 会话捕获故障已修复。根因是启动器在本机 `127.0.0.1:7897` 无监听时仍无条件配置 HME SOCKS 代理；同一份已保存 Session 直连 Apple 可只读列出 582 条 Alias，经离线代理则返回 `HmeNetworkError`。启动器现仅在默认本地代理端口实际可连接时自动启用，否则直连；捕获状态另外区分 Apple API 网络、Session 拒绝、验证响应和本地保存失败。定向 140 项测试通过，重启本地 control 后真实“登录更新”约 11 秒进入 `captured`，原数据库和 browser profile 保留。
 - 2026-08-24：已有邮箱点击复制改为在原始点击手势中优先执行同步本地复制，成功后不等待 Clipboard 权限检查；静态合同继续证明该动作不调用后端、不固定单一 Alias、不触发 IMAP。新增 `scripts/remove-edge-browser.sh`，用于 `full -> edge` 迁移后一次性移除 Compose profile 不会自动停止的旧 browser 容器，严格核验 edge mode 和 Compose 标签，并保留 app/cn-proxy、SQLite、browser-data 卷与镜像。
 - 2026-08-24：公网 `https://icloud.yunbay.xyz/healthz` 保持 200，但本轮没有进入 VPS。手册原放行节点 `US 33 AI加速 x1.0` 当前无法建立外网连接；FlClash 当前 Mixed 端口为 7890，当前新加坡及三个不同美国出口均在 SSH banner 阶段被服务器白名单丢弃。服务器未执行命令，未修改容器、防火墙、数据或部署标记；遗留 browser 容器的实时状态与清理仍待可用白名单出口恢复后完成。
