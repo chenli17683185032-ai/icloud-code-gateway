@@ -133,7 +133,7 @@
         {% endif %}
         <form method="post" action="/admin/tags/refresh">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描邮箱：收到过 OpenAI 邮件即标记已使用，开通标记活跃，停用标记封号" {% if not imap.configured %}disabled{% endif %}>
+          <button class="secondary-button" type="submit" aria-label="一键更新标签" title="扫描邮箱：收到过 OpenAI 邮件只标记已使用；开通 Plan 才标记 GPT 和活跃；停用标记封号" {% if not imap.configured %}disabled{% endif %}>
             <img src="/static/icons/mail.svg" alt="" aria-hidden="true">
             <span>更新标签</span>
           </button>

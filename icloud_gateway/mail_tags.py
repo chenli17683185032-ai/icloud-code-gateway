@@ -40,9 +40,7 @@ _SEARCH_QUERIES = (
 # headers, which is not guaranteed and silently drops mail when it does not.
 # Sweeping the sender finds the same messages either way; classification still
 # happens locally against the decoded subject.
-_SENDER_QUERIES = (
-    ("FROM", "openai.com"),
-)
+_SENDER_QUERIES = (("FROM", "openai.com"),)
 _HEADER_FIELDS = (
     "(UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DELIVERED-TO X-ORIGINAL-TO"
     " ENVELOPE-TO RESENT-TO X-ENVELOPE-TO X-APPLE-FORWARD-TO"
@@ -64,8 +62,12 @@ def merge_usage(existing: str, *, plan: bool, banned: bool, used: bool = False) 
     # can be superseded before deciding which one applies now.
     tokens.discard("活跃")
     tokens.discard("已使用")
-    if plan or banned or used:
+    # GPT is only for aliases that opened a paid Plan. Used-but-free aliases
+    # keep 已使用; leftover GPT from the old rule is stripped on rescan.
+    if plan:
         tokens.add("gpt")
+    else:
+        tokens.discard("gpt")
     if banned:
         tokens.add("封号")
     elif plan:
