@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { controlRoutes } from "./control/routes";
 import { mailboxRoutes } from "./mailbox/routes";
+import { operatorRoutes } from "./operator/routes";
 import { loadConfig } from "./shared/config";
 import { AppError } from "./shared/errors";
 import { applySecurityHeaders, requestId } from "./shared/http";
@@ -25,6 +26,7 @@ app.get("/readyz", async (context) => {
 });
 
 app.route("/control", controlRoutes);
+app.route("/api/operator", operatorRoutes);
 app.route("/api", mailboxRoutes);
 
 app.onError((error, context) => {

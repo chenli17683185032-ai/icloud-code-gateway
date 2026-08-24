@@ -74,6 +74,21 @@ export function loadConfig(env: Env): RuntimeConfig {
     lookupHmacKey: secret32(env.LOOKUP_HMAC_KEY, "LOOKUP_HMAC_KEY"),
     dataEncryptionKey: secret32(env.DATA_ENCRYPTION_KEY, "DATA_ENCRYPTION_KEY"),
     sessionSigningKey: secret32(env.SESSION_SIGNING_KEY, "SESSION_SIGNING_KEY"),
+    operatorAccessToken: (() => {
+      const token = required(
+        env.OPERATOR_ACCESS_TOKEN,
+        "OPERATOR_ACCESS_TOKEN",
+        47,
+      );
+      if (!/^icg_[A-Za-z0-9_-]{43}$/.test(token)) {
+        throw new AppError(
+          "configuration_error",
+          500,
+          "OPERATOR_ACCESS_TOKEN is invalid.",
+        );
+      }
+      return token;
+    })(),
     emailRetentionSeconds: boundedInteger(
       env.EMAIL_RETENTION_SECONDS,
       24 * 60 * 60,

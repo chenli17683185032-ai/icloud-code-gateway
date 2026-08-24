@@ -151,14 +151,16 @@
           <div class="mailbox-workspace">
             <aside class="message-index" aria-label="邮件列表">
               <div class="index-heading">
-                <span>收件记录</span>
+                <span id="index-label">验证码记录</span>
                 <span id="message-count">0 封</span>
               </div>
               <div id="message-list" class="message-list"></div>
               <div id="empty-mailbox" class="empty-mailbox" hidden>
                 <span class="empty-mark" aria-hidden="true">—</span>
-                <strong>还没有收到邮件</strong>
-                <p>页面会自动刷新。邮件到达后会立即出现在这里。</p>
+                <strong id="empty-title">还没有收到验证码</strong>
+                <p id="empty-copy">
+                  页面会静默刷新。GPT/Grok 验证码到达后会立即出现在这里。
+                </p>
               </div>
             </aside>
 

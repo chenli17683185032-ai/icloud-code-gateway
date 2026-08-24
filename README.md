@@ -2,7 +2,7 @@
 
 一个可拆分部署的 iCloud Hide My Email 管理与邮件查询系统。
 
-管理员可以导入并管理 Apple 账户中已有的全部隐藏邮箱，再把需要使用的活动 Alias 绑定到高强度访问密钥。仓库同时保留传统 FastAPI + IMAP edge，并新增推荐的 Cloudflare Email Worker + D1 收件箱：iCloud 邮件转发到你的域名后由 Worker 加密保存，操作者和普通用户都通过“隐藏邮箱 + Token”查看验证码、纯文本正文和收件时间。
+管理员可以导入并管理 Apple 账户中已有的全部隐藏邮箱，再把需要使用的活动 Alias 绑定到高强度访问密钥。仓库同时保留传统 FastAPI + IMAP edge，并新增推荐的 Cloudflare Email Worker + D1 收件箱：普通用户通过“隐藏邮箱 + Token”只能查看 GPT/Grok 验证码；操作员通过独立后台查看全部 Alias 的完整邮件。
 
 ## Cloudflare 收件箱（推荐替代 QQ / IMAP）
 

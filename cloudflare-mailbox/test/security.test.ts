@@ -17,6 +17,7 @@ const env = {
   LOOKUP_HMAC_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   DATA_ENCRYPTION_KEY: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
   SESSION_SIGNING_KEY: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  OPERATOR_ACCESS_TOKEN: `icg_${"o".repeat(43)}`,
 } as Env;
 const config = loadConfig(env);
 const token = `icg_${"a".repeat(43)}`;
@@ -56,6 +57,7 @@ describe("security primitives", () => {
       config,
       "alias-digest",
       "token-digest",
+      "alias",
       1000,
     );
     await expect(

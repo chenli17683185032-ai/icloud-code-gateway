@@ -30,4 +30,8 @@ export const mailboxSessionSchema = z.object({
   token: accessToken,
 });
 
+export const operatorSessionSchema = z.object({
+  token: accessToken,
+});
+
 export type ControlAliasInput = z.infer<typeof controlAliasSchema>;

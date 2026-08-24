@@ -1,9 +1,18 @@
 import { AliasService } from "../aliases/service";
 import { extractVerificationCode } from "../mail/extract-code";
+import { classifyMessage, shouldPreserveMessage } from "../mail/classify";
 import { parseIncomingEmail } from "../mail/parse";
 import { decryptJson, encryptJson, hmacDigest } from "../shared/security";
-import type { MessageSecretPayload, RuntimeConfig } from "../shared/types";
-import { MessageRepository, type MessageRow } from "./repository";
+import type {
+  AliasSecretPayload,
+  MessageSecretPayload,
+  RuntimeConfig,
+} from "../shared/types";
+import {
+  type AdminMessageRow,
+  MessageRepository,
+  type MessageRow,
+} from "./repository";
 
 export interface PublicMessage {
   id: string;
@@ -13,6 +22,19 @@ export interface PublicMessage {
   code: string;
   receivedAt: string;
   expiresAt: string;
+}
+
+export interface PublicCodeMessage {
+  id: string;
+  code: string;
+  receivedAt: string;
+  expiresAt: string;
+}
+
+export interface AdminMessage extends PublicMessage {
+  email: string;
+  category: "gpt" | "grok" | "other";
+  permanent: boolean;
 }
 
 export interface IncomingMessage {
@@ -85,6 +107,13 @@ export class MessageService {
       body: parsed.body,
       code: extractVerificationCode(parsed.sender, parsed.subject, parsed.body),
     };
+    const category = classifyMessage(parsed.sender, message.envelopeFrom);
+    const permanent = shouldPreserveMessage(
+      category,
+      payload.code,
+      payload.subject,
+      payload.body,
+    );
     const identity =
       parsed.parsed.messageId ||
       `${message.envelopeFrom}\0${parsed.subject}\0${parsed.body.slice(0, 2048)}\0${
@@ -110,8 +139,13 @@ export class MessageService {
         payloadCiphertext: encrypted.ciphertext,
         payloadIv: encrypted.iv,
         receivedAt: now,
-        expiresAt: now + this.config.emailRetentionSeconds,
+        expiresAt: permanent
+          ? 253_402_300_799
+          : now + this.config.emailRetentionSeconds,
         createdAt: now,
+        category,
+        hasCode: Boolean(payload.code),
+        retentionClass: permanent ? "permanent" : "temporary",
       });
       if (inserted) stored += 1;
       else duplicate += 1;
@@ -119,13 +153,51 @@ export class MessageService {
     return { stored, matched: uniqueAliases.length, duplicate };
   }
 
-  async list(
+  async listCodes(
     aliasDigest: string,
     limit: number,
     now = Math.floor(Date.now() / 1000),
   ) {
-    const rows = await this.repository.list(aliasDigest, now, limit);
-    return Promise.all(rows.map((row) => this.publicMessage(row)));
+    const rows = await this.repository.listPublicCodes(aliasDigest, now, limit);
+    const messages = await Promise.all(
+      rows.map((row) => this.publicMessage(row)),
+    );
+    return messages.map(
+      ({ id, code, receivedAt, expiresAt }): PublicCodeMessage => ({
+        id,
+        code,
+        receivedAt,
+        expiresAt,
+      }),
+    );
+  }
+
+  async listAll(
+    limit: number,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<AdminMessage[]> {
+    const rows = await this.repository.listAll(now, limit);
+    return Promise.all(rows.map((row) => this.adminMessage(row)));
+  }
+
+  private async adminMessage(row: AdminMessageRow): Promise<AdminMessage> {
+    const [message, alias] = await Promise.all([
+      this.publicMessage(row),
+      decryptJson<AliasSecretPayload>(
+        this.config,
+        {
+          ciphertext: row.alias_secret_ciphertext,
+          iv: row.alias_secret_iv,
+        },
+        `alias:${row.alias_digest}`,
+      ),
+    ]);
+    return {
+      ...message,
+      email: alias.email,
+      category: row.category,
+      permanent: row.retention_class === "permanent",
+    };
   }
 
   cleanup(now = Math.floor(Date.now() / 1000)): Promise<number> {

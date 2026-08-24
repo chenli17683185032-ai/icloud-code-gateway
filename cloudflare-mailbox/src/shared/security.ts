@@ -174,10 +174,12 @@ export async function issueSession(
   config: RuntimeConfig,
   digest: string,
   tokenDigest: string,
+  access: "alias" | "operator" = "alias",
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<{ token: string; expiresAt: number }> {
   const payload: SessionPayload = {
     version: 1,
+    access,
     aliasDigest: digest,
     tokenDigest,
     expiresAt: nowSeconds + config.sessionTtlSeconds,
@@ -206,7 +208,8 @@ export async function verifySession(
     ) as SessionPayload;
     if (
       payload.version !== 1 ||
-      !payload.aliasDigest ||
+      !["alias", "operator"].includes(payload.access) ||
+      (payload.access === "alias" && !payload.aliasDigest) ||
       !payload.tokenDigest ||
       payload.expiresAt <= nowSeconds
     ) {

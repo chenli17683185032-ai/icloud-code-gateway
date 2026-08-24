@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      content="#f3efe5"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#171b1e"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta name="description" content="隐邮收件箱操作员后台。" />
+    <title>操作员后台 · 隐邮收件箱</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/admin/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <header class="site-header">
+      <a class="brand" href="/admin/" aria-label="操作员后台首页">
+        <span class="brand-stamp" aria-hidden="true">管</span>
+        <span>
+          <strong>隐邮操作台</strong>
+          <small>Operator mailbox</small>
+        </span>
+      </a>
+      <a class="service-state operator-public-link" href="/">用户查询页</a>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <section
+        id="operator-entry"
+        class="entry-view"
+        aria-labelledby="operator-entry-title"
+      >
+        <div class="entry-intro">
+          <p class="eyebrow">仅限操作员</p>
+          <h1 id="operator-entry-title">所有新邮件<br />集中查看</h1>
+          <p class="entry-copy">
+            后台显示全部已同步 Alias 的新邮件。验证码保存 24
+            小时；会员、封号、付款、工单和售后邮件长期保存。
+          </p>
+        </div>
+
+        <form id="operator-form" class="lookup-form" novalidate>
+          <div class="form-heading">
+            <span class="sheet-number" aria-hidden="true">OP</span>
+            <div>
+              <h2>进入操作台</h2>
+              <p>使用保存在本机 Keychain 的操作员 Token。</p>
+            </div>
+          </div>
+          <label class="field">
+            <span>操作员 Token</span>
+            <input
+              id="operator-token"
+              name="token"
+              type="password"
+              autocomplete="off"
+              maxlength="128"
+              placeholder="icg_…"
+              required
+            />
+          </label>
+          <button
+            id="operator-login-button"
+            class="primary-button"
+            type="submit"
+          >
+            打开全部邮件
+          </button>
+          <p
+            id="operator-status"
+            class="form-status"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <p class="form-footnote">
+            后台 Token 不写入网址请求、浏览器存储或 D1。
+          </p>
+        </form>
+
+        <dl class="privacy-notes">
+          <div>
+            <dt>全部 Alias</dt>
+            <dd>无需逐个输入邮箱</dd>
+          </div>
+          <div>
+            <dt>静默刷新</dt>
+            <dd>数据不变不重绘页面</dd>
+          </div>
+          <div>
+            <dt>分级保留</dt>
+            <dd>验证码临时，重要邮件长期</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section
+        id="operator-view"
+        class="mailbox-view"
+        aria-labelledby="operator-title"
+        hidden
+      >
+        <div class="mailbox-toolbar">
+          <div>
+            <p class="eyebrow">操作员全局收件箱</p>
+            <h1 id="operator-title" tabindex="-1">所有新邮件</h1>
+            <p class="mailbox-email">按到达时间汇总全部已同步 Alias</p>
+          </div>
+          <div class="toolbar-actions">
+            <span
+              id="operator-refresh-state"
+              class="refresh-state"
+              role="status"
+              aria-live="polite"
+              >正在同步</span
+            >
+            <button
+              id="operator-refresh-button"
+              class="quiet-button"
+              type="button"
+            >
+              立即刷新
+            </button>
+            <button
+              id="operator-logout-button"
+              class="quiet-button"
+              type="button"
+            >
+              退出后台
+            </button>
+          </div>
+        </div>
+
+        <div class="mailbox-container">
+          <div class="mailbox-workspace">
+            <aside class="message-index" aria-label="全部邮件列表">
+              <div class="index-heading">
+                <span>全部邮件</span>
+                <span id="operator-message-count">0 封</span>
+              </div>
+              <div id="operator-message-list" class="message-list"></div>
+              <div id="operator-empty" class="empty-mailbox" hidden>
+                <span class="empty-mark" aria-hidden="true">—</span>
+                <strong>还没有收到邮件</strong>
+                <p>后台会静默刷新，新邮件到达后会立即出现。</p>
+              </div>
+            </aside>
+            <article
+              id="operator-reader"
+              class="message-reader"
+              aria-live="polite"
+            >
+              <div class="reader-placeholder">
+                <span aria-hidden="true">↙</span>
+                <p>选择邮件查看完整正文。</p>
+              </div>
+            </article>
+          </div>
+        </div>
+        <p id="operator-error" class="mailbox-error" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>完整正文只对操作员会话返回</span>
+      <span>附件不会保存</span>
+    </footer>
+  </body>
+</html>

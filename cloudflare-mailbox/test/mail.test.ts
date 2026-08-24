@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { classifyMessage, shouldPreserveMessage } from "../src/mail/classify";
 import { extractVerificationCode } from "../src/mail/extract-code";
 import { htmlToText, parseIncomingEmail } from "../src/mail/parse";
 
@@ -38,5 +39,24 @@ describe("mail parsing", () => {
         "<style>.x{}</style><p>Hello &amp; 你好</p><script>alert(1)</script>",
       ),
     ).toBe("Hello & 你好");
+  });
+
+  it("classifies public senders and preserves important non-code mail", () => {
+    expect(
+      classifyMessage("OpenAI <noreply@tm.openai.com>", "bounce@openai.com"),
+    ).toBe("gpt");
+    expect(classifyMessage("Grok <noreply@x.ai>", "noreply@x.ai")).toBe("grok");
+    expect(
+      classifyMessage("Sender <sender@example.com>", "sender@example.com"),
+    ).toBe("other");
+    expect(
+      shouldPreserveMessage("other", "", "售后支持工单", "申诉正在处理中"),
+    ).toBe(true);
+    expect(
+      shouldPreserveMessage("other", "", "Newsletter", "General news"),
+    ).toBe(false);
+    expect(
+      shouldPreserveMessage("gpt", "123456", "Code", "Verification code"),
+    ).toBe(false);
   });
 });

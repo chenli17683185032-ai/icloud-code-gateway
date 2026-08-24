@@ -5,6 +5,7 @@ export interface Env {
   LOOKUP_HMAC_KEY: string;
   DATA_ENCRYPTION_KEY: string;
   SESSION_SIGNING_KEY: string;
+  OPERATOR_ACCESS_TOKEN: string;
   EMAIL_RETENTION_SECONDS?: string;
   SESSION_TTL_SECONDS?: string;
   MESSAGE_QUERY_LIMIT?: string;
@@ -19,6 +20,7 @@ export interface RuntimeConfig {
   lookupHmacKey: string;
   dataEncryptionKey: string;
   sessionSigningKey: string;
+  operatorAccessToken: string;
   emailRetentionSeconds: number;
   sessionTtlSeconds: number;
   messageQueryLimit: number;
@@ -44,6 +46,7 @@ export interface MessageSecretPayload {
 
 export interface SessionPayload {
   version: 1;
+  access: "alias" | "operator";
   aliasDigest: string;
   tokenDigest: string;
   expiresAt: number;

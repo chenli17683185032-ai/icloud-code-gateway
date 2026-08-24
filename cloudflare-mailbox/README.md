@@ -1,6 +1,6 @@
 # Cloudflare 隐邮收件箱
 
-这个子项目使用 Cloudflare Email Workers、D1 和 Workers Static Assets，替代当前 QQ 邮箱与 IMAP 读取链路。iCloud Hide My Email 把邮件转发到你的域名地址，Email Worker 解析原始收件 Alias、正文和验证码，加密写入 D1。你自己和分享邮箱的用户都通过同一个网页输入“隐藏邮箱 + Token”查看最近邮件。
+这个子项目使用 Cloudflare Email Workers、D1 和 Workers Static Assets，替代当前 QQ 邮箱与 IMAP 读取链路。iCloud Hide My Email 把邮件转发到你的域名地址，Email Worker 解析原始收件 Alias、正文和验证码，加密写入 D1。普通用户通过“隐藏邮箱 + Token”只查看 GPT/Grok 验证码；操作员通过独立 `/admin/` 后台查看全部 Alias 的完整邮件。
 
 ## 运行边界
 
@@ -17,14 +17,15 @@
 - Email Routing：`otp@yunbay.xyz → icloud-mailbox-worker`
 - D1：`icloud-mailbox`（APAC）
 - 旧链接兼容：`/#key=<Token>` 会通过全局 HMAC 索引自动找到邮箱；新链接继续使用 `/#email=<邮箱>&key=<Token>`。
+- 操作员后台：`https://icloud.yunbay.xyz/admin/`，只输入操作员 Token，无需逐个输入邮箱。
 - 原 `icloud.yunbay.xyz` DNS/VPS 保留在 Worker route 后方；移除该 route 即可恢复旧站，不需要重建 DNS。
 
 ## 保存的数据
 
 - `aliases`：邮箱 HMAC、Token HMAC、状态及加密 Alias 元数据。
-- `messages`：加密发件人、标题、纯文本正文、验证码，以及明文收件/过期时间。
+- `messages`：加密发件人、标题、纯文本正文、验证码，以及明文分类、保留级别和收件/过期时间。
 - `auth_rate_limits`：不可逆来源指纹和分钟窗口计数。
-- 不保存明文 Token，不保存 HTML，不保存附件。默认 24 小时后由定时 Worker 删除邮件。
+- 不保存明文 Token，不保存 HTML，不保存附件。验证码和普通邮件默认 24 小时清理；会员开通、付款、封号、申诉、工单和售后支持等重要非验证码邮件长期保存。
 
 ## 本地开发
 
@@ -87,9 +88,10 @@ npx wrangler secret put CONTROL_PLANE_TOKEN
 npx wrangler secret put LOOKUP_HMAC_KEY
 npx wrangler secret put DATA_ENCRYPTION_KEY
 npx wrangler secret put SESSION_SIGNING_KEY
+npx wrangler secret put OPERATOR_ACCESS_TOKEN
 ```
 
-这些密钥一旦更换，既有 Token 摘要、加密邮件或登录会话会失效。生产轮换前必须先设计迁移，不要直接覆盖。
+前三个加密/HMAC key 一旦更换，既有 Token 摘要、加密邮件或登录会话会失效。操作员 Token 轮换只会使后台会话失效。生产轮换前必须先设计迁移，不要直接覆盖前三个 key。
 
 ### 3. 设置收件地址和保留时间
 
@@ -153,8 +155,19 @@ https://mailbox.your-domain.com/#email=<隐藏邮箱>&key=<Token>
 
 - `POST /api/session`：邮箱 + Token 建立 15 分钟 HttpOnly 会话。
 - `GET /api/session`：无错误恢复当前会话状态。
-- `GET /api/messages`：返回当前邮箱最近邮件、验证码、纯文本正文和时间。
+- `GET /api/messages`：只返回当前邮箱的 GPT/Grok 验证码和时间。
 - `POST /api/logout`：结束查询会话。
+
+普通用户响应不包含发件人、标题、正文或其他类别邮件。
+
+## 操作员接口
+
+- `POST /api/operator/session`：只使用操作员 Token 建立后台会话。
+- `GET /api/operator/session`：恢复后台会话。
+- `GET /api/operator/messages`：返回全部 Alias 的完整邮件。
+- `POST /api/operator/logout`：退出后台。
+
+用户页与后台都每 3 秒刷新一次；自动刷新在数据未变化时不重绘，有新邮件时静默更新，只有手动刷新播放一次轻微反馈。
 
 ## 控制面接口
 

@@ -42,6 +42,7 @@ mailboxRoutes.post("/session", async (context) => {
     config,
     authenticated.row.alias_digest,
     authenticated.row.token_digest,
+    "alias",
     now,
   );
   context.header(
@@ -50,7 +51,7 @@ mailboxRoutes.post("/session", async (context) => {
   );
   return context.json({
     status: "ok",
-    mailbox: { email: authenticated.secret.email },
+    mailbox: { email: authenticated.secret.email, mode: "code_only" },
     expires_at: new Date(session.expiresAt * 1000).toISOString(),
   });
 });
@@ -62,11 +63,12 @@ mailboxRoutes.get("/session", async (context) => {
     return context.json({ status: "ok", authenticated: false });
   try {
     const session = await verifySession(config, sessionToken);
+    if (session.access !== "alias") throw new UnauthorizedError();
     const authenticated = await aliases.authenticateSession(session);
     return context.json({
       status: "ok",
       authenticated: true,
-      mailbox: { email: authenticated.secret.email },
+      mailbox: { email: authenticated.secret.email, mode: "code_only" },
       expires_at: new Date(session.expiresAt * 1000).toISOString(),
     });
   } catch (error) {
@@ -81,6 +83,7 @@ mailboxRoutes.get("/messages", async (context) => {
   const sessionToken = readCookie(context.req.raw, SESSION_COOKIE);
   if (!sessionToken) throw new UnauthorizedError("请先输入邮箱和 Token。");
   const session = await verifySession(config, sessionToken);
+  if (session.access !== "alias") throw new UnauthorizedError();
   const authenticated = await aliases.authenticateSession(session);
   const requestedLimit = Number.parseInt(context.req.query("limit") ?? "", 10);
   const limit = Number.isFinite(requestedLimit)
@@ -90,9 +93,10 @@ mailboxRoutes.get("/messages", async (context) => {
     status: "ok",
     mailbox: {
       email: authenticated.secret.email,
+      mode: "code_only",
       retention_seconds: config.emailRetentionSeconds,
     },
-    messages: await messages.list(authenticated.row.alias_digest, limit),
+    messages: await messages.listCodes(authenticated.row.alias_digest, limit),
   });
 });
 
