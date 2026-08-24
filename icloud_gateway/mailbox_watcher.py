@@ -357,11 +357,7 @@ class MailboxWatcher:
         with self._lock:
             cursor = self._cursors.get(cursor_key)
 
-        uids = (
-            self._seed_uids(connection)
-            if cursor is None
-            else self._new_uids(connection, cursor)
-        )
+        uids = self._seed_uids(connection) if cursor is None else self._new_uids(connection, cursor)
         if not uids:
             return False
 
@@ -394,11 +390,7 @@ class MailboxWatcher:
             raise ImapError("IMAP search failed")
         # `n:*` is inclusive of the highest UID even when it is below n, so the
         # server can echo an already-seen message. Filter by the cursor.
-        found = [
-            uid
-            for uid in _uids_from_search(data)
-            if uid.isdigit() and int(uid) > cursor
-        ]
+        found = [uid for uid in _uids_from_search(data) if uid.isdigit() and int(uid) > cursor]
         return sorted(found, key=_uid_sort_key, reverse=True)
 
     @staticmethod

@@ -689,9 +689,7 @@ def test_rate_limited_create_cools_down_then_continues(database: Database, tmp_p
     assert public["status"] == "completed"
 
 
-def test_rate_limited_generate_keeps_item_queued_for_resume(
-    database: Database, tmp_path
-) -> None:
+def test_rate_limited_generate_keeps_item_queued_for_resume(database: Database, tmp_path) -> None:
     gateway = _Gateway(database, tmp_path)
     gateway._remote_write_active = False
     gateway._hme_lock = threading.RLock()

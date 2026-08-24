@@ -576,7 +576,9 @@ class HmeClient:
             added = 0
             for item in page:
                 remote_id = str(item.get("anonymousId") or "").strip()
-                key = remote_id or str(item.get("hme") or item.get("email") or "").strip().casefold()
+                key = (
+                    remote_id or str(item.get("hme") or item.get("email") or "").strip().casefold()
+                )
                 if not key or key in seen_ids:
                     continue
                 seen_ids.add(key)

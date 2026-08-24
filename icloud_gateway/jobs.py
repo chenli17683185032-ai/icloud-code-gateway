@@ -329,11 +329,7 @@ class BatchJobManager:
         return max(0, int((parsed - datetime.now(UTC)).total_seconds()))
 
     def _format_timestamp(self, when: datetime) -> str:
-        return (
-            when.astimezone(UTC)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
-        )
+        return when.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     def _rate_limit_resume_at(self, *, seconds: float | None = None) -> str:
         delay = max(
@@ -417,13 +413,10 @@ class BatchJobManager:
         )
         if delay > 0:
             status_error = (
-                f"Apple HME rate limited ({payload['code']}); "
-                f"cooling down until {resume_at}"
+                f"Apple HME rate limited ({payload['code']}); cooling down until {resume_at}"
             )
         else:
-            status_error = (
-                f"Apple HME rate limited ({payload['code']}); retrying without cooldown"
-            )
+            status_error = f"Apple HME rate limited ({payload['code']}); retrying without cooldown"
         self.database.set_batch_job_status(
             job_id,
             "queued",
@@ -545,10 +538,13 @@ class BatchJobManager:
                     self.database.set_batch_job_status(job["id"], "queued")
                     return
                 # When cooldown is disabled, still pace retries with the normal item throttle.
-                if retry_after <= 0 and self.throttle_seconds > 0:
-                    if self._stop.wait(self.throttle_seconds):
-                        self.database.set_batch_job_status(job["id"], "queued")
-                        return
+                if (
+                    retry_after <= 0
+                    and self.throttle_seconds > 0
+                    and self._stop.wait(self.throttle_seconds)
+                ):
+                    self.database.set_batch_job_status(job["id"], "queued")
+                    return
                 self.database.set_batch_job_status(job["id"], "running", error=None)
                 job = self.database.get_batch_job(job["id"])
                 continue

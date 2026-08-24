@@ -108,9 +108,7 @@ def test_edge_admin_hides_browser_and_create_controls(tmp_path: Path):
     service.shutdown(timeout=1, close_database=True)
 
 
-def test_edge_environment_ignores_leftover_cdp_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_edge_environment_ignores_leftover_cdp_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ICLOUD_GATEWAY_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setenv("ICLOUD_GATEWAY_ADMIN_PASSWORD", "x" * 16)
     monkeypatch.setenv("ICLOUD_GATEWAY_DATA_DIR", str(tmp_path))

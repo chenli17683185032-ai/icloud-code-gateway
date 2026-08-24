@@ -534,9 +534,7 @@ class Database:
 
     def latest_alias_synced_at(self) -> str | None:
         row = (
-            self._connect()
-            .execute("SELECT MAX(last_synced_at) AS latest FROM aliases")
-            .fetchone()
+            self._connect().execute("SELECT MAX(last_synced_at) AS latest FROM aliases").fetchone()
         )
         value = None if row is None else row["latest"]
         return None if value is None else str(value)

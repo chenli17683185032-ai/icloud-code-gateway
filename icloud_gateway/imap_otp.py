@@ -208,7 +208,9 @@ class ImapConnectionPool:
     a few seconds cuts single-alias OTP poll latency roughly in half.
     """
 
-    def __init__(self, *, idle_seconds: float = 12.0, monotonic: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, *, idle_seconds: float = 12.0, monotonic: Callable[[], float] = time.monotonic
+    ) -> None:
         self.idle_seconds = max(1.0, float(idle_seconds))
         self.monotonic = monotonic
         self._lock = threading.Lock()
@@ -228,7 +230,9 @@ class ImapConnectionPool:
             config.proxy,
         )
 
-    def acquire(self, config: ImapConfig, timeout: float, connection_factory: ConnectionFactory) -> Any:
+    def acquire(
+        self, config: ImapConfig, timeout: float, connection_factory: ConnectionFactory
+    ) -> Any:
         key = self._key_for(config)
         with self._lock:
             if self._connection is not None and self._key == key:

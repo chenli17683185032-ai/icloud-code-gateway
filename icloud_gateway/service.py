@@ -1076,9 +1076,7 @@ class GatewayService:
         ).strip()
         if not password or not username or not forwarding:
             return
-        host = str(
-            os.environ.get("ICLOUD_GATEWAY_IMAP_HOST") or "imap.mail.me.com"
-        ).strip()
+        host = str(os.environ.get("ICLOUD_GATEWAY_IMAP_HOST") or "imap.mail.me.com").strip()
         port_raw = str(os.environ.get("ICLOUD_GATEWAY_IMAP_PORT") or "993").strip()
         folder = str(os.environ.get("ICLOUD_GATEWAY_IMAP_FOLDER") or "INBOX").strip()
         junk_folder = str(os.environ.get("ICLOUD_GATEWAY_IMAP_JUNK_FOLDER") or "").strip()
@@ -1662,7 +1660,9 @@ class GatewayService:
         """
         return max(12, min(25, int(self.settings.otp_request_timeout_seconds)))
 
-    def _admin_code_payload(self, alias: Mapping[str, Any], *, code: str, received_at: datetime) -> dict[str, Any]:
+    def _admin_code_payload(
+        self, alias: Mapping[str, Any], *, code: str, received_at: datetime
+    ) -> dict[str, Any]:
         value = received_at
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
@@ -1685,7 +1685,9 @@ class GatewayService:
             raise GatewayNotConfiguredError("IMAP is not configured")
         aliases = self.database.list_aliases()
         wanted_ids = tuple(
-            dict.fromkeys(str(item or "").strip() for item in (alias_ids or ()) if str(item or "").strip())
+            dict.fromkeys(
+                str(item or "").strip() for item in (alias_ids or ()) if str(item or "").strip()
+            )
         )
         if wanted_ids:
             wanted = set(wanted_ids)
@@ -1832,7 +1834,6 @@ class GatewayService:
             "alias_ids": [str(item["id"]) for item in aliases],
             "max_age_seconds": admin_max_age,
         }
-
 
     def dashboard(self) -> dict[str, Any]:
         hme_session: ICloudHmeSession | None

@@ -298,9 +298,7 @@ def test_incomplete_remote_snapshot_does_not_deactivate_existing_aliases(tmp_pat
         for index in range(8)
     ]
     value.save_hme_session(hme_session())
-    FakeHmeClient.aliases = [
-        {"hme": "keep0@icloud.com", "anonymousId": "keep0", "isActive": True}
-    ]
+    FakeHmeClient.aliases = [{"hme": "keep0@icloud.com", "anonymousId": "keep0", "isActive": True}]
 
     value.sync_aliases()
 
@@ -315,9 +313,7 @@ def test_incomplete_remote_snapshot_does_not_deactivate_existing_aliases(tmp_pat
 
 def test_ensure_remote_aliases_imports_new_emails_when_snapshot_is_stale(tmp_path) -> None:
     value = service(tmp_path)
-    FakeHmeClient.aliases = [
-        {"hme": "old@icloud.com", "anonymousId": "old", "isActive": True}
-    ]
+    FakeHmeClient.aliases = [{"hme": "old@icloud.com", "anonymousId": "old", "isActive": True}]
     value.save_hme_session(hme_session())
     with value.database.transaction() as connection:
         connection.execute("UPDATE aliases SET last_synced_at = ?", ("2026-08-01T00:00:00.000Z",))
@@ -349,7 +345,14 @@ def test_refresh_usage_tags_applies_plan_and_ban_rules(tmp_path, monkeypatch) ->
         assert config.host == "imap.example.com"
         updater(plan["id"], "gpt 活跃")
         updater(banned["id"], "gpt 封号")
-        return {"matched": 2, "updated": 2, "gpt_active": 1, "gpt_banned": 1, "scanned": 3, "classified": 2}
+        return {
+            "matched": 2,
+            "updated": 2,
+            "gpt_active": 1,
+            "gpt_banned": 1,
+            "scanned": 3,
+            "classified": 2,
+        }
 
     monkeypatch.setattr("icloud_gateway.service._refresh_usage_tags", fake_refresh)
     stats = value.refresh_usage_tags()
