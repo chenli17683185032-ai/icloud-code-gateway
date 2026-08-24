@@ -271,18 +271,13 @@ function schedulePolling(delay = 3000) {
   );
 }
 
-elements.form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (!elements.form.reportValidity()) return;
+async function establishSession(credentials) {
   setLookupStatus("正在验证并打开收件箱…", "success");
   elements.lookupButton.disabled = true;
   try {
     const payload = await api("/api/session", {
       method: "POST",
-      body: JSON.stringify({
-        email: elements.email.value.trim(),
-        token: elements.token.value.trim(),
-      }),
+      body: JSON.stringify(credentials),
     });
     elements.token.value = "";
     showMailbox(payload.mailbox.email);
@@ -294,6 +289,15 @@ elements.form.addEventListener("submit", async (event) => {
   } finally {
     elements.lookupButton.disabled = false;
   }
+}
+
+elements.form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!elements.form.reportValidity()) return;
+  await establishSession({
+    email: elements.email.value.trim(),
+    token: elements.token.value.trim(),
+  });
 });
 
 elements.refreshButton.addEventListener("click", () => refreshMailbox());
@@ -342,8 +346,12 @@ async function restoreMailbox() {
   }
 }
 
-if (fragmentEmail && fragmentToken) {
-  window.setTimeout(() => elements.form.requestSubmit(), 0);
+if (fragmentToken) {
+  if (fragmentEmail) {
+    window.setTimeout(() => elements.form.requestSubmit(), 0);
+  } else {
+    window.setTimeout(() => establishSession({ token: fragmentToken }), 0);
+  }
 } else {
   restoreMailbox();
 }

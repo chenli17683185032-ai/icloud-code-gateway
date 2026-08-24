@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/shared/config";
 import {
   accessTokenDigest,
+  accessTokenLookupDigest,
   aliasDigest,
   decryptJson,
   encryptJson,
@@ -31,6 +32,7 @@ describe("security primitives", () => {
     expect(await accessTokenDigest(config, first, token)).not.toBe(
       await accessTokenDigest(config, second, token),
     );
+    expect(await accessTokenLookupDigest(config, token)).toHaveLength(43);
   });
 
   it("encrypts payloads with authenticated context", async () => {

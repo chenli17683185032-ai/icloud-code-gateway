@@ -34,6 +34,7 @@ def main() -> int:
     runtime = home / ".icloud-code-gateway"
     data_dir = runtime / "data"
     creds_candidates = (
+        home / "Desktop" / "鲨鱼工具库" / "云贝平台" / "服务器相关" / "icloud-control-plane.env",
         project / "icloud-control-plane.env",
         project.parent / "icloud-control-plane.env",
         home / "Desktop" / "鲨鱼工具库" / "iCloud管理工具" / "icloud-control-plane.env",
@@ -47,10 +48,10 @@ def main() -> int:
 
     def pick(*names: str, default: str = "") -> str:
         for name in names:
-            if values.get(name):
-                return values[name]
             if os.environ.get(name):
                 return str(os.environ[name])
+            if values.get(name):
+                return values[name]
         return default
 
     master = pick("LOCAL_ICLOUD_GATEWAY_MASTER_KEY", "ICLOUD_GATEWAY_MASTER_KEY")

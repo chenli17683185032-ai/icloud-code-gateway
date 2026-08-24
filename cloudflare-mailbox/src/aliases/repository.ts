@@ -4,6 +4,7 @@ export interface AliasRow {
   secret_ciphertext: string;
   secret_iv: string;
   token_digest: string | null;
+  token_lookup_digest: string | null;
   state: "active" | "inactive";
   created_at: number;
   updated_at: number;
@@ -15,6 +16,7 @@ export interface AliasWrite {
   secretCiphertext: string;
   secretIv: string;
   tokenDigest: string | null;
+  tokenLookupDigest: string | null;
   state: "active" | "inactive";
   now: number;
 }
@@ -26,11 +28,23 @@ export class AliasRepository {
     return this.database
       .prepare(
         `SELECT alias_digest, external_id, secret_ciphertext, secret_iv,
-                token_digest, state, created_at, updated_at
+                token_digest, token_lookup_digest, state, created_at, updated_at
            FROM aliases
           WHERE alias_digest = ?`,
       )
       .bind(aliasDigest)
+      .first<AliasRow>();
+  }
+
+  getByTokenLookupDigest(tokenLookupDigest: string): Promise<AliasRow | null> {
+    return this.database
+      .prepare(
+        `SELECT alias_digest, external_id, secret_ciphertext, secret_iv,
+                token_digest, token_lookup_digest, state, created_at, updated_at
+           FROM aliases
+          WHERE token_lookup_digest = ?`,
+      )
+      .bind(tokenLookupDigest)
       .first<AliasRow>();
   }
 
@@ -39,13 +53,14 @@ export class AliasRepository {
       .prepare(
         `INSERT INTO aliases (
             alias_digest, external_id, secret_ciphertext, secret_iv,
-            token_digest, state, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            token_digest, token_lookup_digest, state, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(alias_digest) DO UPDATE SET
             external_id = excluded.external_id,
             secret_ciphertext = excluded.secret_ciphertext,
             secret_iv = excluded.secret_iv,
             token_digest = excluded.token_digest,
+            token_lookup_digest = excluded.token_lookup_digest,
             state = excluded.state,
             updated_at = excluded.updated_at`,
       )
@@ -55,6 +70,7 @@ export class AliasRepository {
         value.secretCiphertext,
         value.secretIv,
         value.tokenDigest,
+        value.tokenLookupDigest,
         value.state,
         value.now,
         value.now,
@@ -65,15 +81,16 @@ export class AliasRepository {
   async setTokenDigest(
     aliasDigest: string,
     tokenDigest: string | null,
+    tokenLookupDigest: string | null,
     now: number,
   ): Promise<void> {
     await this.database
       .prepare(
         `UPDATE aliases
-            SET token_digest = ?, state = 'active', updated_at = ?
+            SET token_digest = ?, token_lookup_digest = ?, state = 'active', updated_at = ?
           WHERE alias_digest = ?`,
       )
-      .bind(tokenDigest, now, aliasDigest)
+      .bind(tokenDigest, tokenLookupDigest, now, aliasDigest)
       .run();
   }
 

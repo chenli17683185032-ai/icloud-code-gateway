@@ -1,6 +1,7 @@
 import { NotFoundError, UnauthorizedError } from "../shared/errors";
 import {
   accessTokenDigest,
+  accessTokenLookupDigest,
   aliasDigest,
   decryptJson,
   encryptJson,
@@ -59,11 +60,18 @@ export class AliasService {
     const existing = await this.repository.getByDigest(digest);
     const state = input.state;
     let tokenDigest = existing?.token_digest ?? null;
-    if (state === "inactive") tokenDigest = null;
-    else if (input.access_key) {
+    let tokenLookupDigest = existing?.token_lookup_digest ?? null;
+    if (state === "inactive") {
+      tokenDigest = null;
+      tokenLookupDigest = null;
+    } else if (input.access_key) {
       tokenDigest = await accessTokenDigest(
         this.config,
         digest,
+        input.access_key,
+      );
+      tokenLookupDigest = await accessTokenLookupDigest(
+        this.config,
         input.access_key,
       );
     }
@@ -80,6 +88,7 @@ export class AliasService {
       secretCiphertext: encrypted.ciphertext,
       secretIv: encrypted.iv,
       tokenDigest,
+      tokenLookupDigest,
       state,
       now,
     });
@@ -119,6 +128,10 @@ export class AliasService {
         secretCiphertext: encrypted.ciphertext,
         secretIv: encrypted.iv,
         tokenDigest: await accessTokenDigest(this.config, digest, accessKey),
+        tokenLookupDigest: await accessTokenLookupDigest(
+          this.config,
+          accessKey,
+        ),
         state: "active",
         now,
       });
@@ -133,7 +146,7 @@ export class AliasService {
   ): Promise<void> {
     const digest = await aliasDigest(this.config, normalizeEmail(emailValue));
     await this.requireByDigest(digest);
-    await this.repository.setTokenDigest(digest, null, now);
+    await this.repository.setTokenDigest(digest, null, null, now);
   }
 
   async setState(
@@ -177,6 +190,23 @@ export class AliasService {
     const supplied = await accessTokenDigest(this.config, digest, token);
     if (!(await safeEqual(row.token_digest, supplied)))
       throw new UnauthorizedError();
+    return { row, secret: await this.secretFor(row) };
+  }
+
+  async authenticateToken(token: string): Promise<AuthenticatedAlias> {
+    const lookup = await accessTokenLookupDigest(this.config, token);
+    const row = await this.repository.getByTokenLookupDigest(lookup);
+    if (!row || row.state !== "active" || !row.token_digest) {
+      throw new UnauthorizedError();
+    }
+    const supplied = await accessTokenDigest(
+      this.config,
+      row.alias_digest,
+      token,
+    );
+    if (!(await safeEqual(row.token_digest, supplied))) {
+      throw new UnauthorizedError();
+    }
     return { row, secret: await this.secretFor(row) };
   }
 

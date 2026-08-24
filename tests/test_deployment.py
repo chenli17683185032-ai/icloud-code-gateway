@@ -104,6 +104,8 @@ def test_local_control_only_auto_enables_a_live_proxy() -> None:
     assert 'read_env ICLOUD_GATEWAY_EDGE_BASE_URL "$CREDS_FILE"' in launcher
     assert 'read_env ICLOUD_GATEWAY_PUBLIC_BASE_URL "$CREDS_FILE"' in launcher
     assert 'export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$PUBLIC_URL"' in launcher
+    assert 'read_env ICLOUD_GATEWAY_IMAP_ENABLED "$CREDS_FILE"' in launcher
+    assert "Cloudflare Email Worker 接管" in launcher
 
 
 def test_edge_browser_cleanup_is_scoped_and_preserves_recovery_assets() -> None:

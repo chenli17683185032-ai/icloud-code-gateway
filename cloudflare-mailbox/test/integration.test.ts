@@ -73,6 +73,22 @@ describe("worker integration", () => {
     });
   });
 
+  it("opens historical key-only links without requiring the email", async () => {
+    await upsertAlias();
+    const response = await SELF.fetch("https://example.com/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.9",
+      },
+      body: JSON.stringify({ token }),
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      mailbox: { email: "hidden.one@icloud.com" },
+    });
+  });
+
   it("ingests one forwarded email, returns body and deduplicates it", async () => {
     await upsertAlias();
     const raw = [

@@ -332,6 +332,24 @@ export ICLOUD_GATEWAY_HME_PROXY_REQUIRED="${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0
 
 # 可选：本地 control 直接启用 IMAP 取码（列表行显示验证码）
 # 凭证优先读取桌面凭据文件，其次项目 .env
+IMAP_ENABLED="${ICLOUD_GATEWAY_IMAP_ENABLED:-}"
+if [[ -z "$IMAP_ENABLED" ]]; then IMAP_ENABLED="$(read_env ICLOUD_GATEWAY_IMAP_ENABLED "$CREDS_FILE" || true)"; fi
+if [[ -z "$IMAP_ENABLED" ]]; then IMAP_ENABLED="$(read_env ICLOUD_GATEWAY_IMAP_ENABLED "$ENV_FILE" || true)"; fi
+IMAP_ENABLED="${IMAP_ENABLED:-1}"
+case "${IMAP_ENABLED:l}" in
+0|false|no|off)
+  unset \
+    ICLOUD_GATEWAY_IMAP_USERNAME \
+    ICLOUD_GATEWAY_IMAP_PASSWORD \
+    ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL \
+    ICLOUD_GATEWAY_IMAP_HOST \
+    ICLOUD_GATEWAY_IMAP_PORT \
+    ICLOUD_GATEWAY_IMAP_FOLDER \
+    ICLOUD_GATEWAY_IMAP_JUNK_FOLDER \
+    ICLOUD_GATEWAY_IMAP_PROXY 2>/dev/null || true
+  echo "IMAP 本地取码：已关闭（Cloudflare Email Worker 接管）"
+  ;;
+*)
 IMAP_USERNAME="$(read_env ICLOUD_GATEWAY_IMAP_USERNAME "$CREDS_FILE" || true)"
 IMAP_PASSWORD="$(read_env ICLOUD_GATEWAY_IMAP_PASSWORD "$CREDS_FILE" || true)"
 IMAP_FORWARD="$(read_env ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL "$CREDS_FILE" || true)"
@@ -362,6 +380,8 @@ if [[ -n "$IMAP_USERNAME" && -n "$IMAP_PASSWORD" ]]; then
 else
   echo "IMAP 本地取码：未配置（可在凭据文件写入 ICLOUD_GATEWAY_IMAP_USERNAME / PASSWORD）"
 fi
+  ;;
+esac
 
 
 if [[ -f "$PID_FILE" ]]; then

@@ -34,7 +34,9 @@ mailboxRoutes.post("/session", async (context) => {
     throw new RateLimitError();
   }
   const input = await parseJson(context, mailboxSessionSchema);
-  const authenticated = await aliases.authenticate(input.email, input.token);
+  const authenticated = input.email
+    ? await aliases.authenticate(input.email, input.token)
+    : await aliases.authenticateToken(input.token);
   if (!authenticated.row.token_digest) throw new UnauthorizedError();
   const session = await issueSession(
     config,

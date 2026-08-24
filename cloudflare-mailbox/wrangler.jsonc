@@ -3,6 +3,18 @@
   "name": "icloud-mailbox-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-22",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "mailbox.yunbay.xyz",
+      "custom_domain": true,
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/*",
+      "zone_name": "yunbay.xyz",
+    },
+  ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -15,7 +27,7 @@
     {
       "binding": "DB",
       "database_name": "icloud-mailbox",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "8454dc17-0494-4e89-b8fa-3f1e321f75dc",
       "migrations_dir": "migrations",
     },
   ],
@@ -26,6 +38,6 @@
     "MAX_BODY_CHARS": "50000",
     "MAX_EMAIL_BYTES": "5000000",
     "AUTH_ATTEMPTS_PER_MINUTE": "10",
-    "INBOX_ADDRESS": "",
+    "INBOX_ADDRESS": "otp@yunbay.xyz",
   },
 }

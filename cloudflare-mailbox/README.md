@@ -9,6 +9,16 @@
 - 不再需要 QQ 邮箱、IMAP、云端 Chromium、`cn-proxy` 或常驻 VPS edge。
 - “服务器 2”可以作为部署机运行 Wrangler，但 Worker 与 D1 实际运行在 Cloudflare 网络，不是 VPS 进程。
 
+## 当前生产配置
+
+- 用户主入口：`https://icloud.yunbay.xyz`
+- 维护入口：`https://mailbox.yunbay.xyz`
+- 域名收件地址：`otp@yunbay.xyz`
+- Email Routing：`otp@yunbay.xyz → icloud-mailbox-worker`
+- D1：`icloud-mailbox`（APAC）
+- 旧链接兼容：`/#key=<Token>` 会通过全局 HMAC 索引自动找到邮箱；新链接继续使用 `/#email=<邮箱>&key=<Token>`。
+- 原 `icloud.yunbay.xyz` DNS/VPS 保留在 Worker route 后方；移除该 route 即可恢复旧站，不需要重建 DNS。
+
 ## 保存的数据
 
 - `aliases`：邮箱 HMAC、Token HMAC、状态及加密 Alias 元数据。
@@ -161,6 +171,7 @@ https://mailbox.your-domain.com/#email=<隐藏邮箱>&key=<Token>
 Cloudflare 切换失败时：
 
 1. 把 iCloud Hide My Email 转发目标切回原 QQ/IMAP 邮箱。
-2. 把本地 `ICLOUD_GATEWAY_EDGE_BASE_URL` 与 `PUBLIC_BASE_URL` 恢复旧地址。
-3. 重启本地 control 并执行一次旧 edge 同步。
-4. D1 数据保留用于取证，不要在故障处理中直接删除数据库或覆盖加密密钥。
+2. 把本机 `ICLOUD_GATEWAY_IMAP_ENABLED` 改回 `1` 并重启 control。
+3. 从 `wrangler.jsonc` 删除 `icloud.yunbay.xyz/*` Worker route 后重新部署；原 DNS/VPS 会重新接管旧域名。
+4. 本地 edge/public URL 继续使用 `https://icloud.yunbay.xyz`，执行一次旧 edge 同步。
+5. D1 数据保留用于取证，不要在故障处理中直接删除数据库或覆盖加密密钥。

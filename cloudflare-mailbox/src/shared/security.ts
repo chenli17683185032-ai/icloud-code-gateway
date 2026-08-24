@@ -121,6 +121,16 @@ export async function accessTokenDigest(
   );
 }
 
+export async function accessTokenLookupDigest(
+  config: RuntimeConfig,
+  token: string,
+): Promise<string> {
+  return hmacDigest(
+    config.lookupHmacKey,
+    `token-lookup\0${validateAccessToken(token)}`,
+  );
+}
+
 export interface EncryptedValue {
   ciphertext: string;
   iv: string;

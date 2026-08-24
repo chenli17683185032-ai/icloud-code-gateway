@@ -26,7 +26,7 @@ export const controlStateSchema = z.object({
 });
 
 export const mailboxSessionSchema = z.object({
-  email,
+  email: z.union([email, z.literal("")]).default(""),
   token: accessToken,
 });
 
