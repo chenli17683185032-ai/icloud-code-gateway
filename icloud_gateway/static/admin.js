@@ -100,7 +100,7 @@
   // rides in the fragment so it never reaches the server as a logged query.
   function deliveryLink(item) {
     const base = String(item.public_url || publicUrl).replace(/\/+$/, "");
-    return `${base}/#key=${encodeURIComponent(item.access_key)}`;
+    return `${base}/#email=${encodeURIComponent(item.email)}&key=${encodeURIComponent(item.access_key)}`;
   }
 
   function deliveryLinkList(items) {

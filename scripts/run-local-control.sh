@@ -28,7 +28,9 @@ VENV_PY="${PROJECT_DIR}/.venv/bin/python"
 APP_HOST="127.0.0.1"
 APP_PORT="18081"
 ADMIN_URL="http://${APP_HOST}:${APP_PORT}/admin"
-EDGE_URL="https://icloud.yunbay.xyz"
+EDGE_URL_DEFAULT="https://icloud.yunbay.xyz"
+EDGE_URL="${ICLOUD_GATEWAY_EDGE_BASE_URL:-}"
+PUBLIC_URL="${ICLOUD_GATEWAY_PUBLIC_BASE_URL:-}"
 HME_PROXY_DEFAULT="socks5h://127.0.0.1:7897"
 
 pick_bootstrap_python() {
@@ -56,15 +58,6 @@ if ! BOOTSTRAP_PY="$(pick_bootstrap_python)"; then
   echo "错误：找不到可用的 Python 3（系统 Python 可能缺少 Command Line Tools）。"
   exit 1
 fi
-
-echo "========================================"
-echo "  本地 iCloud 控制台（无 Docker / control）"
-echo "========================================"
-echo "创建 / Session：本地"
-echo "验证码接码：云端 ${EDGE_URL}"
-echo "数据目录：${DATA_DIR}"
-echo "浏览器 profile：${PROFILE_DIR}"
-echo
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "错误：找不到项目目录：${PROJECT_DIR}"
@@ -94,6 +87,31 @@ for line in path.read_text(encoding="utf-8").splitlines():
         break
 PY
 }
+
+if [[ -z "$EDGE_URL" ]]; then EDGE_URL="$(read_env ICLOUD_GATEWAY_EDGE_BASE_URL "$CREDS_FILE" || true)"; fi
+if [[ -z "$EDGE_URL" ]]; then EDGE_URL="$(read_env ICLOUD_GATEWAY_EDGE_BASE_URL "$ENV_FILE" || true)"; fi
+EDGE_URL="${EDGE_URL:-$EDGE_URL_DEFAULT}"
+if [[ -z "$PUBLIC_URL" ]]; then PUBLIC_URL="$(read_env ICLOUD_GATEWAY_PUBLIC_BASE_URL "$CREDS_FILE" || true)"; fi
+if [[ -z "$PUBLIC_URL" ]]; then PUBLIC_URL="$(read_env ICLOUD_GATEWAY_PUBLIC_BASE_URL "$ENV_FILE" || true)"; fi
+PUBLIC_URL="${PUBLIC_URL:-$EDGE_URL}"
+if [[ "$EDGE_URL" != http://* && "$EDGE_URL" != https://* ]]; then
+  echo "错误：ICLOUD_GATEWAY_EDGE_BASE_URL 必须是 http(s) URL。"
+  exit 1
+fi
+if [[ "$PUBLIC_URL" != http://* && "$PUBLIC_URL" != https://* ]]; then
+  echo "错误：ICLOUD_GATEWAY_PUBLIC_BASE_URL 必须是 http(s) URL。"
+  exit 1
+fi
+
+echo "========================================"
+echo "  本地 iCloud 控制台（无 Docker / control）"
+echo "========================================"
+echo "创建 / Session：本地"
+echo "邮箱收件箱：${PUBLIC_URL}"
+echo "控制面同步：${EDGE_URL}"
+echo "数据目录：${DATA_DIR}"
+echo "浏览器 profile：${PROFILE_DIR}"
+echo
 
 local_proxy_is_listening() {
   local proxy_url="$1"
@@ -288,7 +306,7 @@ export ICLOUD_GATEWAY_DEPLOYMENT_MODE=control
 export ICLOUD_GATEWAY_EDGE_BASE_URL="$EDGE_URL"
 export ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 export ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS=20
-export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$EDGE_URL"
+export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$PUBLIC_URL"
 export ICLOUD_GATEWAY_COOKIE_SECURE=0
 export ICLOUD_GATEWAY_TRUSTED_HOSTS="localhost,127.0.0.1"
 export ICLOUD_GATEWAY_HOST="$APP_HOST"
@@ -486,7 +504,7 @@ echo "1. 打开管理页（无需密码）"
 echo "2. 点击「登录更新」，本机会弹出持久 Chromium"
 echo "3. 在弹出窗口完成 Apple 登录，自动捕获 Session"
 echo "4. 本地创建隐藏邮箱（自动同步云端）"
-echo "5. 云端取码：${EDGE_URL}"
+echo "5. 网站收件：${PUBLIC_URL}"
 echo
 echo "停止服务："
 echo "  kill \$(cat ${PID_FILE})"

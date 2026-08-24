@@ -101,6 +101,9 @@ def test_local_control_only_auto_enables_a_live_proxy() -> None:
         'ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$HME_PROXY_DEFAULT}"'
         not in launcher
     )
+    assert 'read_env ICLOUD_GATEWAY_EDGE_BASE_URL "$CREDS_FILE"' in launcher
+    assert 'read_env ICLOUD_GATEWAY_PUBLIC_BASE_URL "$CREDS_FILE"' in launcher
+    assert 'export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$PUBLIC_URL"' in launcher
 
 
 def test_edge_browser_cleanup_is_scoped_and_preserves_recovery_assets() -> None:

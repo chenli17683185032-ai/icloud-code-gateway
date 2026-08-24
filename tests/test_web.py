@@ -1247,7 +1247,10 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     # A delivered link carries the key in the fragment, so it never reaches the
     # server as a logged query string.
     assert "function deliveryLink" in script
-    assert "#key=${encodeURIComponent(item.access_key)}" in script
+    assert (
+        "#email=${encodeURIComponent(item.email)}&key=${encodeURIComponent(item.access_key)}"
+        in script
+    )
     assert 'createCopyButton(deliveryLinkList(items), "复制取码链接")' in script
     assert 'createCopyButton(emailList(items), "一键复制")' in script
     assert 'createCopyButton(standardParameterList(items), "导出信息")' in script
@@ -1356,16 +1359,16 @@ const items = [
   },
 ];
 const one = "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one"
-  + "；取码链接：https://gateway.example/#key=icg_one";
+  + "；取码链接：https://gateway.example/#email=one%40icloud.com&key=icg_one";
 const two = "邮箱：two@icloud.com；网站：https://gateway.example；密钥：icg_two"
-  + "；取码链接：https://gateway.example/#key=icg_two";
+  + "；取码链接：https://gateway.example/#email=two%40icloud.com&key=icg_two";
 if (standardParameters(items[0]) !== one) process.exit(5);
 const expectedEmails = "one@icloud.com\ntwo@icloud.com";
 if (emailList(items) !== expectedEmails) process.exit(6);
 if (standardParameterList(items) !== [one, two].join("\n")) process.exit(7);
 const expectedLinks = [
-  "https://gateway.example/#key=icg_one",
-  "https://gateway.example/#key=icg_two",
+  "https://gateway.example/#email=one%40icloud.com&key=icg_one",
+  "https://gateway.example/#email=two%40icloud.com&key=icg_two",
 ].join("\n");
 if (deliveryLinkList(items) !== expectedLinks) process.exit(8);
 """
