@@ -577,7 +577,10 @@ def test_admin_can_reveal_current_key_but_dashboard_never_embeds_it(
     dashboard = client.get("/admin")
     assert first not in dashboard.text
     assert first[-4:] in dashboard.text
-    assert "查看完整密钥" in dashboard.text
+    assert "导出 person@icloud.com 的信息" in dashboard.text
+    assert "导出信息（邮箱 + 取码链接）" in dashboard.text
+    assert 'class="icon-button export-info-button"' in dashboard.text
+    assert 'src="/static/icons/copy.svg"' in dashboard.text
 
     missing_csrf = client.post(f"/admin/api/aliases/{alias['id']}/key/reveal")
     assert missing_csrf.status_code == 403
@@ -1255,7 +1258,13 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     )
     assert 'createCopyButton(deliveryLinkList(items), "复制取码链接")' in script
     assert 'createCopyButton(emailList(items), "一键复制")' in script
-    assert 'createCopyButton(standardParameterList(items), "导出信息")' in script
+    assert 'createCopyButton(standardParameters(item), "导出信息")' in script
+    assert "if (items.length > 1)" in script
+    assert "standardParameterList" not in script
+    assert 'querySelectorAll(".export-info-button")' in script
+    assert "await writeClipboard(standardParameters(data))" in script
+    assert 'openModal([data], "当前有效密钥。")' not in script
+    assert "邮箱和取码链接已复制" in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script
     assert "window.prompt" not in script
@@ -1329,7 +1338,6 @@ const {
   emailList,
   jobCounts,
   jobSummary,
-  standardParameterList,
   standardParameters,
 } = require(process.argv[1]);
 const job = {
@@ -1362,17 +1370,14 @@ const items = [
 ];
 const one = "邮箱：one@icloud.com"
   + "；取码链接：https://gateway.example/#email=one%40icloud.com&key=icg_one";
-const two = "邮箱：two@icloud.com"
-  + "；取码链接：https://gateway.example/#email=two%40icloud.com&key=icg_two";
 if (standardParameters(items[0]) !== one) process.exit(5);
 const expectedEmails = "one@icloud.com\ntwo@icloud.com";
 if (emailList(items) !== expectedEmails) process.exit(6);
-if (standardParameterList(items) !== [one, two].join("\n")) process.exit(7);
 const expectedLinks = [
   "https://gateway.example/#email=one%40icloud.com&key=icg_one",
   "https://gateway.example/#email=two%40icloud.com&key=icg_two",
 ].join("\n");
-if (deliveryLinkList(items) !== expectedLinks) process.exit(8);
+if (deliveryLinkList(items) !== expectedLinks) process.exit(7);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 

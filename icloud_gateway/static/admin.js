@@ -111,10 +111,6 @@
     return `邮箱：${item.email}；取码链接：${deliveryLink(item)}`;
   }
 
-  function standardParameterList(items) {
-    return items.map(standardParameters).join("\n");
-  }
-
   async function writeClipboard(value) {
     const text = String(value ?? "");
     // Run the synchronous path inside the original click gesture. Some browser
@@ -231,9 +227,10 @@
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
     issuedList.replaceChildren();
-    issuedList.append(createCopyButton(deliveryLinkList(items), "复制取码链接"));
-    issuedList.append(createCopyButton(emailList(items), "一键复制"));
-    issuedList.append(createCopyButton(standardParameterList(items), "导出信息"));
+    if (items.length > 1) {
+      issuedList.append(createCopyButton(deliveryLinkList(items), "复制取码链接"));
+      issuedList.append(createCopyButton(emailList(items), "一键复制"));
+    }
     items.forEach((item) => {
       const row = document.createElement("div");
       row.className = "issued-key-row";
@@ -246,12 +243,9 @@
       email.textContent = item.email;
       identity.append(label, email);
 
-      const key = document.createElement("code");
-      key.textContent = deliveryLink(item);
+      const copy = createCopyButton(standardParameters(item), "导出信息");
 
-      const copy = createCopyButton(deliveryLink(item), "取码链接");
-
-      row.append(identity, key, copy);
+      row.append(identity, copy);
       issuedList.append(row);
     });
     modal.hidden = false;
@@ -606,24 +600,33 @@
     });
   });
 
-  document.querySelectorAll(".reveal-key-button").forEach((button) => {
+  document.querySelectorAll(".export-info-button").forEach((button) => {
     button.addEventListener("click", async () => {
       button.disabled = true;
+      button.classList.add("is-busy");
+      button.setAttribute("aria-busy", "true");
+      let data = null;
       try {
-        const data = await api(
+        data = await api(
           `/admin/api/aliases/${button.dataset.aliasId}/key/reveal`,
           { method: "POST" },
         );
-        openModal([data], "当前有效密钥。");
+        await writeClipboard(standardParameters(data));
+        toast(`${data.email} 的邮箱和取码链接已复制。`);
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
         toast(
-          error.message === "conflict"
-            ? "该密钥由旧版本签发，轮换后即可查看。"
-            : "密钥读取失败。",
+          data
+            ? "信息已读取，但浏览器未允许复制，请再点一次。"
+            : error.message === "conflict"
+              ? "该密钥由旧版本签发，轮换后即可导出。"
+              : "导出信息失败。",
           "error",
         );
+      } finally {
         button.disabled = false;
+        button.classList.remove("is-busy");
+        button.removeAttribute("aria-busy");
       }
     });
   });
@@ -1152,7 +1155,6 @@
       jobSummary,
       limitedVisibleSelectionCount,
       splitUsageTokens,
-      standardParameterList,
       standardParameters,
       usageKind,
     };

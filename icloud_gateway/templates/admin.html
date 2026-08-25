@@ -288,8 +288,14 @@
         </div>
         <div class="alias-actions" role="cell">
           {% if alias.has_access_key and alias.access_key_recoverable %}
-          <button class="icon-button reveal-key-button" type="button" data-alias-id="{{ alias.id }}" aria-label="查看完整密钥" title="查看完整密钥">
-            <img src="/static/icons/eye.svg" alt="" aria-hidden="true">
+          <button
+            class="icon-button export-info-button"
+            type="button"
+            data-alias-id="{{ alias.id }}"
+            aria-label="导出 {{ alias.email }} 的信息"
+            title="导出信息（邮箱 + 取码链接）"
+          >
+            <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
           </button>
           {% endif %}
           <button

@@ -1907,7 +1907,7 @@ a:focus-visible {
 
 .issued-key-row {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.6fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   border: 1px solid var(--line);
@@ -1924,16 +1924,6 @@ a:focus-visible {
 .issued-key-identity span {
   overflow-wrap: anywhere;
   color: var(--text-soft);
-  font-size: 12px;
-}
-
-.issued-key-row code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  border-radius: var(--radius);
-  background: var(--surface-muted);
-  padding: 9px 10px;
-  color: var(--text);
   font-size: 12px;
 }
 
@@ -2239,11 +2229,23 @@ a:focus-visible {
 
   .toolbar-actions {
     width: 100%;
+    flex-wrap: wrap;
   }
 
   .search-control {
     width: auto;
-    flex: 1;
+    flex: 1 0 100%;
+  }
+
+  .toolbar-actions form {
+    min-width: 0;
+    flex: 1 1 140px;
+  }
+
+  .toolbar-actions form .primary-button,
+  .toolbar-actions form .secondary-button {
+    width: 100%;
+    padding-inline: 12px;
   }
 
   .create-form,
