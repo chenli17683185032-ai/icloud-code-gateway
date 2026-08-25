@@ -123,9 +123,11 @@ describe("worker integration", () => {
       "X-Apple-Original-Recipient: hidden.one@icloud.com",
       "Subject: Your ChatGPT verification code",
       "Message-ID: <integration-one@example.com>",
-      "Content-Type: text/plain; charset=utf-8",
+      "Content-Type: text/html; charset=utf-8",
       "",
-      "Your OpenAI verification code is 654321.",
+      "<p>Your OpenAI verification code is " +
+        "<span>6</span><span>5</span><span>4</span>" +
+        "<span>3</span><span>2</span><span>1</span>.</p>",
     ].join("\r\n");
     await worker.email?.(
       emailMessage(raw, "relay-message@icloud.com"),

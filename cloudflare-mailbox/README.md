@@ -20,6 +20,7 @@
 - 操作员后台：`https://icloud.yunbay.xyz/admin/`，只输入操作员 Token，无需逐个输入邮箱。
 - 原 `icloud.yunbay.xyz` DNS/VPS 保留在 Worker route 后方；移除该 route 即可恢复旧站，不需要重建 DNS。
 - iCloud Hide My Email 会把 OpenAI/Grok 的发件地址改写成 Apple `@icloud.com` 中继地址。Worker 优先识别原始官方域名；遇到 Apple 中继时，要求发件显示名、标题、正文中至少两处品牌证据才公开验证码，避免只靠一个可伪造显示名放行。
+- 验证码解码会先做 Unicode NFKC、零宽字符和 Unicode 横线归一化；支持标准 6 位数字、`123 456`、`123-456`、HTML 逐位拆分数字，以及 Grok 的 `A1B-2C3`、`A1B 2C3`、`A1B2C3`。候选仍必须靠近验证码语境，避免把年份、时间、IP、地址或订单号当成验证码。
 
 ## 保存的数据
 

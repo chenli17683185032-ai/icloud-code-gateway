@@ -33,6 +33,63 @@ describe("mail parsing", () => {
     ).toBe("A1B-2C3");
   });
 
+  it.each([
+    ["１２３４５６", "123456"],
+    ["123 456", "123456"],
+    ["123–456", "123456"],
+    ["1 2 3 4 5 6", "123456"],
+    ["12\u200b3456", "123456"],
+  ])("normalizes relayed numeric code shape %s", (value, expected) => {
+    expect(
+      extractVerificationCode(
+        "ChatGPT <relay-message@icloud.com>",
+        "Your ChatGPT verification code",
+        `Use this OpenAI verification code: ${value}`,
+      ),
+    ).toBe(expected);
+  });
+
+  it.each([
+    ["A1B–2C3", "A1B-2C3"],
+    ["A1B 2C3", "A1B-2C3"],
+    ["A1B2C3", "A1B2C3"],
+  ])("normalizes Grok code shape %s", (value, expected) => {
+    expect(
+      extractVerificationCode(
+        "Grok <relay-message@icloud.com>",
+        "Your Grok security code",
+        `Use this Grok code to continue: ${value}`,
+      ),
+    ).toBe(expected);
+  });
+
+  it("accepts a standalone branded code without weak numeric false positives", () => {
+    expect(
+      extractVerificationCode(
+        "ChatGPT <relay-message@icloud.com>",
+        "OpenAI account message",
+        "123456",
+      ),
+    ).toBe("123456");
+    expect(
+      extractVerificationCode(
+        "ChatGPT <relay-message@icloud.com>",
+        "New sign-in to ChatGPT",
+        "App: Codex\nTime: August 25, 2026 at 10:06 PM JST\nAddress: 1968 Market Street, San Francisco, CA 94105",
+      ),
+    ).toBe("");
+  });
+
+  it("recognizes localized login-code wording", () => {
+    expect(
+      extractVerificationCode(
+        "ChatGPT <relay-message@icloud.com>",
+        "账户通知",
+        "您的登录码是：１２３４５６，请勿泄露。",
+      ),
+    ).toBe("123456");
+  });
+
   it("converts HTML to inert plain text", () => {
     expect(
       htmlToText(
