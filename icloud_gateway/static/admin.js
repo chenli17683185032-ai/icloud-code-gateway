@@ -108,8 +108,7 @@
   }
 
   function standardParameters(item) {
-    const url = item.public_url || publicUrl;
-    return `邮箱：${item.email}；网站：${url}；密钥：${item.access_key}；取码链接：${deliveryLink(item)}`;
+    return `邮箱：${item.email}；取码链接：${deliveryLink(item)}`;
   }
 
   function standardParameterList(items) {
@@ -248,7 +247,7 @@
       identity.append(label, email);
 
       const key = document.createElement("code");
-      key.textContent = standardParameters(item);
+      key.textContent = deliveryLink(item);
 
       const copy = createCopyButton(deliveryLink(item), "取码链接");
 

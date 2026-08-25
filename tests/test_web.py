@@ -1243,7 +1243,9 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
 
     assert "class AuthenticationRequiredError extends Error" in script
     assert script.count("instanceof AuthenticationRequiredError") >= 9
-    assert "邮箱：${item.email}；网站：${url}；密钥：${item.access_key}" in script
+    assert "邮箱：${item.email}；取码链接：${deliveryLink(item)}" in script
+    assert "网站：${url}" not in script
+    assert "密钥：${item.access_key}" not in script
     # A delivered link carries the key in the fragment, so it never reaches the
     # server as a logged query string.
     assert "function deliveryLink" in script
@@ -1358,9 +1360,9 @@ const items = [
     public_url: "https://gateway.example",
   },
 ];
-const one = "邮箱：one@icloud.com；网站：https://gateway.example；密钥：icg_one"
+const one = "邮箱：one@icloud.com"
   + "；取码链接：https://gateway.example/#email=one%40icloud.com&key=icg_one";
-const two = "邮箱：two@icloud.com；网站：https://gateway.example；密钥：icg_two"
+const two = "邮箱：two@icloud.com"
   + "；取码链接：https://gateway.example/#email=two%40icloud.com&key=icg_two";
 if (standardParameters(items[0]) !== one) process.exit(5);
 const expectedEmails = "one@icloud.com\ntwo@icloud.com";
