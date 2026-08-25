@@ -47,11 +47,13 @@ async function createSession(): Promise<string> {
   return response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
 }
 
-function emailMessage(raw: string): ForwardableEmailMessage {
+function emailMessage(raw: string, from?: string): ForwardableEmailMessage {
   return {
-    from: raw.includes("tm.openai.com")
-      ? "noreply@tm.openai.com"
-      : "sender@example.com",
+    from:
+      from ??
+      (raw.includes("tm.openai.com")
+        ? "noreply@tm.openai.com"
+        : "sender@example.com"),
     to: "otp@example.com",
     raw: new Response(raw).body,
     rawSize: raw.length,
@@ -116,17 +118,25 @@ describe("worker integration", () => {
   it("returns only GPT/Grok codes to regular users and deduplicates mail", async () => {
     await upsertAlias();
     const raw = [
-      "From: OpenAI <noreply@tm.openai.com>",
+      "From: OpenAI <relay-message@icloud.com>",
       "To: hidden.one@icloud.com",
       "X-Apple-Original-Recipient: hidden.one@icloud.com",
-      "Subject: Your verification code",
+      "Subject: Your ChatGPT verification code",
       "Message-ID: <integration-one@example.com>",
       "Content-Type: text/plain; charset=utf-8",
       "",
-      "Your verification code is 654321.",
+      "Your OpenAI verification code is 654321.",
     ].join("\r\n");
-    await worker.email?.(emailMessage(raw), mailboxEnv, {} as ExecutionContext);
-    await worker.email?.(emailMessage(raw), mailboxEnv, {} as ExecutionContext);
+    await worker.email?.(
+      emailMessage(raw, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+    await worker.email?.(
+      emailMessage(raw, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
 
     const cookie = await createSession();
     const response = await SELF.fetch("https://example.com/api/messages", {

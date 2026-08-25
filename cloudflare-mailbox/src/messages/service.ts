@@ -107,7 +107,13 @@ export class MessageService {
       body: parsed.body,
       code: extractVerificationCode(parsed.sender, parsed.subject, parsed.body),
     };
-    const category = classifyMessage(parsed.sender, message.envelopeFrom);
+    const category = classifyMessage(
+      parsed.sender,
+      message.envelopeFrom,
+      parsed.subject,
+      parsed.body,
+      payload.code,
+    );
     const permanent = shouldPreserveMessage(
       category,
       payload.code,

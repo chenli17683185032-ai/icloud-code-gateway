@@ -50,6 +50,41 @@ describe("mail parsing", () => {
       classifyMessage("Sender <sender@example.com>", "sender@example.com"),
     ).toBe("other");
     expect(
+      classifyMessage(
+        "OpenAI <relay-message@icloud.com>",
+        "relay-message@icloud.com",
+        "Your ChatGPT verification code",
+        "Use this OpenAI code to continue: 123456",
+        "123456",
+      ),
+    ).toBe("gpt");
+    expect(
+      classifyMessage(
+        "Grok <relay-message@icloud.com>",
+        "relay-message@icloud.com",
+        "Your Grok verification code",
+        "Use this Grok code to continue: A1B-2C3",
+        "A1B-2C3",
+      ),
+    ).toBe("grok");
+    expect(
+      classifyMessage(
+        "ChatGPT <relay-message@icloud.com>",
+        "relay-message@icloud.com",
+        "New sign-in to ChatGPT",
+        "OpenAI detected a new ChatGPT sign-in.",
+      ),
+    ).toBe("gpt");
+    expect(
+      classifyMessage(
+        "OpenAI <relay-message@icloud.com>",
+        "relay-message@icloud.com",
+        "Unrelated account notice",
+        "No matching brand evidence.",
+        "123456",
+      ),
+    ).toBe("other");
+    expect(
       shouldPreserveMessage("other", "", "售后支持工单", "申诉正在处理中"),
     ).toBe(true);
     expect(
@@ -58,5 +93,8 @@ describe("mail parsing", () => {
     expect(
       shouldPreserveMessage("gpt", "123456", "Code", "Verification code"),
     ).toBe(false);
+    expect(
+      shouldPreserveMessage("gpt", "", "New sign-in", "Account activity"),
+    ).toBe(true);
   });
 });
