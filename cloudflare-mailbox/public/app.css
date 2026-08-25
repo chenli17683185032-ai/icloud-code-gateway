@@ -475,6 +475,11 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+#operator-view .mailbox-workspace {
+  height: clamp(520px, calc(100dvh - 430px), 720px);
+  min-height: 520px;
+}
+
 .mailbox-view[data-mode="code_only"] .mailbox-workspace {
   grid-template-columns: 1fr;
   min-height: 420px;
@@ -489,7 +494,10 @@ button:disabled {
 }
 
 .message-index {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
   border-inline-end: 1px solid var(--line);
   background: color-mix(in oklch, var(--paper) 84%, var(--canvas));
 }
@@ -509,9 +517,14 @@ button:disabled {
 }
 
 .message-list {
+  min-height: 0;
   max-height: min(68vh, 720px);
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+#operator-view .message-list {
+  max-height: none;
 }
 
 .message-row {
@@ -528,6 +541,13 @@ button:disabled {
   transition:
     background-color 160ms var(--ease-out),
     transform 160ms var(--ease-out);
+}
+
+#operator-view .message-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.24rem 0.6rem;
+  min-height: 72px;
+  padding: 0.62rem 0.75rem;
 }
 
 .message-row:hover,
@@ -567,6 +587,10 @@ button:disabled {
   min-width: 0;
 }
 
+#operator-view .message-meta {
+  grid-column: 1 / -1;
+}
+
 .message-sender,
 .message-time {
   overflow: hidden;
@@ -580,10 +604,18 @@ button:disabled {
   font-weight: 700;
 }
 
+#operator-view .message-sender {
+  font-size: 0.72rem;
+}
+
 .message-time {
   flex: none;
   color: var(--ink-soft);
   font-size: 0.7rem;
+}
+
+#operator-view .message-time {
+  font-size: 0.65rem;
 }
 
 .message-subject {
@@ -595,6 +627,11 @@ button:disabled {
   white-space: nowrap;
 }
 
+#operator-view .message-subject {
+  min-width: 0;
+  font-size: 0.92rem;
+}
+
 .message-preview {
   display: -webkit-box;
   overflow: hidden;
@@ -602,6 +639,10 @@ button:disabled {
   font-size: 0.76rem;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+#operator-view .message-preview {
+  display: none;
 }
 
 .code-chip {
@@ -643,6 +684,11 @@ button:disabled {
 .message-reader {
   min-width: 0;
   background: var(--paper-strong);
+}
+
+#operator-view .message-reader {
+  min-height: 0;
+  overflow: auto;
 }
 
 .reader-placeholder {
@@ -693,7 +739,10 @@ button:disabled {
 
 .operator-badges {
   display: flex;
+  grid-column: 2;
+  grid-row: 2;
   gap: 0.35rem;
+  align-self: center;
 }
 
 .reader-kicker {
@@ -916,16 +965,34 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  #operator-view .mailbox-workspace {
+    height: auto;
+    min-height: 0;
+  }
+
   .message-index {
     border-inline-end: 0;
     border-block-end: 1px solid var(--line);
+  }
+
+  #operator-view .message-index {
+    height: min(48vh, 420px);
+    min-height: 280px;
   }
 
   .message-list {
     max-height: 360px;
   }
 
+  #operator-view .message-list {
+    max-height: none;
+  }
+
   .message-reader {
+    min-height: 420px;
+  }
+
+  #operator-view .message-reader {
     min-height: 420px;
   }
 

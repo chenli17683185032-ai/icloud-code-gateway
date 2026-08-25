@@ -97,6 +97,16 @@ describe("worker integration", () => {
     expect(script).not.toContain("localStorage");
     expect(script).not.toContain("sessionStorage");
 
+    const stylesheet = await (
+      await SELF.fetch("https://example.com/app.css")
+    ).text();
+    expect(stylesheet).toContain("#operator-view .message-row {");
+    expect(stylesheet).toContain("min-height: 72px;");
+    expect(stylesheet).toContain("#operator-view .message-preview {");
+    expect(stylesheet).toContain(
+      "height: clamp(520px, calc(100dvh - 430px), 720px);",
+    );
+
     const adminPage = await SELF.fetch("https://example.com/admin/");
     expect(adminPage.status).toBe(200);
     expect(await adminPage.text()).toContain("隐邮操作台");
