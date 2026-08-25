@@ -18,6 +18,8 @@ const elements = {
   refreshButton: document.querySelector("#operator-refresh-button"),
   logoutButton: document.querySelector("#operator-logout-button"),
   count: document.querySelector("#operator-message-count"),
+  search: document.querySelector("#operator-search-input"),
+  searchState: document.querySelector("#operator-search-state"),
   list: document.querySelector("#operator-message-list"),
   empty: document.querySelector("#operator-empty"),
   reader: document.querySelector("#operator-reader"),
@@ -37,6 +39,13 @@ let selectedId = "";
 let renderedSignature = "";
 let pollingTimer = 0;
 let refreshInFlight = false;
+let archiveLoadInFlight = false;
+let nextCursor = "";
+let hasMore = false;
+let loadedOlderPages = false;
+let searchQuery = "";
+let searchTimer = 0;
+let searchGeneration = 0;
 const readerModes = new Map();
 
 async function api(path, options = {}) {
@@ -90,12 +99,95 @@ function messagePath(messageId, suffix) {
   return `/api/operator/messages/${encodeURIComponent(messageId)}/${suffix}`;
 }
 
+function normalizeSearch(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase();
+}
+
+function messageSearchText(message) {
+  return normalizeSearch(
+    [
+      message.email,
+      message.sender,
+      message.subject,
+      message.body,
+      message.code,
+      ...(message.attachments || []).map((attachment) => attachment.filename),
+    ].join("\n"),
+  );
+}
+
+function visibleMessages() {
+  if (!searchQuery) return messages;
+  return messages.filter((message) =>
+    messageSearchText(message).includes(searchQuery),
+  );
+}
+
+function mergeMessages(...groups) {
+  const unique = new Map();
+  for (const group of groups) {
+    for (const message of group || []) unique.set(message.id, message);
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      new Date(right.receivedAt).getTime() -
+        new Date(left.receivedAt).getTime() ||
+      String(right.id).localeCompare(String(left.id)),
+  );
+}
+
+async function fetchMessagePage(cursor = "") {
+  const query = new URLSearchParams({ limit: "50" });
+  if (cursor) query.set("cursor", cursor);
+  return api(`/api/operator/messages?${query.toString()}`);
+}
+
+function updateSearchState(message = "") {
+  if (message) {
+    elements.searchState.textContent = message;
+    return;
+  }
+  if (searchQuery) {
+    elements.searchState.textContent = hasMore
+      ? `已搜索当前加载的 ${messages.length} 封`
+      : `已搜索全部 ${messages.length} 封`;
+  } else {
+    elements.searchState.textContent = hasMore
+      ? `已加载最新 ${messages.length} 封`
+      : `已加载全部 ${messages.length} 封`;
+  }
+}
+
+function resetArchiveState() {
+  messages = [];
+  selectedId = "";
+  renderedSignature = "";
+  nextCursor = "";
+  hasMore = false;
+  loadedOlderPages = false;
+  archiveLoadInFlight = false;
+  searchQuery = "";
+  searchGeneration += 1;
+  readerModes.clear();
+  elements.count.textContent = "0 封";
+  elements.list.replaceChildren();
+  elements.reader.replaceChildren();
+  elements.empty.hidden = true;
+}
+
 function showEntry(message = "") {
   stopPolling();
+  if (searchTimer) window.clearTimeout(searchTimer);
+  resetArchiveState();
   document.body.classList.remove("operator-active");
   elements.view.hidden = true;
   elements.entry.hidden = false;
   elements.token.value = "";
+  elements.search.value = "";
+  elements.searchState.textContent = "";
   elements.status.textContent = message;
   window.setTimeout(() => elements.token.focus(), 0);
 }
@@ -144,7 +236,10 @@ async function copyText(value, button) {
 }
 
 function signature(items) {
-  return JSON.stringify(
+  return JSON.stringify([
+    searchQuery,
+    hasMore,
+    archiveLoadInFlight,
     items.map((item) => [
       item.id,
       item.email,
@@ -163,7 +258,7 @@ function signature(items) {
         attachment.inline,
       ]),
     ]),
-  );
+  ]);
 }
 
 function appendMessageContent(article, message) {
@@ -318,14 +413,23 @@ function renderMessages(nextMessages, options = {}) {
   const previousIds = new Set(messages.map((item) => item.id));
   messages = incoming;
   renderedSignature = nextSignature;
-  if (!messages.some((item) => item.id === selectedId)) {
-    selectedId = messages[0] ? messages[0].id : "";
+  const visible = visibleMessages();
+  if (!visible.some((item) => item.id === selectedId)) {
+    selectedId = visible[0] ? visible[0].id : "";
   }
-  elements.count.textContent = String(messages.length) + " 封";
+  elements.count.textContent = searchQuery
+    ? `${visible.length} / ${messages.length} 封`
+    : `${messages.length}${hasMore ? "+" : ""} 封`;
   elements.list.replaceChildren();
-  elements.empty.hidden = messages.length !== 0;
+  elements.empty.hidden = visible.length !== 0;
+  elements.empty.querySelector("strong").textContent = searchQuery
+    ? "没有匹配邮件"
+    : "还没有收到邮件";
+  elements.empty.querySelector("p").textContent = searchQuery
+    ? "换一个邮箱、发件人、标题或正文关键词。"
+    : "后台会静默刷新，新邮件到达后会立即出现。";
 
-  for (const message of messages) {
+  for (const message of visible) {
     const row = makeElement("button", "message-row");
     row.type = "button";
     row.setAttribute(
@@ -357,8 +461,63 @@ function renderMessages(nextMessages, options = {}) {
     });
     elements.list.append(row);
   }
+  if (hasMore) {
+    const loadAll = makeElement(
+      "button",
+      "load-all-messages",
+      archiveLoadInFlight
+        ? "正在加载全部邮件…"
+        : searchQuery
+          ? "加载全部邮件以完成搜索"
+          : "加载全部历史邮件",
+    );
+    loadAll.type = "button";
+    loadAll.disabled = archiveLoadInFlight;
+    loadAll.addEventListener("click", () => {
+      void loadAllMessages();
+    });
+    elements.list.append(loadAll);
+  }
+  updateSearchState();
   renderReader(options.animate !== false);
   return messages.some((item) => !previousIds.has(item.id));
+}
+
+async function loadAllMessages() {
+  if (archiveLoadInFlight || !hasMore) return;
+  archiveLoadInFlight = true;
+  loadedOlderPages = true;
+  stopPolling();
+  renderMessages(messages, { force: true, animate: false });
+  const seenCursors = new Set();
+  let pageCount = 0;
+  try {
+    while (hasMore) {
+      if (!nextCursor || seenCursors.has(nextCursor)) {
+        throw new ApiError(500, { message: "邮件分页位置异常，请刷新重试。" });
+      }
+      seenCursors.add(nextCursor);
+      pageCount += 1;
+      updateSearchState(`正在加载全部邮件 · 第 ${pageCount + 1} 页`);
+      const payload = await fetchMessagePage(nextCursor);
+      messages = mergeMessages(messages, payload.messages);
+      nextCursor = String(payload.next_cursor || "");
+      hasMore = Boolean(payload.has_more);
+    }
+    renderMessages(messages, { force: true, animate: false });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      showEntry(error.message);
+      return;
+    }
+    elements.error.textContent =
+      error && error.message ? error.message : "加载全部邮件失败。";
+    elements.error.hidden = false;
+  } finally {
+    archiveLoadInFlight = false;
+    renderMessages(messages, { force: true, animate: false });
+    schedulePolling();
+  }
 }
 
 async function refresh(options = {}) {
@@ -367,9 +526,23 @@ async function refresh(options = {}) {
   if (!options.quiet) elements.refreshState.textContent = "正在刷新";
   elements.refreshButton.disabled = true;
   try {
-    const payload = await api("/api/operator/messages");
+    const payload = await fetchMessagePage();
+    let nextMessages;
+    if (loadedOlderPages) {
+      const now = Date.now();
+      nextMessages = mergeMessages(
+        payload.messages,
+        messages.filter(
+          (message) => new Date(message.expiresAt).getTime() > now,
+        ),
+      );
+    } else {
+      nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
+      nextCursor = String(payload.next_cursor || "");
+      hasMore = Boolean(payload.has_more);
+    }
     showView();
-    const hasNew = renderMessages(payload.messages, {
+    const hasNew = renderMessages(nextMessages, {
       force: !options.quiet,
       animate: !options.quiet,
     });
@@ -438,6 +611,20 @@ elements.form.addEventListener("submit", async (event) => {
   await login(elements.token.value.trim());
 });
 
+elements.search.addEventListener("input", () => {
+  searchQuery = normalizeSearch(elements.search.value);
+  searchGeneration += 1;
+  const generation = searchGeneration;
+  if (searchTimer) window.clearTimeout(searchTimer);
+  renderMessages(messages, { force: true, animate: false });
+  if (!searchQuery || !hasMore) return;
+  updateSearchState("正在读取全部邮件以完成搜索…");
+  searchTimer = window.setTimeout(async () => {
+    if (generation !== searchGeneration || !searchQuery) return;
+    await loadAllMessages();
+  }, 250);
+});
+
 elements.refreshButton.addEventListener("click", () => refresh());
 elements.logoutButton.addEventListener("click", async () => {
   elements.logoutButton.disabled = true;
@@ -446,10 +633,6 @@ elements.logoutButton.addEventListener("click", async () => {
   } catch {
     // Local view can still be cleared safely.
   } finally {
-    messages = [];
-    selectedId = "";
-    renderedSignature = "";
-    readerModes.clear();
     elements.logoutButton.disabled = false;
     showEntry("已退出操作员后台。");
   }

@@ -169,12 +169,12 @@ https://mailbox.your-domain.com/#email=<隐藏邮箱>&key=<Token>
 
 - `POST /api/operator/session`：只使用操作员 Token 建立后台会话。
 - `GET /api/operator/session`：恢复后台会话。
-- `GET /api/operator/messages`：返回全部 Alias 的完整邮件。
+- `GET /api/operator/messages`：按时间倒序返回操作员邮件，单页最多 50 封；响应包含 `next_cursor` 与 `has_more`，使用 `?cursor=...` 可继续读取全部保留邮件。
 - `GET /api/operator/messages/{messageId}/html`：返回带严格 CSP 的隔离原始排版，只允许同源后台 iframe 加载。
 - `GET /api/operator/messages/{messageId}/attachments/{attachmentId}`：从私有 KV 解密并下载附件。
 - `POST /api/operator/logout`：退出后台。
 
-用户页与后台都每 3 秒刷新一次；自动刷新在数据未变化时不重绘，有新邮件时静默更新，只有手动刷新播放一次轻微反馈。
+用户页与后台都每 3 秒刷新一次；自动刷新在数据未变化时不重绘，有新邮件时静默更新，只有手动刷新播放一次轻微反馈。操作员后台首屏加载最新 50 封，可点击“加载全部历史邮件”；搜索邮箱、发件人、标题、正文、验证码或附件名时会自动分页读取全部仍在保留期内的邮件。全部解密内容只保存在当前操作员页面内存，不写入浏览器存储。
 
 ## 控制面接口
 

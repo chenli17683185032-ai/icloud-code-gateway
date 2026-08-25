@@ -146,6 +146,20 @@
                 <span>全部邮件</span>
                 <span id="operator-message-count">0 封</span>
               </div>
+              <div class="operator-search">
+                <input
+                  id="operator-search-input"
+                  type="search"
+                  autocomplete="off"
+                  placeholder="搜索邮箱、发件人、标题、正文…"
+                  aria-label="搜索全部邮件"
+                />
+                <span
+                  id="operator-search-state"
+                  role="status"
+                  aria-live="polite"
+                ></span>
+              </div>
               <div id="operator-message-list" class="message-list"></div>
               <div id="operator-empty" class="empty-mailbox" hidden>
                 <span class="empty-mark" aria-hidden="true">—</span>

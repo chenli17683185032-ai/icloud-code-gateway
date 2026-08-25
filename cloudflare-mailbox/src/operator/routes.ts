@@ -115,11 +115,14 @@ operatorRoutes.get("/messages", async (context) => {
   const limit = Number.isFinite(requested)
     ? Math.min(Math.max(requested, 1), 50)
     : 50;
+  const page = await messages.listAll(limit, context.req.query("cursor") ?? "");
   return context.json({
     status: "ok",
     mode: "operator",
     retention_seconds: config.emailRetentionSeconds,
-    messages: await messages.listAll(limit),
+    messages: page.messages,
+    next_cursor: page.nextCursor,
+    has_more: page.hasMore,
   });
 });
 

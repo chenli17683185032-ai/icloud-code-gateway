@@ -19,6 +19,17 @@ export interface AdminMessageRow extends MessageRow {
   alias_secret_iv: string;
 }
 
+export interface AdminMessageCursor {
+  receivedAt: number;
+  createdAt: number;
+  id: string;
+}
+
+export interface AdminMessageRowsPage {
+  rows: AdminMessageRow[];
+  hasMore: boolean;
+}
+
 export interface MessageWrite {
   id: string;
   aliasDigest: string;
@@ -232,7 +243,30 @@ export class MessageRepository {
     return result.results;
   }
 
-  async listAll(now: number, limit: number): Promise<AdminMessageRow[]> {
+  async listAll(
+    now: number,
+    limit: number,
+    cursor: AdminMessageCursor | null = null,
+  ): Promise<AdminMessageRowsPage> {
+    const cursorClause = cursor
+      ? `AND (
+            m.received_at < ? OR
+            (m.received_at = ? AND m.created_at < ?) OR
+            (m.received_at = ? AND m.created_at = ? AND m.id < ?)
+         )`
+      : "";
+    const bindings: Array<string | number> = [now];
+    if (cursor) {
+      bindings.push(
+        cursor.receivedAt,
+        cursor.receivedAt,
+        cursor.createdAt,
+        cursor.receivedAt,
+        cursor.createdAt,
+        cursor.id,
+      );
+    }
+    bindings.push(limit + 1);
     const result = await this.database
       .prepare(
         `SELECT m.id, m.alias_digest, m.message_digest, m.payload_ciphertext,
@@ -244,12 +278,16 @@ export class MessageRepository {
            FROM messages AS m
            JOIN aliases AS a ON a.alias_digest = m.alias_digest
           WHERE m.expires_at > ?
-          ORDER BY m.received_at DESC, m.created_at DESC
+          ${cursorClause}
+          ORDER BY m.received_at DESC, m.created_at DESC, m.id DESC
           LIMIT ?`,
       )
-      .bind(now, limit)
+      .bind(...bindings)
       .all<AdminMessageRow>();
-    return result.results;
+    return {
+      rows: result.results.slice(0, limit),
+      hasMore: result.results.length > limit,
+    };
   }
 
   async cleanup(now: number): Promise<number> {

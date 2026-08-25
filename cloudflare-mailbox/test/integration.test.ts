@@ -109,12 +109,17 @@ describe("worker integration", () => {
 
     const adminPage = await SELF.fetch("https://example.com/admin/");
     expect(adminPage.status).toBe(200);
-    expect(await adminPage.text()).toContain("隐邮操作台");
+    const adminHtml = await adminPage.text();
+    expect(adminHtml).toContain("隐邮操作台");
+    expect(adminHtml).toContain('id="operator-search-input"');
     const adminScript = await (
       await SELF.fetch("https://example.com/admin/app.js")
     ).text();
     expect(adminScript).toContain('classList.add("operator-active")');
     expect(adminScript).toContain('classList.remove("operator-active")');
+    expect(adminScript).toContain("async function loadAllMessages");
+    expect(adminScript).toContain("fetchMessagePage");
+    expect(adminScript).toContain("messageSearchText");
     expect(stylesheet).toContain("body.operator-active .page-shell {");
     expect(stylesheet).toContain(
       "width: min(1800px, calc(100% - clamp(1rem, 2vw, 2rem)));",
@@ -267,6 +272,63 @@ describe("worker integration", () => {
         }),
       ]),
     );
+  });
+
+  it("paginates the complete operator archive with a stable cursor", async () => {
+    await upsertAlias();
+    for (let index = 0; index < 3; index += 1) {
+      const raw = [
+        "From: Sender <sender@example.com>",
+        "To: hidden.one@icloud.com",
+        "X-Original-To: hidden.one@icloud.com",
+        `Subject: Archive page ${index}`,
+        `Message-ID: <archive-page-${index}@example.com>`,
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        `Searchable body ${index}`,
+      ].join("\r\n");
+      await worker.email?.(
+        emailMessage(raw),
+        mailboxEnv,
+        {} as ExecutionContext,
+      );
+    }
+    const operatorCookie = await createOperatorSession();
+    const firstResponse = await SELF.fetch(
+      "https://example.com/api/operator/messages?limit=2",
+      { headers: { Cookie: operatorCookie } },
+    );
+    const first = (await firstResponse.json()) as {
+      messages: Array<{ id: string }>;
+      next_cursor: string;
+      has_more: boolean;
+    };
+    expect(first.messages).toHaveLength(2);
+    expect(first.has_more).toBe(true);
+    expect(first.next_cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+
+    const secondResponse = await SELF.fetch(
+      `https://example.com/api/operator/messages?limit=2&cursor=${encodeURIComponent(first.next_cursor)}`,
+      { headers: { Cookie: operatorCookie } },
+    );
+    const second = (await secondResponse.json()) as {
+      messages: Array<{ id: string }>;
+      next_cursor: string;
+      has_more: boolean;
+    };
+    expect(second.messages).toHaveLength(1);
+    expect(second.has_more).toBe(false);
+    expect(second.next_cursor).toBe("");
+    expect(
+      new Set([...first.messages, ...second.messages].map((item) => item.id))
+        .size,
+    ).toBe(3);
+
+    const invalid = await SELF.fetch(
+      "https://example.com/api/operator/messages?cursor=invalid!",
+      { headers: { Cookie: operatorCookie } },
+    );
+    expect(invalid.status).toBe(422);
   });
 
   it("archives original HTML and encrypted attachments for operator download", async () => {

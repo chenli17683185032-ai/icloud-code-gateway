@@ -2,7 +2,7 @@ import { AliasService } from "../aliases/service";
 import { extractVerificationCode } from "../mail/extract-code";
 import { classifyMessage, shouldPreserveMessage } from "../mail/classify";
 import { parseIncomingEmail, type ParsedAttachment } from "../mail/parse";
-import { AppError, NotFoundError } from "../shared/errors";
+import { AppError, NotFoundError, ValidationError } from "../shared/errors";
 import {
   decryptBytes,
   decryptJson,
@@ -17,6 +17,7 @@ import type {
   RuntimeConfig,
 } from "../shared/types";
 import {
+  type AdminMessageCursor,
   type AttachmentRow,
   type AdminMessageRow,
   MessageRepository,
@@ -46,6 +47,12 @@ export interface AdminMessage extends PublicMessage {
   permanent: boolean;
   hasHtml: boolean;
   attachments: AttachmentSummary[];
+}
+
+export interface AdminMessagePage {
+  messages: AdminMessage[];
+  nextCursor: string;
+  hasMore: boolean;
 }
 
 export interface AttachmentSummary {
@@ -115,6 +122,53 @@ function privacySafeHtml(value: string): string {
     )
     .replace(/url\(\s*["']?(?:https?:)?\/\/[^)]*\)/gi, "none")
     .replace(/@import\s+(?:url\()?\s*["']?(?:https?:)?\/\/[^;]+;/gi, "");
+}
+
+function encodeCursor(row: AdminMessageRow): string {
+  return btoa(
+    JSON.stringify({
+      r: row.received_at,
+      c: row.created_at,
+      i: row.id,
+    }),
+  )
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function decodeCursor(value: string): AdminMessageCursor | null {
+  const cursor = value.trim();
+  if (!cursor) return null;
+  if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+    throw new ValidationError("分页位置无效。");
+  }
+  try {
+    const normalized = cursor.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(padded)) as {
+      r?: unknown;
+      c?: unknown;
+      i?: unknown;
+    };
+    if (
+      !Number.isSafeInteger(payload.r) ||
+      !Number.isSafeInteger(payload.c) ||
+      Number(payload.r) < 0 ||
+      Number(payload.c) < 0 ||
+      typeof payload.i !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(payload.i)
+    ) {
+      throw new Error("invalid_cursor");
+    }
+    return {
+      receivedAt: Number(payload.r),
+      createdAt: Number(payload.c),
+      id: payload.i,
+    };
+  } catch {
+    throw new ValidationError("分页位置无效。");
+  }
 }
 
 export class MessageService {
@@ -333,9 +387,15 @@ export class MessageService {
 
   async listAll(
     limit: number,
+    cursorValue = "",
     now = Math.floor(Date.now() / 1000),
-  ): Promise<AdminMessage[]> {
-    const rows = await this.repository.listAll(now, limit);
+  ): Promise<AdminMessagePage> {
+    const page = await this.repository.listAll(
+      now,
+      limit,
+      decodeCursor(cursorValue),
+    );
+    const rows = page.rows;
     const attachmentRows = await this.repository.listAttachments(
       rows.map((row) => row.id),
     );
@@ -345,9 +405,15 @@ export class MessageService {
       values.push(attachment);
       grouped.set(attachment.message_id, values);
     }
-    return Promise.all(
+    const messages = await Promise.all(
       rows.map((row) => this.adminMessage(row, grouped.get(row.id) ?? [])),
     );
+    return {
+      messages,
+      nextCursor:
+        page.hasMore && rows.length ? encodeCursor(rows[rows.length - 1]!) : "",
+      hasMore: page.hasMore,
+    };
   }
 
   private async adminMessage(
