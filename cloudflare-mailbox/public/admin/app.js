@@ -92,6 +92,7 @@ function messagePath(messageId, suffix) {
 
 function showEntry(message = "") {
   stopPolling();
+  document.body.classList.remove("operator-active");
   elements.view.hidden = true;
   elements.entry.hidden = false;
   elements.token.value = "";
@@ -101,6 +102,7 @@ function showEntry(message = "") {
 
 function showView() {
   const shouldFocus = !elements.entry.hidden;
+  document.body.classList.add("operator-active");
   elements.entry.hidden = true;
   elements.view.hidden = false;
   elements.error.hidden = true;

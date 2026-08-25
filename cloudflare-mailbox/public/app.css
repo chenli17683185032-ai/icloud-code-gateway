@@ -125,6 +125,27 @@ button {
   border-block-end: 1px solid var(--line);
 }
 
+body.operator-active::before {
+  display: none;
+}
+
+body.operator-active .site-header,
+body.operator-active .page-shell {
+  width: min(1800px, calc(100% - clamp(1rem, 2vw, 2rem)));
+}
+
+body.operator-active .site-header {
+  min-height: 72px;
+}
+
+body.operator-active .page-shell {
+  padding-block: 1rem;
+}
+
+body.operator-active .site-footer {
+  display: none;
+}
+
 .brand {
   display: inline-flex;
   gap: 0.9rem;
@@ -423,6 +444,25 @@ button:disabled {
   font-size: clamp(2.6rem, 6vw, 5rem);
 }
 
+body.operator-active .mailbox-toolbar {
+  align-items: center;
+  margin-block-end: 0.8rem;
+}
+
+body.operator-active .mailbox-toolbar .eyebrow {
+  display: none;
+}
+
+body.operator-active .mailbox-toolbar h1 {
+  font-size: clamp(1.9rem, 3vw, 2.8rem);
+  line-height: 1;
+}
+
+body.operator-active .mailbox-email {
+  margin-block-start: 0.3rem;
+  font-size: 0.78rem;
+}
+
 .mailbox-email {
   margin: 0.8rem 0 0;
   color: var(--ink-soft);
@@ -477,6 +517,12 @@ button:disabled {
 
 #operator-view .mailbox-workspace {
   height: clamp(520px, calc(100dvh - 430px), 720px);
+  min-height: 520px;
+}
+
+body.operator-active #operator-view .mailbox-workspace {
+  grid-template-columns: clamp(300px, 32%, 400px) minmax(0, 1fr);
+  height: calc(100dvh - 178px);
   min-height: 520px;
 }
 
@@ -970,6 +1016,12 @@ button:disabled {
     min-height: 0;
   }
 
+  body.operator-active #operator-view .mailbox-workspace {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
   .message-index {
     border-inline-end: 0;
     border-block-end: 1px solid var(--line);
@@ -994,6 +1046,10 @@ button:disabled {
 
   #operator-view .message-reader {
     min-height: 420px;
+  }
+
+  body.operator-active #operator-view .message-reader {
+    height: min(70dvh, 620px);
   }
 
   .message-reader[data-empty="true"] {

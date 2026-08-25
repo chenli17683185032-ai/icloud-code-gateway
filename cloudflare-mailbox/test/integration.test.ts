@@ -110,6 +110,19 @@ describe("worker integration", () => {
     const adminPage = await SELF.fetch("https://example.com/admin/");
     expect(adminPage.status).toBe(200);
     expect(await adminPage.text()).toContain("隐邮操作台");
+    const adminScript = await (
+      await SELF.fetch("https://example.com/admin/app.js")
+    ).text();
+    expect(adminScript).toContain('classList.add("operator-active")');
+    expect(adminScript).toContain('classList.remove("operator-active")');
+    expect(stylesheet).toContain("body.operator-active .page-shell {");
+    expect(stylesheet).toContain(
+      "width: min(1800px, calc(100% - clamp(1rem, 2vw, 2rem)));",
+    );
+    expect(stylesheet).toContain("height: calc(100dvh - 178px);");
+    expect(stylesheet).toContain(
+      "grid-template-columns: clamp(300px, 32%, 400px) minmax(0, 1fr);",
+    );
 
     const session = await SELF.fetch("https://example.com/api/session");
     await expect(session.json()).resolves.toMatchObject({
