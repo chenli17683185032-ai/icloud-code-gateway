@@ -40,17 +40,19 @@ export function clientIp(request: Request): string {
 export function applySecurityHeaders(response: Response, id: string): Response {
   const headers = new Headers(response.headers);
   headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("X-Frame-Options", "DENY");
+  if (!headers.has("X-Frame-Options")) headers.set("X-Frame-Options", "DENY");
   headers.set("Referrer-Policy", "no-referrer");
   headers.set(
     "Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
   );
-  headers.set(
-    "Content-Security-Policy",
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
-      "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-  );
+  if (!headers.has("Content-Security-Policy")) {
+    headers.set(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    );
+  }
   headers.set("X-Request-ID", id);
   if (response.headers.get("Content-Type")?.includes("text/html")) {
     headers.set("Cache-Control", "no-cache, no-store, must-revalidate");

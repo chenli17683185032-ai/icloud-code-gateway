@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { operatorSessionSchema } from "../aliases/schema";
-import { RateLimitError, UnauthorizedError } from "../shared/errors";
+import {
+  NotFoundError,
+  RateLimitError,
+  UnauthorizedError,
+} from "../shared/errors";
 import { clientIp, noStore, parseJson } from "../shared/http";
 import {
   accessTokenLookupDigest,
@@ -17,6 +21,23 @@ import { services } from "../shared/services";
 import type { RuntimeConfig, WorkerContext } from "../shared/types";
 
 export const operatorRoutes = new Hono<WorkerContext>();
+
+function pathId(value: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new NotFoundError();
+  return value;
+}
+
+function contentDisposition(filename: string): string {
+  const safe = filename
+    .replace(/[^\x20-\x7e]/g, "_")
+    .replace(/["\\]/g, "_")
+    .slice(0, 120);
+  const encoded = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${safe || "attachment"}"; filename*=UTF-8''${encoded}`;
+}
 
 operatorRoutes.use("*", async (context, next) => {
   noStore(context);
@@ -101,6 +122,46 @@ operatorRoutes.get("/messages", async (context) => {
     messages: await messages.listAll(limit),
   });
 });
+
+operatorRoutes.get("/messages/:messageId/html", async (context) => {
+  const { config, messages } = services(context.env);
+  await requireOperatorSession(config, context.req.raw);
+  const html = await messages.htmlDocument(
+    pathId(context.req.param("messageId")),
+  );
+  return new Response(html, {
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy":
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; " +
+        "object-src 'none'; media-src 'none'; connect-src 'none'; frame-src 'none'; " +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "SAMEORIGIN",
+    },
+  });
+});
+
+operatorRoutes.get(
+  "/messages/:messageId/attachments/:attachmentId",
+  async (context) => {
+    const { config, messages } = services(context.env);
+    await requireOperatorSession(config, context.req.raw);
+    const attachment = await messages.attachment(
+      pathId(context.req.param("messageId")),
+      pathId(context.req.param("attachmentId")),
+    );
+    return new Response(attachment.bytes, {
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Disposition": contentDisposition(attachment.filename),
+        "Content-Length": String(attachment.bytes.byteLength),
+        "Content-Type": attachment.mimeType,
+      },
+    });
+  },
+);
 
 operatorRoutes.post("/logout", (context) => {
   context.header("Set-Cookie", clearSessionCookie());

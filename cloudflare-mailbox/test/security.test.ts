@@ -4,7 +4,9 @@ import {
   accessTokenDigest,
   accessTokenLookupDigest,
   aliasDigest,
+  decryptBytes,
   decryptJson,
+  encryptBytes,
   encryptJson,
   issueSession,
   normalizeEmail,
@@ -49,6 +51,16 @@ describe("security primitives", () => {
     });
     await expect(
       decryptJson(config, encrypted, "message:two"),
+    ).rejects.toBeTruthy();
+  });
+
+  it("encrypts attachment bytes with authenticated context", async () => {
+    const source = new TextEncoder().encode("private attachment");
+    const encrypted = await encryptBytes(config, source, "attachment:one");
+    const decrypted = await decryptBytes(config, encrypted, "attachment:one");
+    expect(new TextDecoder().decode(decrypted)).toBe("private attachment");
+    await expect(
+      decryptBytes(config, encrypted, "attachment:two"),
     ).rejects.toBeTruthy();
   });
 

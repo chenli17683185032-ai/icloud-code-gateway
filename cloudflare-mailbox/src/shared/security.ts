@@ -1,4 +1,4 @@
-import { UnauthorizedError, ValidationError } from "./errors";
+import { AppError, UnauthorizedError, ValidationError } from "./errors";
 import type { RuntimeConfig, SessionPayload } from "./types";
 
 const encoder = new TextEncoder();
@@ -168,6 +168,49 @@ export async function decryptJson<T>(
     base64UrlToBytes(encrypted.ciphertext),
   );
   return JSON.parse(decoder.decode(plaintext)) as T;
+}
+
+export async function encryptBytes(
+  config: RuntimeConfig,
+  value: ArrayBuffer | Uint8Array,
+  context: string,
+): Promise<ArrayBuffer> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const source = new Uint8Array(value.byteLength);
+  source.set(value instanceof Uint8Array ? value : new Uint8Array(value));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: encoder.encode(context) },
+      await aesKey(config.dataEncryptionKey),
+      source,
+    ),
+  );
+  const envelope = new Uint8Array(1 + iv.byteLength + ciphertext.byteLength);
+  envelope[0] = 1;
+  envelope.set(iv, 1);
+  envelope.set(ciphertext, 13);
+  return envelope.buffer;
+}
+
+export async function decryptBytes(
+  config: RuntimeConfig,
+  value: ArrayBuffer | Uint8Array,
+  context: string,
+): Promise<ArrayBuffer> {
+  const envelope = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (envelope.byteLength < 30 || envelope[0] !== 1) {
+    throw new AppError("storage_error", 500, "附件数据损坏。");
+  }
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: envelope.slice(1, 13),
+      additionalData: encoder.encode(context),
+    },
+    await aesKey(config.dataEncryptionKey),
+    envelope.slice(13),
+  );
+  return plaintext;
 }
 
 export async function issueSession(

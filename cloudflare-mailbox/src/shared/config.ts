@@ -117,6 +117,13 @@ export function loadConfig(env: Env): RuntimeConfig {
       200_000,
       "MAX_BODY_CHARS",
     ),
+    maxHtmlChars: boundedInteger(
+      env.MAX_HTML_CHARS,
+      250_000,
+      1_000,
+      1_000_000,
+      "MAX_HTML_CHARS",
+    ),
     maxEmailBytes: boundedInteger(
       env.MAX_EMAIL_BYTES,
       5_000_000,

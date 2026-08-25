@@ -1,3 +1,5 @@
+import { AppError } from "../shared/errors";
+
 export interface MessageRow {
   id: string;
   alias_digest: string;
@@ -31,10 +33,35 @@ export interface MessageWrite {
   retentionClass: "temporary" | "permanent";
 }
 
+export interface MessageInsertResult {
+  id: string;
+  inserted: boolean;
+}
+
+export interface AttachmentRow {
+  id: string;
+  message_id: string;
+  object_key: string;
+  metadata_ciphertext: string;
+  metadata_iv: string;
+  size_bytes: number;
+  created_at: number;
+}
+
+export interface AttachmentWrite {
+  id: string;
+  messageId: string;
+  objectKey: string;
+  metadataCiphertext: string;
+  metadataIv: string;
+  sizeBytes: number;
+  createdAt: number;
+}
+
 export class MessageRepository {
   constructor(private readonly database: D1Database) {}
 
-  async insert(value: MessageWrite): Promise<boolean> {
+  async insert(value: MessageWrite): Promise<MessageInsertResult> {
     const result = await this.database
       .prepare(
         `INSERT OR IGNORE INTO messages (
@@ -57,7 +84,131 @@ export class MessageRepository {
         value.retentionClass,
       )
       .run();
-    return Number(result.meta.changes ?? 0) > 0;
+    if (Number(result.meta.changes ?? 0) > 0) {
+      return { id: value.id, inserted: true };
+    }
+    const existing = await this.database
+      .prepare(
+        `SELECT id
+           FROM messages
+          WHERE alias_digest = ? AND message_digest = ?`,
+      )
+      .bind(value.aliasDigest, value.messageDigest)
+      .first<{ id: string }>();
+    if (!existing) {
+      throw new AppError("database_error", 500, "邮件保存失败。");
+    }
+    return { id: existing.id, inserted: false };
+  }
+
+  getById(messageId: string, now: number): Promise<MessageRow | null> {
+    return this.database
+      .prepare(
+        `SELECT id, alias_digest, message_digest, payload_ciphertext,
+                payload_iv, received_at, expires_at, created_at, category, has_code,
+                retention_class
+           FROM messages
+          WHERE id = ? AND expires_at > ?`,
+      )
+      .bind(messageId, now)
+      .first<MessageRow>();
+  }
+
+  async upsertAttachment(value: AttachmentWrite): Promise<void> {
+    await this.database
+      .prepare(
+        `INSERT INTO message_attachments (
+            id, message_id, object_key, metadata_ciphertext, metadata_iv,
+            size_bytes, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            message_id = excluded.message_id,
+            object_key = excluded.object_key,
+            metadata_ciphertext = excluded.metadata_ciphertext,
+            metadata_iv = excluded.metadata_iv,
+            size_bytes = excluded.size_bytes`,
+      )
+      .bind(
+        value.id,
+        value.messageId,
+        value.objectKey,
+        value.metadataCiphertext,
+        value.metadataIv,
+        value.sizeBytes,
+        value.createdAt,
+      )
+      .run();
+  }
+
+  async listAttachments(messageIds: string[]): Promise<AttachmentRow[]> {
+    if (!messageIds.length) return [];
+    const placeholders = messageIds.map(() => "?").join(", ");
+    const result = await this.database
+      .prepare(
+        `SELECT id, message_id, object_key, metadata_ciphertext, metadata_iv,
+                size_bytes, created_at
+           FROM message_attachments
+          WHERE message_id IN (${placeholders})
+          ORDER BY created_at, id`,
+      )
+      .bind(...messageIds)
+      .all<AttachmentRow>();
+    return result.results;
+  }
+
+  getAttachment(
+    messageId: string,
+    attachmentId: string,
+    now: number,
+  ): Promise<AttachmentRow | null> {
+    return this.database
+      .prepare(
+        `SELECT ma.id, ma.message_id, ma.object_key, ma.metadata_ciphertext,
+                ma.metadata_iv, ma.size_bytes, ma.created_at
+           FROM message_attachments AS ma
+           JOIN messages AS m ON m.id = ma.message_id
+          WHERE ma.message_id = ? AND ma.id = ? AND m.expires_at > ?`,
+      )
+      .bind(messageId, attachmentId, now)
+      .first<AttachmentRow>();
+  }
+
+  async listExpiredAttachments(now: number): Promise<AttachmentRow[]> {
+    const result = await this.database
+      .prepare(
+        `SELECT ma.id, ma.message_id, ma.object_key, ma.metadata_ciphertext,
+                ma.metadata_iv, ma.size_bytes, ma.created_at
+           FROM message_attachments AS ma
+           JOIN messages AS m ON m.id = ma.message_id
+          WHERE m.retention_class = 'temporary' AND m.expires_at <= ?
+          LIMIT 100`,
+      )
+      .bind(now)
+      .all<AttachmentRow>();
+    return result.results;
+  }
+
+  async listOrphanAttachments(): Promise<AttachmentRow[]> {
+    const result = await this.database
+      .prepare(
+        `SELECT ma.id, ma.message_id, ma.object_key, ma.metadata_ciphertext,
+                ma.metadata_iv, ma.size_bytes, ma.created_at
+           FROM message_attachments AS ma
+           LEFT JOIN messages AS m ON m.id = ma.message_id
+          WHERE m.id IS NULL
+          LIMIT 100`,
+      )
+      .all<AttachmentRow>();
+    return result.results;
+  }
+
+  async deleteAttachmentRows(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const placeholders = ids.map(() => "?").join(", ");
+    await this.database
+      .prepare(`DELETE FROM message_attachments WHERE id IN (${placeholders})`)
+      .bind(...ids)
+      .run();
   }
 
   async listPublicCodes(

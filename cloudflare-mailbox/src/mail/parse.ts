@@ -106,11 +106,30 @@ export interface ParsedIncomingEmail {
   sender: string;
   subject: string;
   body: string;
+  html: string;
+  attachments: ParsedAttachment[];
+}
+
+export interface ParsedAttachment {
+  filename: string;
+  mimeType: string;
+  disposition: "attachment" | "inline";
+  contentId: string;
+  content: Uint8Array;
+}
+
+function attachmentContent(
+  value: ArrayBuffer | Uint8Array | string,
+): Uint8Array {
+  if (typeof value === "string") return new TextEncoder().encode(value);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return Uint8Array.from(value);
 }
 
 export async function parseIncomingEmail(
   raw: ReadableStream | ArrayBuffer | Uint8Array | string,
   maxBodyChars: number,
+  maxHtmlChars = maxBodyChars,
 ): Promise<ParsedIncomingEmail> {
   const parsed = await PostalMime.parse(raw, {
     attachmentEncoding: "arraybuffer",
@@ -125,6 +144,9 @@ export async function parseIncomingEmail(
     .replace(/\r\n?/g, "\n")
     .trim()
     .slice(0, maxBodyChars);
+  const html = String(parsed.html || "")
+    .replace(/\0/g, "")
+    .slice(0, maxHtmlChars);
   return {
     parsed,
     recipients: recipientCandidates(parsed),
@@ -133,5 +155,21 @@ export async function parseIncomingEmail(
       .replace(/[\r\n\0]/g, " ")
       .slice(0, 500),
     body,
+    html,
+    attachments: parsed.attachments.slice(0, 20).map((attachment, index) => ({
+      filename: String(attachment.filename || `附件-${index + 1}`)
+        .replace(/[\r\n\0/\\]/g, "_")
+        .trim()
+        .slice(0, 180),
+      mimeType: String(attachment.mimeType || "application/octet-stream")
+        .replace(/[\r\n\0]/g, "")
+        .slice(0, 120),
+      disposition:
+        attachment.disposition === "inline" ? "inline" : "attachment",
+      contentId: String(attachment.contentId || "")
+        .replace(/[\r\n\0]/g, "")
+        .slice(0, 500),
+      content: attachmentContent(attachment.content),
+    })),
   };
 }

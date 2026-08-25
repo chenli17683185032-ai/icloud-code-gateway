@@ -12,7 +12,12 @@ const controlHeaders = {
 const mailboxEnv = env as unknown as Env;
 
 beforeEach(async () => {
+  const attachments = await mailboxEnv.ATTACHMENTS.list({ prefix: "mail/" });
+  await Promise.all(
+    attachments.keys.map((item) => mailboxEnv.ATTACHMENTS.delete(item.name)),
+  );
   await mailboxEnv.DB.batch([
+    mailboxEnv.DB.prepare("DELETE FROM message_attachments"),
     mailboxEnv.DB.prepare("DELETE FROM messages"),
     mailboxEnv.DB.prepare("DELETE FROM aliases"),
     mailboxEnv.DB.prepare("DELETE FROM auth_rate_limits"),
@@ -43,6 +48,22 @@ async function createSession(): Promise<string> {
     },
     body: JSON.stringify({ email: "hidden.one@icloud.com", token }),
   });
+  expect(response.status).toBe(200);
+  return response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
+}
+
+async function createOperatorSession(): Promise<string> {
+  const response = await SELF.fetch(
+    "https://example.com/api/operator/session",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.20",
+      },
+      body: JSON.stringify({ token: operatorToken }),
+    },
+  );
   expect(response.status).toBe(200);
   return response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
 }
@@ -152,6 +173,8 @@ describe("worker integration", () => {
     expect(payload.messages[0]).not.toHaveProperty("body");
     expect(payload.messages[0]).not.toHaveProperty("subject");
     expect(payload.messages[0]).not.toHaveProperty("sender");
+    expect(payload.messages[0]).not.toHaveProperty("html");
+    expect(payload.messages[0]).not.toHaveProperty("attachments");
   });
 
   it("hides other mail from users while the operator sees all and retention", async () => {
@@ -193,17 +216,7 @@ describe("worker integration", () => {
     });
     await expect(userResponse.json()).resolves.toMatchObject({ messages: [] });
 
-    const login = await SELF.fetch("https://example.com/api/operator/session", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "CF-Connecting-IP": "198.51.100.20",
-      },
-      body: JSON.stringify({ token: operatorToken }),
-    });
-    expect(login.status).toBe(200);
-    const operatorCookie =
-      login.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
+    const operatorCookie = await createOperatorSession();
     const operatorResponse = await SELF.fetch(
       "https://example.com/api/operator/messages",
       { headers: { Cookie: operatorCookie } },
@@ -231,6 +244,176 @@ describe("worker integration", () => {
         }),
       ]),
     );
+  });
+
+  it("archives original HTML and encrypted attachments for operator download", async () => {
+    await upsertAlias();
+    const boundary = "archive-boundary";
+    const raw = [
+      "From: OpenAI <relay-message@icloud.com>",
+      "To: hidden.one@icloud.com",
+      "X-Apple-Original-Recipient: hidden.one@icloud.com",
+      "Subject: Your ChatGPT archive",
+      "Message-ID: <archive@example.com>",
+      `Content-Type: multipart/mixed; boundary=${boundary}`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      '<table><tr><td style="color:#c44">Original layout</td></tr></table>',
+      '<img src="cid:logo@example"><img src="https://tracker.example/pixel.png">',
+      "<script>alert(1)</script>",
+      `--${boundary}`,
+      "Content-Type: image/png",
+      "Content-ID: <logo@example>",
+      'Content-Disposition: inline; filename="logo.png"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl6sAAAAASUVORK5CYII=",
+      `--${boundary}`,
+      'Content-Type: text/plain; name="report.txt"',
+      'Content-Disposition: attachment; filename="report.txt"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      "YXR0YWNobWVudC1ib2R5Cg==",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    await worker.email?.(
+      emailMessage(raw, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+    await worker.email?.(
+      emailMessage(raw, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+
+    const operatorCookie = await createOperatorSession();
+    const listResponse = await SELF.fetch(
+      "https://example.com/api/operator/messages",
+      { headers: { Cookie: operatorCookie } },
+    );
+    const listPayload = (await listResponse.json()) as {
+      messages: Array<{
+        id: string;
+        hasHtml: boolean;
+        attachments: Array<{
+          id: string;
+          filename: string;
+          mimeType: string;
+          size: number;
+        }>;
+      }>;
+    };
+    expect(listPayload.messages).toHaveLength(1);
+    const archived = listPayload.messages[0];
+    expect(archived).toMatchObject({ hasHtml: true });
+    expect(archived).not.toHaveProperty("html");
+    expect(archived?.attachments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filename: "logo.png",
+          mimeType: "image/png",
+          inline: true,
+        }),
+        expect.objectContaining({
+          filename: "report.txt",
+          mimeType: "text/plain",
+          size: 16,
+          inline: false,
+        }),
+      ]),
+    );
+    const attachmentId =
+      archived?.attachments.find((item) => item.filename === "report.txt")
+        ?.id ?? "";
+
+    const deniedHtml = await SELF.fetch(
+      `https://example.com/api/operator/messages/${archived?.id}/html`,
+    );
+    expect(deniedHtml.status).toBe(401);
+    const htmlResponse = await SELF.fetch(
+      `https://example.com/api/operator/messages/${archived?.id}/html`,
+      { headers: { Cookie: operatorCookie } },
+    );
+    expect(htmlResponse.status).toBe(200);
+    expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
+      "default-src 'none'",
+    );
+    expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
+      "sandbox",
+    );
+    expect(htmlResponse.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+    const archivedHtml = await htmlResponse.text();
+    expect(archivedHtml).toContain("Original layout");
+    expect(archivedHtml).toContain("data:image/png;base64,");
+    expect(archivedHtml).not.toContain("cid:logo@example");
+    expect(archivedHtml).not.toContain("tracker.example");
+    expect(archivedHtml).not.toContain("<script");
+
+    const deniedAttachment = await SELF.fetch(
+      `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
+    );
+    expect(deniedAttachment.status).toBe(401);
+    const attachmentResponse = await SELF.fetch(
+      `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
+      { headers: { Cookie: operatorCookie } },
+    );
+    expect(attachmentResponse.status).toBe(200);
+    expect(attachmentResponse.headers.get("Content-Type")).toContain(
+      "text/plain",
+    );
+    expect(attachmentResponse.headers.get("Content-Disposition")).toContain(
+      'filename="report.txt"',
+    );
+    expect(await attachmentResponse.text()).toBe("attachment-body\n");
+    const missingAttachment = await SELF.fetch(
+      `https://example.com/api/operator/messages/${archived?.id}/attachments/missing`,
+      { headers: { Cookie: operatorCookie } },
+    );
+    expect(missingAttachment.status).toBe(404);
+
+    const rowCount = await mailboxEnv.DB.prepare(
+      "SELECT COUNT(*) AS count FROM message_attachments",
+    ).first<{ count: number }>();
+    expect(rowCount?.count).toBe(2);
+    const storedObjects = await mailboxEnv.ATTACHMENTS.list({
+      prefix: "mail/",
+    });
+    expect(storedObjects.keys).toHaveLength(2);
+    const encryptedObject = await mailboxEnv.ATTACHMENTS.get(
+      storedObjects.keys[0]?.name ?? "",
+      "arrayBuffer",
+    );
+    expect(encryptedObject).not.toBeNull();
+    expect(
+      new TextDecoder().decode(encryptedObject ?? undefined),
+    ).not.toContain("attachment-body");
+    const storedMetadata = await mailboxEnv.DB.prepare(
+      `SELECT metadata_ciphertext
+         FROM message_attachments
+        LIMIT 1`,
+    ).first<{ metadata_ciphertext: string }>();
+    expect(storedMetadata?.metadata_ciphertext).not.toContain("report.txt");
+
+    await mailboxEnv.DB.prepare(
+      "UPDATE messages SET expires_at = 1, retention_class = 'temporary'",
+    ).run();
+    await worker.scheduled?.(
+      {} as ScheduledController,
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+    expect(
+      await mailboxEnv.DB.prepare(
+        "SELECT COUNT(*) AS count FROM message_attachments",
+      ).first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+    expect(
+      (await mailboxEnv.ATTACHMENTS.list({ prefix: "mail/" })).keys,
+    ).toHaveLength(0);
   });
 
   it("rejects invalid control tokens and invalidates sessions after key rotation", async () => {

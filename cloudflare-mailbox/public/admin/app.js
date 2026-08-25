@@ -37,6 +37,7 @@ let selectedId = "";
 let renderedSignature = "";
 let pollingTimer = 0;
 let refreshInFlight = false;
+const readerModes = new Map();
 
 async function api(path, options = {}) {
   const controller = new AbortController();
@@ -75,6 +76,18 @@ function makeElement(name, className, text) {
 function formatTime(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "时间未知" : dateFormatter.format(date);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function messagePath(messageId, suffix) {
+  return `/api/operator/messages/${encodeURIComponent(messageId)}/${suffix}`;
 }
 
 function showEntry(message = "") {
@@ -139,8 +152,110 @@ function signature(items) {
       item.code,
       item.receivedAt,
       item.permanent,
+      item.hasHtml,
+      (item.attachments || []).map((attachment) => [
+        attachment.id,
+        attachment.filename,
+        attachment.mimeType,
+        attachment.size,
+        attachment.inline,
+      ]),
     ]),
   );
+}
+
+function appendMessageContent(article, message) {
+  const bodyHost = makeElement("div", "message-content");
+  const mode =
+    readerModes.get(message.id) || (message.hasHtml ? "html" : "text");
+
+  if (message.hasHtml) {
+    const toolbar = makeElement("div", "reader-format-toolbar");
+    const controls = makeElement("div", "reader-format-controls");
+    const htmlButton = makeElement("button", "format-button", "原始排版");
+    const textButton = makeElement("button", "format-button", "纯文本");
+    htmlButton.type = "button";
+    textButton.type = "button";
+    controls.append(htmlButton, textButton);
+    toolbar.append(
+      controls,
+      makeElement("span", "reader-security-note", "远程图片与脚本已阻止"),
+    );
+    article.append(toolbar);
+
+    const renderMode = (nextMode) => {
+      readerModes.set(message.id, nextMode);
+      htmlButton.setAttribute("aria-pressed", String(nextMode === "html"));
+      textButton.setAttribute("aria-pressed", String(nextMode === "text"));
+      bodyHost.replaceChildren();
+      if (nextMode === "html") {
+        const frame = document.createElement("iframe");
+        frame.className = "email-frame";
+        frame.title = `${message.subject || "无主题"} 的原始邮件排版`;
+        frame.loading = "lazy";
+        frame.referrerPolicy = "no-referrer";
+        frame.setAttribute("sandbox", "");
+        frame.src = messagePath(message.id, "html");
+        bodyHost.append(frame);
+      } else {
+        bodyHost.append(
+          makeElement(
+            "pre",
+            "message-body",
+            message.body || "这封邮件没有可显示的纯文本正文。",
+          ),
+        );
+      }
+    };
+    htmlButton.addEventListener("click", () => renderMode("html"));
+    textButton.addEventListener("click", () => renderMode("text"));
+    renderMode(mode === "text" ? "text" : "html");
+  } else {
+    bodyHost.append(
+      makeElement(
+        "pre",
+        "message-body",
+        message.body || "这封邮件没有可显示的纯文本正文。",
+      ),
+    );
+  }
+  article.append(bodyHost);
+}
+
+function appendAttachments(article, message) {
+  const attachments = Array.isArray(message.attachments)
+    ? message.attachments
+    : [];
+  if (!attachments.length) return;
+  const section = makeElement("section", "attachments-section");
+  const heading = makeElement("div", "attachments-heading");
+  heading.append(
+    makeElement("h3", "", `附件 ${attachments.length}`),
+    makeElement("span", "", "私有加密存储"),
+  );
+  const list = makeElement("div", "attachment-list");
+  for (const attachment of attachments) {
+    const row = makeElement("div", "attachment-row");
+    const identity = makeElement("div", "attachment-identity");
+    identity.append(
+      makeElement("strong", "", attachment.filename || "未命名附件"),
+      makeElement(
+        "span",
+        "",
+        `${attachment.mimeType || "application/octet-stream"} · ${formatBytes(attachment.size)}`,
+      ),
+    );
+    const download = makeElement("a", "attachment-download", "下载到本地");
+    download.href = messagePath(
+      message.id,
+      `attachments/${encodeURIComponent(attachment.id)}`,
+    );
+    download.download = attachment.filename || "attachment";
+    row.append(identity, download);
+    list.append(row);
+  }
+  section.append(heading, list);
+  article.append(section);
 }
 
 function renderReader(animate = true) {
@@ -189,13 +304,8 @@ function renderReader(animate = true) {
     block.append(value, copy);
     article.append(block);
   }
-  article.append(
-    makeElement(
-      "pre",
-      "message-body",
-      message.body || "这封邮件没有可显示的纯文本正文。",
-    ),
-  );
+  appendMessageContent(article, message);
+  appendAttachments(article, message);
   elements.reader.append(article);
 }
 
@@ -337,6 +447,7 @@ elements.logoutButton.addEventListener("click", async () => {
     messages = [];
     selectedId = "";
     renderedSignature = "";
+    readerModes.clear();
     elements.logoutButton.disabled = false;
     showEntry("已退出操作员后台。");
   }

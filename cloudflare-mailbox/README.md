@@ -19,15 +19,17 @@
 - 旧链接兼容：`/#key=<Token>` 会通过全局 HMAC 索引自动找到邮箱；新链接继续使用 `/#email=<邮箱>&key=<Token>`。
 - 操作员后台：`https://icloud.yunbay.xyz/admin/`，只输入操作员 Token，无需逐个输入邮箱。
 - 原 `icloud.yunbay.xyz` DNS/VPS 保留在 Worker route 后方；移除该 route 即可恢复旧站，不需要重建 DNS。
+- 附件私有存储：Workers KV `icloud-mailbox-attachments`，字节使用现有数据密钥做 AES-GCM 二次加密，文件名和 MIME 元数据加密保存在 D1；只有操作员会话可以下载。
 - iCloud Hide My Email 会把 OpenAI/Grok 的发件地址改写成 Apple `@icloud.com` 中继地址。Worker 优先识别原始官方域名；遇到 Apple 中继时，要求发件显示名、标题、正文中至少两处品牌证据才公开验证码，避免只靠一个可伪造显示名放行。
 - 验证码解码会先做 Unicode NFKC、零宽字符和 Unicode 横线归一化；支持标准 6 位数字、`123 456`、`123-456`、HTML 逐位拆分数字，以及 Grok 的 `A1B-2C3`、`A1B 2C3`、`A1B2C3`。候选仍必须靠近验证码语境，避免把年份、时间、IP、地址或订单号当成验证码。
 
 ## 保存的数据
 
 - `aliases`：邮箱 HMAC、Token HMAC、状态及加密 Alias 元数据。
-- `messages`：加密发件人、标题、纯文本正文、验证码，以及明文分类、保留级别和收件/过期时间。
+- `messages`：加密发件人、标题、纯文本正文、原始 HTML 和验证码，以及明文分类、保留级别和收件/过期时间。
+- `message_attachments`：随机附件 ID、KV 对象键、大小及加密文件名/MIME 元数据；附件字节不进入 D1。
 - `auth_rate_limits`：不可逆来源指纹和分钟窗口计数。
-- 不保存明文 Token，不保存 HTML，不保存附件。验证码和普通邮件默认 24 小时清理；会员开通、付款、封号、申诉、工单和售后支持等重要非验证码邮件长期保存。
+- 不保存明文 Token。新邮件的 HTML 在无脚本沙箱中按原排版显示，远程图片、字体、脚本和跟踪资源会移除，内嵌 CID 小图可离线显示；旧邮件因历史上只保存纯文本，无法逆向恢复原排版或附件。验证码、普通邮件及其附件默认 24 小时清理；会员开通、付款、封号、申诉、工单和售后支持等重要邮件及附件长期保存。
 
 ## 本地开发
 
@@ -102,7 +104,8 @@ npx wrangler secret put OPERATOR_ACCESS_TOKEN
 ```jsonc
 "INBOX_ADDRESS": "otp@your-domain.com",
 "EMAIL_RETENTION_SECONDS": "86400",
-"MAX_EMAIL_BYTES": "5000000"
+"MAX_EMAIL_BYTES": "20000000",
+"MAX_HTML_CHARS": "250000"
 ```
 
 ### 4. 迁移并部署
@@ -167,6 +170,8 @@ https://mailbox.your-domain.com/#email=<隐藏邮箱>&key=<Token>
 - `POST /api/operator/session`：只使用操作员 Token 建立后台会话。
 - `GET /api/operator/session`：恢复后台会话。
 - `GET /api/operator/messages`：返回全部 Alias 的完整邮件。
+- `GET /api/operator/messages/{messageId}/html`：返回带严格 CSP 的隔离原始排版，只允许同源后台 iframe 加载。
+- `GET /api/operator/messages/{messageId}/attachments/{attachmentId}`：从私有 KV 解密并下载附件。
 - `POST /api/operator/logout`：退出后台。
 
 用户页与后台都每 3 秒刷新一次；自动刷新在数据未变化时不重绘，有新邮件时静默更新，只有手动刷新播放一次轻微反馈。

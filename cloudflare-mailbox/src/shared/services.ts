@@ -12,6 +12,7 @@ export function services(env: Env) {
   const messages = new MessageService(
     new MessageRepository(env.DB),
     aliases,
+    env.ATTACHMENTS,
     config,
   );
   const rateLimits = new RateLimitRepository(env.DB);

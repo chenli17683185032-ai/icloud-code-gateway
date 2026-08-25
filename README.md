@@ -12,9 +12,11 @@
 iCloud Hide My Email
   → otp@你的域名
   → Cloudflare Email Worker
-  → 加密写入 D1
+  → 正文/HTML 加密写入 D1，附件密文写入私有 KV
   → 邮箱 + Token 查询网页
 ```
+
+普通用户响应仍只包含 GPT/Grok 验证码和时间；操作员后台从新邮件开始可在安全沙箱中查看原始 HTML 排版，并下载私有加密附件。历史邮件未保存过 HTML/附件，继续以纯文本显示。
 
 本地 `control` 的 `/control/v1/*` 同步合同保持不变，因此只需把 `ICLOUD_GATEWAY_EDGE_BASE_URL` 和 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 改成 Worker 自定义域名，再执行“同步到云端”。切换验证完成后可以移除本地 QQ IMAP 凭据，并下线旧 VPS edge、Chromium 和 `cn-proxy`。服务器 2 可以作为 Wrangler 部署机，但 Worker 与 D1 实际运行在 Cloudflare。
 

@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  ATTACHMENTS: KVNamespace;
   ASSETS: Fetcher;
   CONTROL_PLANE_TOKEN: string;
   LOOKUP_HMAC_KEY: string;
@@ -10,6 +11,7 @@ export interface Env {
   SESSION_TTL_SECONDS?: string;
   MESSAGE_QUERY_LIMIT?: string;
   MAX_BODY_CHARS?: string;
+  MAX_HTML_CHARS?: string;
   MAX_EMAIL_BYTES?: string;
   AUTH_ATTEMPTS_PER_MINUTE?: string;
   INBOX_ADDRESS?: string;
@@ -25,6 +27,7 @@ export interface RuntimeConfig {
   sessionTtlSeconds: number;
   messageQueryLimit: number;
   maxBodyChars: number;
+  maxHtmlChars: number;
   maxEmailBytes: number;
   authAttemptsPerMinute: number;
   inboxAddress: string;
@@ -41,7 +44,15 @@ export interface MessageSecretPayload {
   sender: string;
   subject: string;
   body: string;
+  html?: string;
   code: string;
+}
+
+export interface AttachmentSecretPayload {
+  filename: string;
+  mimeType: string;
+  disposition: "attachment" | "inline";
+  contentId: string;
 }
 
 export interface SessionPayload {
