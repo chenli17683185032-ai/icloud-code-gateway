@@ -7,6 +7,18 @@ class ApiError extends Error {
   }
 }
 
+const unifiedAdmin =
+  window.location.hostname === "icloud.yunbay.xyz" &&
+  window.location.pathname.startsWith("/admin/mail");
+let unifiedRedirecting = false;
+
+function redirectToUnifiedSession() {
+  if (!unifiedAdmin || unifiedRedirecting) return false;
+  unifiedRedirecting = true;
+  window.location.replace("/admin/operator-session");
+  return true;
+}
+
 const elements = {
   entry: document.querySelector("#operator-entry"),
   view: document.querySelector("#operator-view"),
@@ -24,7 +36,13 @@ const elements = {
   empty: document.querySelector("#operator-empty"),
   reader: document.querySelector("#operator-reader"),
   error: document.querySelector("#operator-error"),
+  switchLink: document.querySelector("#operator-switch-link"),
 };
+
+if (unifiedAdmin && elements.switchLink) {
+  elements.switchLink.href = "/admin";
+  elements.switchLink.textContent = "iCloud 管理";
+}
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -179,6 +197,7 @@ function resetArchiveState() {
 }
 
 function showEntry(message = "") {
+  if (redirectToUnifiedSession()) return;
   stopPolling();
   if (searchTimer) window.clearTimeout(searchTimer);
   resetArchiveState();
@@ -507,7 +526,7 @@ async function loadAllMessages() {
     renderMessages(messages, { force: true, animate: false });
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
-      showEntry(error.message);
+      if (!redirectToUnifiedSession()) showEntry(error.message);
       return;
     }
     elements.error.textContent =
@@ -561,7 +580,7 @@ async function refresh(options = {}) {
     schedulePolling();
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
-      showEntry(error.message);
+      if (!redirectToUnifiedSession()) showEntry(error.message);
       return;
     }
     elements.error.textContent =
@@ -634,7 +653,8 @@ elements.logoutButton.addEventListener("click", async () => {
     // Local view can still be cleared safely.
   } finally {
     elements.logoutButton.disabled = false;
-    showEntry("已退出操作员后台。");
+    if (unifiedAdmin) window.location.assign("/admin");
+    else showEntry("已退出操作员后台。");
   }
 });
 
@@ -657,11 +677,14 @@ if (window.location.hash) {
 async function restore() {
   try {
     const session = await api("/api/operator/session");
-    if (!session.authenticated) return;
+    if (!session.authenticated) {
+      redirectToUnifiedSession();
+      return;
+    }
     showView();
     await refresh({ quiet: true });
   } catch {
-    showEntry();
+    if (!redirectToUnifiedSession()) showEntry();
   }
 }
 

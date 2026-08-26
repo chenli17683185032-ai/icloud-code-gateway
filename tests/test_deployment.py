@@ -88,6 +88,8 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
         assert interpolation in base
         assert interpolation in server
 
+    assert "ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN" in base
+
 
 def test_cloudflare_routes_leave_control_admin_and_static_assets_on_vps() -> None:
     config = (

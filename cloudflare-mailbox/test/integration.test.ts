@@ -120,6 +120,10 @@ describe("worker integration", () => {
     expect(adminScript).toContain("async function loadAllMessages");
     expect(adminScript).toContain("fetchMessagePage");
     expect(adminScript).toContain("messageSearchText");
+    expect(adminScript).toContain(
+      'window.location.replace("/admin/operator-session")',
+    );
+    expect(adminScript).toContain('window.location.assign("/admin")');
 
     const mergedAdminPage = await SELF.fetch("https://example.com/admin/mail/");
     expect(mergedAdminPage.status).toBe(200);

@@ -29,6 +29,11 @@ from .database import ConflictError, DatabaseError, NotFoundError
 from .hme import HmeError, HmeSessionError
 from .imap_otp import ImapCredentialsError, ImapError
 from .jobs import BatchJobManager
+from .operator_sso import (
+    OPERATOR_SESSION_COOKIE,
+    OperatorSsoClient,
+    OperatorSsoError,
+)
 from .security import (
     AdminSession,
     AdminSessionCodec,
@@ -67,6 +72,7 @@ NOTICE_MESSAGES = {
     "alias_error": "Alias 配置未保存。",
     "edge_sync_empty": "云端同步完成：没有可推送的已签发密钥。",
     "edge_sync_error": "云端同步失败：请确认 edge sync 已启用且 Clash 代理可用。",
+    "operator_sso_error": "邮件后台会话建立失败，请稍后重试。",
     "tags_error": "标签更新失败：请确认 IMAP 已配置。",
 }
 
@@ -390,8 +396,10 @@ def create_app(
     settings: Settings,
     *,
     service: GatewayService | None = None,
+    operator_sso_client: OperatorSsoClient | None = None,
 ) -> FastAPI:
     gateway = service or GatewayService(settings)
+    operator_sso = operator_sso_client or OperatorSsoClient(settings)
     jobs = BatchJobManager(gateway)
     session_codec = AdminSessionCodec(
         settings.master_key, lifetime_seconds=settings.admin_session_seconds
@@ -653,6 +661,23 @@ def create_app(
         _ensure_open_admin_cookie(request, response)
         return response
 
+    @app.get("/admin/operator-session")
+    async def admin_operator_session(request: Request):
+        if _admin_session(request, session_codec, settings=settings) is None:
+            return RedirectResponse("/admin/login", status_code=303)
+        try:
+            issued = await asyncio.to_thread(operator_sso.exchange)
+        except OperatorSsoError:
+            gateway.database.record_audit_event("operator_sso", "failed")
+            return _redirect_notice("operator_sso_error")
+        response = RedirectResponse("/admin/mail/", status_code=303)
+        response.headers.append("Set-Cookie", issued.header_value)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        gateway.database.record_audit_event("operator_sso", "succeeded")
+        _ensure_open_admin_cookie(request, response)
+        return response
+
     @app.post("/admin/logout")
     async def admin_logout(request: Request):
         session = _admin_session(request, session_codec, settings=settings)
@@ -662,6 +687,13 @@ def create_app(
         _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
         response = RedirectResponse("/admin/login", status_code=303)
         response.delete_cookie(ADMIN_COOKIE, path="/admin")
+        response.delete_cookie(
+            OPERATOR_SESSION_COOKIE,
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="strict",
+        )
         return response
 
     @app.post("/admin/imap")

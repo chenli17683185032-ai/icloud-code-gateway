@@ -179,3 +179,19 @@ def test_settings_loads_hme_proxy_and_rejects_missing_required_proxy(
     monkeypatch.delenv("ICLOUD_GATEWAY_HME_PROXY_SERVER")
     with pytest.raises(ConfigurationError):
         Settings.from_environment()
+
+
+def test_settings_validates_operator_sso_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv(
+        "ICLOUD_GATEWAY_MASTER_KEY",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    monkeypatch.setenv("ICLOUD_GATEWAY_ADMIN_PASSWORD", "correct horse battery staple")
+    monkeypatch.setenv("ICLOUD_GATEWAY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN", "invalid")
+
+    with pytest.raises(ConfigurationError):
+        Settings.from_environment()
+
+    monkeypatch.setenv("ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN", f"icg_{'o' * 43}")
+    assert Settings.from_environment().operator_access_token == f"icg_{'o' * 43}"

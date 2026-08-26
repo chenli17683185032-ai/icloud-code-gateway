@@ -82,6 +82,7 @@ class Settings:
     control_plane_token: str = ""
     edge_base_url: str = ""
     edge_proxy: str = ""
+    operator_access_token: str = ""
     edge_sync_enabled: bool = True
     edge_timeout_seconds: int = 20
     # Control mode: periodically reconcile all active aliases/keys to the edge so a
@@ -159,6 +160,13 @@ class Settings:
         edge_base_url = (
             str(os.environ.get("ICLOUD_GATEWAY_EDGE_BASE_URL") or "").strip().rstrip("/")
         )
+        operator_access_token = str(
+            os.environ.get("ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN") or ""
+        ).strip()
+        if operator_access_token and (
+            len(operator_access_token) != 47 or not operator_access_token.startswith("icg_")
+        ):
+            raise ConfigurationError("ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN is invalid")
         if mode == "control":
             if not edge_base_url:
                 raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is required in control mode")
@@ -216,6 +224,7 @@ class Settings:
             control_plane_token=control_plane_token,
             edge_base_url=edge_base_url,
             edge_proxy="" if edge_proxy is None else edge_proxy.requests_url,
+            operator_access_token=operator_access_token,
             edge_sync_enabled=_boolean_environment("ICLOUD_GATEWAY_EDGE_SYNC_ENABLED", True),
             edge_timeout_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120

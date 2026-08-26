@@ -22,6 +22,11 @@ from icloud_gateway.imap_otp import (
     RecentOtpBatch,
 )
 from icloud_gateway.mailbox_watcher import IndexedCode
+from icloud_gateway.operator_sso import (
+    OPERATOR_SESSION_COOKIE,
+    OperatorSessionCookie,
+    OperatorSsoError,
+)
 from icloud_gateway.security import AdminSessionCodec, hash_access_key
 from icloud_gateway.service import (
     GatewayNotConfiguredError,
@@ -467,10 +472,85 @@ def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
 
         dashboard = browser_client.get("/admin")
         assert dashboard.status_code == 200
-        assert 'href="/admin/mail/"' in dashboard.text
+        assert 'href="/admin/operator-session"' in dashboard.text
         assert "邮件后台" in dashboard.text
         assert "/admin/browser/vnc.html?" in dashboard.text
         assert "打开 iCloud 浏览器" in dashboard.text
+
+
+def test_admin_operator_sso_and_unified_logout(settings, service) -> None:
+    cookie = (
+        f"{OPERATOR_SESSION_COOKIE}=operator-session; Path=/; Max-Age=900; "
+        "HttpOnly; Secure; SameSite=Strict"
+    )
+
+    class Broker:
+        calls = 0
+
+        def exchange(self):
+            self.calls += 1
+            return OperatorSessionCookie(cookie)
+
+    broker = Broker()
+    configured = replace(
+        settings,
+        deployment_mode="control",
+        control_plane_token="control-token-control-token-123456",
+        edge_base_url="https://icloud.example.test",
+        operator_access_token=f"icg_{'o' * 43}",
+    )
+    app = create_app(configured, service=service, operator_sso_client=broker)
+    with TestClient(app, base_url="http://testserver") as client:
+        denied = client.get("/admin/operator-session", follow_redirects=False)
+        assert denied.status_code == 303
+        assert denied.headers["location"] == "/admin/login"
+        assert broker.calls == 0
+
+        csrf = _login(client, configured)
+        issued = client.get("/admin/operator-session", follow_redirects=False)
+        assert issued.status_code == 303
+        assert issued.headers["location"] == "/admin/mail/"
+        assert cookie in issued.headers.get_list("set-cookie")
+        assert broker.calls == 1
+
+        logout = client.post(
+            "/admin/logout",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        cleared = logout.headers.get_list("set-cookie")
+        assert any(
+            value.startswith(f"{ADMIN_COOKIE}=") and "Max-Age=0" in value
+            for value in cleared
+        )
+        assert any(
+            value.startswith(f"{OPERATOR_SESSION_COOKIE}=") and "Max-Age=0" in value
+            for value in cleared
+        )
+
+
+def test_admin_operator_sso_failure_returns_safe_notice(settings, service) -> None:
+    class Broker:
+        @staticmethod
+        def exchange():
+            raise OperatorSsoError("operator-token-canary")
+
+    configured = replace(
+        settings,
+        deployment_mode="control",
+        control_plane_token="control-token-control-token-123456",
+        edge_base_url="https://icloud.example.test",
+        operator_access_token=f"icg_{'o' * 43}",
+    )
+    app = create_app(configured, service=service, operator_sso_client=Broker())
+    with TestClient(app, base_url="http://testserver") as client:
+        _login(client, configured)
+        response = client.get("/admin/operator-session", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/admin?notice=operator_sso_error"
+        page = client.get(response.headers["location"])
+        assert "邮件后台会话建立失败" in page.text
+        assert "operator-token-canary" not in page.text
 
 
 def test_admin_local_profile_capture_enabled_without_cdp(settings, service, tmp_path) -> None:
