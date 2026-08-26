@@ -211,6 +211,17 @@ def _click_icloud_sign_in(page: Any) -> bool:
             return True
         except Exception:
             continue
+    # Apple currently renders this entry point as a clickable DIV rather than
+    # an accessible button, so role-only lookup leaves capture waiting forever.
+    for label in ("使用 Apple 账户登录", "Sign in with Apple Account"):
+        try:
+            control = page.get_by_text(label, exact=True)
+            if control.count() != 1:
+                continue
+            control.click(timeout=5_000)
+            return True
+        except Exception:
+            continue
     return False
 
 

@@ -10,6 +10,7 @@ from icloud_gateway.browser_capture import (
     CaptureBusyError,
     CaptureError,
     CaptureManager,
+    _click_icloud_sign_in,
     _open_browser,
     _resolve_cdp_endpoint,
     _validate_capture_url,
@@ -108,6 +109,37 @@ def test_local_browser_profile_is_private_and_owned(tmp_path: Path) -> None:
     assert handle.context is context
     assert handle.owned_context is True
     assert (tmp_path / "profile").stat().st_mode & 0o777 == 0o700
+
+
+def test_sign_in_click_falls_back_to_current_apple_text_control() -> None:
+    class Locator:
+        def __init__(self, count: int):
+            self._count = count
+            self.clicked = False
+
+        def count(self):
+            return self._count
+
+        def click(self, *, timeout):
+            assert timeout == 5_000
+            self.clicked = True
+
+    text_control = Locator(1)
+
+    class Page:
+        @staticmethod
+        def get_by_role(_role, *, name, exact):
+            assert exact is True
+            assert name in {"登录", "Sign In"}
+            return Locator(0)
+
+        @staticmethod
+        def get_by_text(label, *, exact):
+            assert exact is True
+            return text_control if label == "Sign in with Apple Account" else Locator(0)
+
+    assert _click_icloud_sign_in(Page()) is True
+    assert text_control.clicked is True
 
 
 def test_manager_runs_capture_and_publishes_terminal_status() -> None:
