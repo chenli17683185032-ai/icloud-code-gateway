@@ -397,6 +397,9 @@ class GatewayService:
         db_path = self.settings.database_path
         profile_dir = self.settings.browser_profile_dir
         status["persisted_on_disk"] = bool(configured and db_path.is_file())
+        saved_at = self.database.get_secret_updated_at(HME_SETTING_KEY) if configured else None
+        status["saved_at"] = saved_at
+        status["saved_at_display"] = None if saved_at is None else _beijing_timestamp(saved_at)
         status["database_path"] = str(db_path)
         status["browser_profile_dir"] = None if profile_dir is None else str(profile_dir)
         status["browser_profile_persisted"] = bool(
@@ -407,6 +410,7 @@ class GatewayService:
             if self.settings.cdp_url
             else ("local_profile" if profile_dir is not None else "unavailable")
         )
+        status["upload_enabled"] = bool(self.settings.hme_session_upload_enabled)
         status["freshness_seconds"] = freshness
         status["maintenance_interval_seconds"] = maintenance
         status["last_validated_at_display"] = (
@@ -466,8 +470,12 @@ class GatewayService:
 
     def _capture_status_changed(self, status: dict[str, Any]) -> None:
         state = str(status.get("state") or "")
+        error_code = str(status.get("error_code") or "")
         if state in {"starting", "verifying"}:
             self._set_hme_state("refreshing", error_kind="authentication")
+        elif state == "failed" and error_code == "capture_upload_failed":
+            # The local encrypted copy is valid; only the remote handoff failed.
+            self._set_hme_state("ready", error_kind="upload")
         elif state in {"waiting_login", "failed"}:
             self._set_hme_state("reauth_required", error_kind="authentication")
 
@@ -651,7 +659,26 @@ class GatewayService:
         )
         if committed:
             self._set_hme_state("ready", validated=True)
+            if self.settings.hme_session_upload_enabled:
+                self.upload_hme_session(session)
         return len(aliases)
+
+    def upload_hme_session(self, session: ICloudHmeSession | None = None) -> dict[str, Any]:
+        self._require_hme_management()
+        current = session or self.get_hme_session()
+        if current is None:
+            raise GatewayNotConfiguredError("iCloud HME session is not configured")
+        if not self.settings.hme_session_upload_enabled:
+            raise GatewayNotAllowedError("HME session upload is disabled")
+        if self.edge_sync_client is None:
+            raise GatewayEdgeSyncError("remote HME session upload is not configured")
+        try:
+            result = self.edge_sync_client.import_hme_session(current)
+        except EdgeSyncError as exc:
+            self.database.record_audit_event("hme_session_upload", "failed")
+            raise GatewayEdgeSyncError(str(exc)) from exc
+        self.database.record_audit_event("hme_session_upload", "succeeded")
+        return result
 
     def import_hme_session(self, source: str) -> int:
         session = parse_hme_session_import(source)

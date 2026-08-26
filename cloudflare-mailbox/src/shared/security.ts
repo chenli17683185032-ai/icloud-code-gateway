@@ -219,13 +219,14 @@ export async function issueSession(
   tokenDigest: string,
   access: "alias" | "operator" = "alias",
   nowSeconds = Math.floor(Date.now() / 1000),
+  ttlSeconds = config.sessionTtlSeconds,
 ): Promise<{ token: string; expiresAt: number }> {
   const payload: SessionPayload = {
     version: 1,
     access,
     aliasDigest: digest,
     tokenDigest,
-    expiresAt: nowSeconds + config.sessionTtlSeconds,
+    expiresAt: nowSeconds + ttlSeconds,
     nonce: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(12))),
   };
   const encoded = bytesToBase64Url(encoder.encode(JSON.stringify(payload)));

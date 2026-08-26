@@ -8,21 +8,26 @@
   <div class="admin-header-inner">
     <a class="brand" href="/admin">
       <span class="brand-mark" aria-hidden="true">5</span>
-      <span>iCloud 验证码网关</span>
+      <span>iCloud 邮件管理</span>
     </a>
-    <nav class="admin-nav" aria-label="管理导航">
-      <a href="/admin/operator-session">邮件后台</a>
-      <a href="#aliases">Alias</a>
-      <a href="#admin-codes">验证码</a>
-      <a href="#query-history">查询记录</a>
-      <a href="#connections">连接</a>
-      <form method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="icon-button" type="submit" aria-label="退出登录" title="退出登录">
-          <img src="/static/icons/log-out.svg" alt="" aria-hidden="true">
-        </button>
-      </form>
-    </nav>
+    <div class="admin-header-actions">
+      <nav class="workspace-switcher" aria-label="管理员工作区">
+        <a href="/admin" aria-current="page">邮箱管理</a>
+        <a href="/admin/operator-session">邮件收件箱</a>
+      </nav>
+      <nav class="admin-nav" aria-label="本页导航">
+        <a href="#aliases">Alias</a>
+        <a href="#admin-codes">验证码</a>
+        <a href="#query-history">查询记录</a>
+        <a href="#connections">连接</a>
+        <form method="post" action="/admin/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="icon-button" type="submit" aria-label="退出登录" title="退出登录">
+            <img src="/static/icons/log-out.svg" alt="" aria-hidden="true">
+          </button>
+        </form>
+      </nav>
+    </div>
   </div>
 </header>
 
@@ -39,11 +44,12 @@
     <div class="status-item">
       <div class="status-icon"><img src="/static/icons/cloud.svg" alt="" aria-hidden="true"></div>
       <div>
-        <p class="status-name">HME Session</p>
+        <p class="status-name">Apple 登录状态</p>
         <p class="status-value {% if hme.state == 'ready' %}status-good{% else %}status-muted{% endif %}">
           {{ {'ready': '连接正常', 'refreshing': '正在刷新', 'degraded': '暂时不可用', 'reauth_required': '需要重新登录', 'not_configured': '未配置'}.get(hme.state, hme.state) }}
         </p>
-        {% if hme.last_validated_at %}<p class="status-meta">最近验证 {{ hme.last_validated_at }}</p>{% elif hme.host %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
+        {% if hme.persisted_on_disk %}<p class="status-meta">已加密保存{% if hme.saved_at_display %} · {{ hme.saved_at_display }}{% endif %}</p>{% endif %}
+        {% if hme.last_validated_at_display %}<p class="status-meta">最近验证 {{ hme.last_validated_at_display }}</p>{% elif hme.host and not hme.persisted_on_disk %}<p class="status-meta">{{ hme.host }}</p>{% endif %}
       </div>
     </div>
     {% else %}
@@ -452,10 +458,17 @@
       {% if manages_hme %}
       <details class="config-panel" {% if not hme.configured %}open{% endif %}>
         <summary>
-          <span>HME Session</span>
-          <span class="summary-state">{% if hme.configured %}已配置{% else %}待配置{% endif %}</span>
+          <span>Apple 登录状态</span>
+          <span class="summary-state">{% if hme.persisted_on_disk %}已加密保存{% elif hme.configured %}已配置{% else %}待配置{% endif %}</span>
         </summary>
         <div class="config-panel-body">
+          <div class="session-persistence-note" data-level="{{ hme.health_level }}">
+            <strong>{% if hme.persisted_on_disk %}登录状态会长期保留{% else %}完成一次登录即可长期使用{% endif %}</strong>
+            <p>{{ hme.operator_hint }}</p>
+            {% if hme.persisted_on_disk %}
+            <p>Session 已使用主密钥加密写入 SQLite；浏览器 profile 使用独立持久卷。服务更新或重启不会清空，只有 Apple 主动作废时才需要重新登录。</p>
+            {% endif %}
+          </div>
           <div class="capture-actions">
             {% if cdp_configured %}
             <a
@@ -468,7 +481,7 @@
               <span>打开 iCloud 浏览器</span>
             </a>
             {% elif capture_configured %}
-            <p class="muted-text">本机持久 Chromium：点击“登录更新”后会弹出浏览器窗口，请在其中完成 Apple 登录。</p>
+            <p class="muted-text">本机持久 Chromium：点击“登录更新”后会弹出浏览器窗口；成功后 Session 会自动加密保存{% if hme.upload_enabled %}并上传服务器{% endif %}。</p>
             {% endif %}
             <form method="post" action="/admin/hme/capture/start">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -486,18 +499,41 @@
               </button>
             </form>
             {% endif %}
+            {% if hme.upload_enabled and hme.configured %}
+            <form method="post" action="/admin/hme/upload">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="secondary-button" type="submit">
+                <img src="/static/icons/upload.svg" alt="" aria-hidden="true">
+                <span>重新上传服务器</span>
+              </button>
+            </form>
+            {% endif %}
           </div>
-          <form method="post" action="/admin/hme/import" class="stack-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="field">
-              <label for="session-import">cURL 或 HAR</label>
-              <textarea id="session-import" name="session_import" rows="7" required></textarea>
+          {% if not hme.upload_enabled %}
+          <div class="local-capture-fallback">
+            <div>
+              <strong>服务器浏览器不适配时</strong>
+              <p>在 Mac 启动“本地 iCloud 控制台”，完成 Apple 登录后会自动上传到本服务器，无需复制 Cookie、cURL 或 HAR。</p>
             </div>
-            <button class="secondary-button" type="submit">
-              <img src="/static/icons/upload.svg" alt="" aria-hidden="true">
-              <span>验证并导入</span>
-            </button>
-          </form>
+            <a class="secondary-button" href="http://127.0.0.1:18081/admin" target="_blank" rel="noopener">
+              <span>打开本地控制台</span>
+            </a>
+          </div>
+          {% endif %}
+          <details class="session-manual-import">
+            <summary>手动导入 cURL / HAR</summary>
+            <form method="post" action="/admin/hme/import" class="stack-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="field">
+                <label for="session-import">cURL 或 HAR</label>
+                <textarea id="session-import" name="session_import" rows="7" required></textarea>
+              </div>
+              <button class="secondary-button" type="submit">
+                <img src="/static/icons/upload.svg" alt="" aria-hidden="true">
+                <span>验证并导入</span>
+              </button>
+            </form>
+          </details>
         </div>
       </details>
       {% endif %}

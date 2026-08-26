@@ -548,7 +548,19 @@ class CaptureManager:
                 started_at=started_at,
             )
             return
-        except Exception:
+        except Exception as exc:
+            if str(getattr(exc, "code", "")) == "edge_sync_error":
+                self._finish(
+                    job,
+                    state="failed",
+                    message=(
+                        "iCloud session was saved locally but could not be uploaded "
+                        "to the remote server"
+                    ),
+                    error_code="capture_upload_failed",
+                    started_at=started_at,
+                )
+                return
             self._finish(
                 job,
                 state="failed",

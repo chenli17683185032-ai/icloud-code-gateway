@@ -49,7 +49,9 @@ async function createSession(): Promise<string> {
     body: JSON.stringify({ email: "hidden.one@icloud.com", token }),
   });
   expect(response.status).toBe(200);
-  return response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
+  const setCookie = response.headers.get("Set-Cookie") ?? "";
+  expect(setCookie).toContain("Max-Age=900");
+  return setCookie.split(";", 1)[0] ?? "";
 }
 
 async function createOperatorSession(): Promise<string> {
@@ -65,7 +67,9 @@ async function createOperatorSession(): Promise<string> {
     },
   );
   expect(response.status).toBe(200);
-  return response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "";
+  const setCookie = response.headers.get("Set-Cookie") ?? "";
+  expect(setCookie).toContain("Max-Age=86400");
+  return setCookie.split(";", 1)[0] ?? "";
 }
 
 function emailMessage(raw: string, from?: string): ForwardableEmailMessage {
@@ -110,7 +114,8 @@ describe("worker integration", () => {
     const adminPage = await SELF.fetch("https://example.com/admin/");
     expect(adminPage.status).toBe(200);
     const adminHtml = await adminPage.text();
-    expect(adminHtml).toContain("隐邮操作台");
+    expect(adminHtml).toContain("iCloud 邮件管理");
+    expect(adminHtml).toContain("邮件收件箱");
     expect(adminHtml).toContain('id="operator-search-input"');
     const adminScript = await (
       await SELF.fetch("https://example.com/admin/app.js")
@@ -124,10 +129,11 @@ describe("worker integration", () => {
       'window.location.replace("/admin/operator-session")',
     );
     expect(adminScript).toContain('window.location.assign("/admin")');
+    expect(adminScript).toContain("elements.logoutButton.hidden = true");
 
     const mergedAdminPage = await SELF.fetch("https://example.com/admin/mail/");
     expect(mergedAdminPage.status).toBe(200);
-    expect(await mergedAdminPage.text()).toContain("隐邮操作台");
+    expect(await mergedAdminPage.text()).toContain("iCloud 邮件管理");
     expect(stylesheet).toContain("body.operator-active .page-shell {");
     expect(stylesheet).toContain(
       "width: min(1800px, calc(100% - clamp(1rem, 2vw, 2rem)));",

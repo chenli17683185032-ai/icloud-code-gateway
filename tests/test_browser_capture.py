@@ -235,3 +235,27 @@ def test_manager_distinguishes_network_failure_after_capture() -> None:
     assert terminal["state"] == "failed"
     assert terminal["error_code"] == "capture_save_network"
     assert "proxy-password-canary" not in terminal["message"]
+
+
+def test_manager_distinguishes_remote_upload_failure_after_local_save() -> None:
+    class UploadError(RuntimeError):
+        code = "edge_sync_error"
+
+    def runner(**_kwargs):
+        return captured_session()
+
+    def save(_session):
+        raise UploadError("control-token-canary")
+
+    manager = CaptureManager(
+        cdp_url="http://browser:9222",
+        on_session=save,
+        runner=runner,
+    )
+    manager.start()
+
+    terminal = wait_for_terminal(manager)
+
+    assert terminal["state"] == "failed"
+    assert terminal["error_code"] == "capture_upload_failed"
+    assert "control-token-canary" not in terminal["message"]

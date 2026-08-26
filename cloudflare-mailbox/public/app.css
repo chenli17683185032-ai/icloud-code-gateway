@@ -195,6 +195,48 @@ body.operator-active .site-footer {
   font-size: 0.82rem;
 }
 
+.workspace-switcher {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  padding: 0.2rem;
+}
+
+.workspace-switcher a {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--ink-soft);
+  padding-inline: 0.95rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out);
+}
+
+.workspace-switcher a:hover {
+  color: var(--ink);
+}
+
+.workspace-switcher a[aria-current="page"] {
+  background: var(--paper-strong);
+  color: var(--ink);
+  box-shadow: 0 1px 4px color-mix(in oklch, var(--ink) 12%, transparent);
+}
+
+.workspace-switcher a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .state-dot {
   width: 8px;
   height: 8px;
@@ -822,16 +864,6 @@ body.operator-active #operator-view .mailbox-workspace {
   animation: reader-enter 240ms var(--ease-out) both;
 }
 
-.operator-public-link {
-  color: var(--ink-soft);
-  text-decoration: none;
-}
-
-.operator-public-link:hover,
-.operator-public-link:focus-visible {
-  color: var(--accent);
-}
-
 .operator-retention {
   display: inline-block;
   margin: 1rem 0 0;
@@ -1170,6 +1202,12 @@ body.operator-active #operator-view .mailbox-workspace {
   .brand-stamp {
     width: 42px;
     height: 42px;
+  }
+
+  .workspace-switcher a {
+    min-height: 38px;
+    padding-inline: 0.68rem;
+    font-size: 0.72rem;
   }
 
   .page-shell {

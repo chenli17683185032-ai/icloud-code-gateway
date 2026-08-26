@@ -45,8 +45,7 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
 
 def test_operator_sso_exchanges_server_token_for_strict_cookie(tmp_path: Path) -> None:
     cookie = (
-        f"{OPERATOR_SESSION_COOKIE}=session; Path=/; Max-Age=900; "
-        "HttpOnly; Secure; SameSite=Strict"
+        f"{OPERATOR_SESSION_COOKIE}=session; Path=/; Max-Age=900; HttpOnly; Secure; SameSite=Strict"
     )
     session = _Session(_Response(cookie=cookie))
     client = OperatorSsoClient(_settings(tmp_path), session=session)

@@ -321,6 +321,9 @@ export ICLOUD_GATEWAY_DEPLOYMENT_MODE=control
 export ICLOUD_GATEWAY_EDGE_BASE_URL="$EDGE_URL"
 export ICLOUD_GATEWAY_EDGE_SYNC_ENABLED=1
 export ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS=20
+# 本地捕获成功后，把经过 Apple 只读验证的 Session 自动交给远程
+# control 服务器；服务器端默认关闭该开关，避免递归上传。
+export ICLOUD_GATEWAY_HME_SESSION_UPLOAD_ENABLED=1
 export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$PUBLIC_URL"
 export ICLOUD_GATEWAY_COOKIE_SECURE=0
 export ICLOUD_GATEWAY_TRUSTED_HOSTS="localhost,127.0.0.1"
@@ -344,6 +347,7 @@ else
   echo "HME 网络：本机代理未运行，自动直连 Apple"
 fi
 export ICLOUD_GATEWAY_HME_PROXY_REQUIRED="${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
+echo "Session 同步：本地登录成功后自动上传 ${EDGE_URL}/admin/api/hme-session/import"
 
 # Cloudflare 在当前本地网络直连可能被重置，因此 edge 同步使用独立代理。
 # 即使启动时 FlClash 尚未监听，也保留 7890：代理稍后恢复后，后台对账可自动自愈。

@@ -103,6 +103,13 @@ export function loadConfig(env: Env): RuntimeConfig {
       24 * 60 * 60,
       "SESSION_TTL_SECONDS",
     ),
+    operatorSessionTtlSeconds: boundedInteger(
+      env.OPERATOR_SESSION_TTL_SECONDS,
+      24 * 60 * 60,
+      15 * 60,
+      30 * 24 * 60 * 60,
+      "OPERATOR_SESSION_TTL_SECONDS",
+    ),
     messageQueryLimit: boundedInteger(
       env.MESSAGE_QUERY_LIMIT,
       20,

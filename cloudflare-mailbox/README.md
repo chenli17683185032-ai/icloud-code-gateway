@@ -17,7 +17,8 @@
 - Email Routing：`otp@yunbay.xyz → icloud-mailbox-worker`
 - D1：`icloud-mailbox`（APAC）
 - 旧链接兼容：`/#key=<Token>` 会通过全局 HMAC 索引自动找到邮箱；新链接继续使用 `/#email=<邮箱>&key=<Token>`。
-- 操作员后台：`https://icloud.yunbay.xyz/admin/`，只输入操作员 Token，无需逐个输入邮箱。
+- 统一管理员工作区：`https://icloud.yunbay.xyz/admin` 管理 Alias，`https://icloud.yunbay.xyz/admin/mail/` 查看全部邮件；两页顶部直接切换，邮件页由 VPS 管理员会话静默换取 Worker Cookie，不向浏览器暴露操作员 Token。
+- 普通用户会话仍为 15 分钟；操作员会话独立为 24 小时（`OPERATOR_SESSION_TTL_SECONDS=86400`），不会把普通用户的邮箱访问期一起拉长。
 - 原 `icloud.yunbay.xyz` DNS/VPS 保留在 Worker route 后方；移除该 route 即可恢复旧站，不需要重建 DNS。
 - 附件私有存储：Workers KV `icloud-mailbox-attachments`，字节使用现有数据密钥做 AES-GCM 二次加密，文件名和 MIME 元数据加密保存在 D1；只有操作员会话可以下载。
 - iCloud Hide My Email 会把 OpenAI/Grok 的发件地址改写成 Apple `@icloud.com` 中继地址。Worker 优先识别原始官方域名；遇到 Apple 中继时，要求发件显示名、标题、正文中至少两处品牌证据才公开验证码，避免只靠一个可伪造显示名放行。

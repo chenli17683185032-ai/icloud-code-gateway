@@ -65,7 +65,7 @@ class Settings:
     public_base_url: str = ""
     trusted_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
     log_level: str = "INFO"
-    admin_session_seconds: int = 8 * 60 * 60
+    admin_session_seconds: int = 30 * 24 * 60 * 60
     capture_timeout_seconds: int = 15 * 60
     otp_max_age_seconds: int = 5 * 60
     otp_future_skew_seconds: int = 60
@@ -85,6 +85,10 @@ class Settings:
     operator_access_token: str = ""
     edge_sync_enabled: bool = True
     edge_timeout_seconds: int = 20
+    # Local control can upload a newly captured Apple session to the remote
+    # control server. Public/server deployments leave this disabled to avoid
+    # recursively posting a session back to themselves.
+    hme_session_upload_enabled: bool = False
     # Control mode: periodically reconcile all active aliases/keys to the edge so a
     # missed creation-time push heals itself. 0 disables the background loop.
     edge_reconcile_seconds: int = 30 * 60
@@ -193,6 +197,12 @@ class Settings:
             public_base_url=public_base_url,
             trusted_hosts=trusted_hosts,
             log_level=log_level,
+            admin_session_seconds=_integer_environment(
+                "ICLOUD_GATEWAY_ADMIN_SESSION_SECONDS",
+                30 * 24 * 60 * 60,
+                minimum=60 * 60,
+                maximum=90 * 24 * 60 * 60,
+            ),
             hme_maintenance_interval_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS",
                 6 * 60 * 60,
@@ -228,6 +238,9 @@ class Settings:
             edge_sync_enabled=_boolean_environment("ICLOUD_GATEWAY_EDGE_SYNC_ENABLED", True),
             edge_timeout_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120
+            ),
+            hme_session_upload_enabled=_boolean_environment(
+                "ICLOUD_GATEWAY_HME_SESSION_UPLOAD_ENABLED", False
             ),
             edge_reconcile_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_RECONCILE_SECONDS",

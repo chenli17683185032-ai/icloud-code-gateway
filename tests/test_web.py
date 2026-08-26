@@ -417,6 +417,7 @@ def test_admin_login_cookie_expiry_and_csrf(client, settings, service) -> None:
     assert "HttpOnly" in set_cookie
     assert "SameSite=strict" in set_cookie
     assert "Path=/admin" in set_cookie
+    assert "Max-Age=2592000" in set_cookie
     csrf = (
         AdminSessionCodec(
             settings.master_key,
@@ -473,7 +474,8 @@ def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
         dashboard = browser_client.get("/admin")
         assert dashboard.status_code == 200
         assert 'href="/admin/operator-session"' in dashboard.text
-        assert "邮件后台" in dashboard.text
+        assert "邮箱管理" in dashboard.text
+        assert "邮件收件箱" in dashboard.text
         assert "/admin/browser/vnc.html?" in dashboard.text
         assert "打开 iCloud 浏览器" in dashboard.text
 
@@ -520,8 +522,7 @@ def test_admin_operator_sso_and_unified_logout(settings, service) -> None:
         )
         cleared = logout.headers.get_list("set-cookie")
         assert any(
-            value.startswith(f"{ADMIN_COOKIE}=") and "Max-Age=0" in value
-            for value in cleared
+            value.startswith(f"{ADMIN_COOKIE}=") and "Max-Age=0" in value for value in cleared
         )
         assert any(
             value.startswith(f"{OPERATOR_SESSION_COOKIE}=") and "Max-Age=0" in value
@@ -570,6 +571,34 @@ def test_admin_local_profile_capture_enabled_without_cdp(settings, service, tmp_
         assert 'action="/admin/hme/capture/start"' in dashboard.text
         capture_form = dashboard.text.split('action="/admin/hme/capture/start"', 1)[1][:220]
         assert "disabled" not in capture_form
+
+
+def test_remote_local_capture_import_requires_control_token_and_persists_session(
+    settings,
+    service,
+) -> None:
+    configured = replace(
+        settings,
+        deployment_mode="control",
+        control_plane_token="control-token-control-token-123456",
+        edge_base_url="https://icloud.example.test",
+        edge_sync_enabled=False,
+    )
+    app = create_app(configured, service=service)
+    payload = {"session": _hme_session().as_secret_dict()}
+
+    with TestClient(app, base_url="http://testserver") as client:
+        denied = client.post("/admin/api/hme-session/import", json=payload)
+        assert denied.status_code == 401
+
+        imported = client.post(
+            "/admin/api/hme-session/import",
+            headers={"Authorization": "Bearer control-token-control-token-123456"},
+            json=payload,
+        )
+        assert imported.status_code == 200
+        assert imported.json() == {"status": "ok", "aliases": 0, "persisted": True}
+        assert service.get_hme_session() == _hme_session()
 
 
 def test_admin_dashboard_has_dedicated_lookup_history_section(client, settings, service) -> None:

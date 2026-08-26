@@ -183,6 +183,12 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
 
 ## 4. 在线 iCloud 维护
 
+管理员把它视为同一站点的两个工作区：`/admin` 为“邮箱管理”，`/admin/mail/` 为“邮件收件箱”。顶部切换不要求再次输入 Token；管理员 Cookie 默认 30 天（`ICLOUD_GATEWAY_ADMIN_SESSION_SECONDS=2592000`），Worker 操作员 Cookie 为 24 小时，过期后由仍有效的管理员 Cookie 静默换新。统一退出只在“邮箱管理”页执行，并同时清除两种 Cookie。
+
+HME Session 使用主密钥加密保存在 SQLite，Chromium profile 保存在独立持久卷。容器更新、服务器重启和页面切换都不会清空它们；“正在刷新”或网络降级不等于要重新登录，只有 Apple 明确拒绝当前 Session 才提示人工登录。管理页会显示最近保存和验证时间。
+
+服务器 Chromium 不适配时，在 Mac 启动 `scripts/run-local-control.sh`（或桌面“打开本地 iCloud 控制台”入口）。本机 profile 固定在 `~/.icloud-code-gateway/browser-profile`；捕获成功后，control token 通过 HTTPS Bearer 头调用 `POST /admin/api/hme-session/import`，远程服务器再次执行 Apple 只读 list 验证并加密保存。Session、Cookie 和 control token 不进入 URL、页面 DOM、浏览器存储或日志；接口请求上限 2 MiB、每来源 10 分钟最多 6 次。上传失败时本机加密副本仍保留，点“重新上传服务器”即可重试，不要重新登录。
+
 1. 登录 `https://<domain>/admin/login`。
 2. 点击“打开 iCloud 浏览器”。该链接走 `/admin/browser/*`，页面、静态资源和 WebSocket 均需有效管理员会话。
 3. noVNC 会再次要求 `BROWSER_VNC_PASSWORD`。管理员密码和 VNC 密码必须不同。
@@ -220,7 +226,7 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d
 - `admin_code_scan` 审计只记录 `found`、`empty`、`truncated`、`busy` 或 IMAP 错误结果，不包含验证码、UID、主题、正文或发件人。
 - 读取超时、IMAP 正忙或凭据失效时失败关闭。不要通过提高 500 条上限、为每个 Alias 单独连接或持久化验证码来规避上游故障。
 
-浏览器容器、app 容器或服务器重启后仍使用同一个 profile。iCloud 显示离线或 HME Session 失效时，重复上述流程；不要删除 browser-data 卷，也不要创建第二个同时占用该卷的 browser 容器。
+浏览器容器、app 容器或服务器重启后仍使用同一个 profile。只有管理页明确显示“Apple 已拒绝当前 Session”时才重复登录流程；网络暂时失败先重试，不要删除 browser-data 卷，也不要创建第二个同时占用该卷的 browser 容器。
 
 公网入口不可用时，可通过 SSH 隧道访问原始 noVNC 作为恢复通道：
 

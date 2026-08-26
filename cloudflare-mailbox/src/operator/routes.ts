@@ -80,10 +80,17 @@ operatorRoutes.post("/session", async (context) => {
     throw new UnauthorizedError("操作员 Token 不正确。");
   }
   const tokenDigest = await accessTokenLookupDigest(config, input.token);
-  const session = await issueSession(config, "", tokenDigest, "operator", now);
+  const session = await issueSession(
+    config,
+    "",
+    tokenDigest,
+    "operator",
+    now,
+    config.operatorSessionTtlSeconds,
+  );
   context.header(
     "Set-Cookie",
-    sessionCookie(session.token, config.sessionTtlSeconds),
+    sessionCookie(session.token, config.operatorSessionTtlSeconds),
   );
   return context.json({
     status: "ok",

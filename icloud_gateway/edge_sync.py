@@ -7,6 +7,7 @@ from urllib.parse import quote
 import requests
 
 from .config import Settings
+from .hme import ICloudHmeSession
 from .security import validate_access_key
 
 
@@ -35,9 +36,7 @@ class EdgeSyncClient:
         # and ignore ambient HTTP(S)_PROXY so control plane routing is deterministic.
         self.session.trust_env = False
         proxy_url = str(
-            proxy
-            if proxy is not None
-            else settings.edge_proxy or settings.hme_proxy or ""
+            proxy if proxy is not None else settings.edge_proxy or settings.hme_proxy or ""
         ).strip()
         if proxy_url:
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
@@ -153,6 +152,14 @@ class EdgeSyncClient:
         return self._request(
             "DELETE",
             f"/control/v1/aliases/by-email/{self._email_path(email)}",
+        )
+
+    def import_hme_session(self, session: ICloudHmeSession) -> dict[str, Any]:
+        """Upload a locally captured Apple session to the remote control server."""
+        return self._request(
+            "POST",
+            "/admin/api/hme-session/import",
+            {"session": session.as_secret_dict()},
         )
 
 

@@ -9,6 +9,7 @@ export interface Env {
   OPERATOR_ACCESS_TOKEN: string;
   EMAIL_RETENTION_SECONDS?: string;
   SESSION_TTL_SECONDS?: string;
+  OPERATOR_SESSION_TTL_SECONDS?: string;
   MESSAGE_QUERY_LIMIT?: string;
   MAX_BODY_CHARS?: string;
   MAX_HTML_CHARS?: string;
@@ -25,6 +26,7 @@ export interface RuntimeConfig {
   operatorAccessToken: string;
   emailRetentionSeconds: number;
   sessionTtlSeconds: number;
+  operatorSessionTtlSeconds: number;
   messageQueryLimit: number;
   maxBodyChars: number;
   maxHtmlChars: number;

@@ -990,6 +990,53 @@ a:focus-visible {
   gap: 24px;
 }
 
+.admin-header-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 18px;
+}
+
+.workspace-switcher {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  padding: 3px;
+}
+
+.workspace-switcher a {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  color: var(--text-soft);
+  padding: 0 15px;
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.workspace-switcher a:hover {
+  color: var(--text);
+}
+
+.workspace-switcher a[aria-current="page"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-raised);
+}
+
+.workspace-switcher a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .admin-nav {
   display: flex;
   align-items: center;
@@ -1673,14 +1720,85 @@ a:focus-visible {
   padding: 18px;
 }
 
+.session-persistence-note {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 18px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-muted);
+  padding: 13px 14px;
+}
+
+.session-persistence-note[data-level="error"] {
+  border-left-color: var(--danger);
+}
+
+.session-persistence-note[data-level="warn"] {
+  border-left-color: var(--warning);
+}
+
+.session-persistence-note strong,
+.session-persistence-note p,
+.local-capture-fallback strong,
+.local-capture-fallback p {
+  margin: 0;
+}
+
+.session-persistence-note p,
+.local-capture-fallback p {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
 .capture-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin-bottom: 18px;
 }
 
 .capture-actions form {
   margin: 0;
+}
+
+.capture-actions > .muted-text {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+.local-capture-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 16px 0;
+}
+
+.local-capture-fallback > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.session-manual-import {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.session-manual-import > summary {
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.session-manual-import[open] > summary {
+  color: var(--text);
 }
 
 .stack-form {
@@ -1967,6 +2085,10 @@ a:focus-visible {
 }
 
 @media (max-width: 1040px) {
+  .admin-nav > a {
+    display: none;
+  }
+
   .create-section {
     grid-template-columns: 1fr;
     gap: 18px;
@@ -2195,6 +2317,10 @@ a:focus-visible {
     gap: 12px;
   }
 
+  .admin-header-actions {
+    gap: 7px;
+  }
+
   .admin-header .brand span:last-child {
     max-width: 148px;
     overflow: hidden;
@@ -2208,6 +2334,12 @@ a:focus-visible {
 
   .admin-nav > a {
     display: none;
+  }
+
+  .workspace-switcher a {
+    min-height: 38px;
+    padding: 0 11px;
+    font-size: 12px;
   }
 
   .admin-main {
@@ -2309,6 +2441,15 @@ a:focus-visible {
 
   .capture-actions form,
   .capture-actions button {
+    width: 100%;
+  }
+
+  .local-capture-fallback {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .local-capture-fallback .secondary-button {
     width: 100%;
   }
 

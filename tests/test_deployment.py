@@ -23,6 +23,31 @@ def test_browser_forward_auth_does_not_forward_websocket_upgrade_headers() -> No
     assert "header_up X-Forwarded-For" not in caddyfile
 
 
+def test_standalone_caddy_uses_the_production_proxy_and_health_contract() -> None:
+    caddyfile = (Path(__file__).resolve().parents[1] / "Caddyfile").read_text()
+
+    matcher_line = next(
+        line.strip() for line in caddyfile.splitlines() if line.strip().startswith("@cloudflare ")
+    )
+    matcher_ranges = set(matcher_line.split()[2:])
+    trusted_ranges = {
+        value
+        for line in caddyfile.splitlines()
+        if line.strip().startswith("trusted_proxies ")
+        for value in line.split()[1:]
+    }
+
+    assert len(matcher_ranges) == CLOUDFLARE_RANGE_COUNT
+    assert matcher_ranges == trusted_ranges
+    assert (
+        "request_header @cloudflare X-Forwarded-For {http.request.header.CF-Connecting-IP}"
+        in caddyfile
+    )
+    assert "health_headers {" in caddyfile
+    assert "Host {$GATEWAY_DOMAIN}" in caddyfile
+    assert "header_up X-Forwarded-For" not in caddyfile
+
+
 def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> None:
     root = Path(__file__).resolve().parents[1]
     overlay = (root / "docker-compose.server.yml").read_text()
@@ -36,14 +61,8 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "ICLOUD_GATEWAY_CDP_URL: ${ICLOUD_GATEWAY_CDP_URL:-}" in overlay
     assert "BROWSER_PROXY_SERVER: ${BROWSER_PROXY_SERVER:-}" in overlay
     assert "BROWSER_PROXY_REQUIRED: ${BROWSER_PROXY_REQUIRED:-0}" in overlay
-    assert (
-        "ICLOUD_GATEWAY_HME_PROXY_SERVER: ${ICLOUD_GATEWAY_HME_PROXY_SERVER:-}"
-        in overlay
-    )
-    assert (
-        "ICLOUD_GATEWAY_HME_PROXY_REQUIRED: ${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
-        in overlay
-    )
+    assert "ICLOUD_GATEWAY_HME_PROXY_SERVER: ${ICLOUD_GATEWAY_HME_PROXY_SERVER:-}" in overlay
+    assert "ICLOUD_GATEWAY_HME_PROXY_REQUIRED: ${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}" in overlay
     assert "condition: service_started" not in overlay
     # Edge still needs the China egress: IMAP inherits the HME proxy there.
     assert "cn-proxy" in overlay
@@ -76,6 +95,9 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
     root = Path(__file__).resolve().parents[1]
     base = (root / "docker-compose.yml").read_text()
     server = (root / "docker-compose.server.yml").read_text()
+    assert (
+        "ICLOUD_GATEWAY_ADMIN_SESSION_SECONDS: ${ICLOUD_GATEWAY_ADMIN_SESSION_SECONDS:-2592000}"
+    ) in base
     expected = {
         "ICLOUD_GATEWAY_HME_MAINTENANCE_SECONDS": "21600",
         "ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS": "3600",
@@ -89,13 +111,12 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
         assert interpolation in server
 
     assert "ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN" in base
+    assert "ICLOUD_GATEWAY_HME_SESSION_UPLOAD_ENABLED" in base
 
 
 def test_cloudflare_routes_leave_control_admin_and_static_assets_on_vps() -> None:
     config = (
-        Path(__file__).resolve().parents[1]
-        / "cloudflare-mailbox"
-        / "wrangler.jsonc"
+        Path(__file__).resolve().parents[1] / "cloudflare-mailbox" / "wrangler.jsonc"
     ).read_text()
 
     assert '"pattern": "icloud.yunbay.xyz/*"' not in config
@@ -138,6 +159,8 @@ def test_local_control_only_auto_enables_a_live_proxy() -> None:
     assert 'export ICLOUD_GATEWAY_HME_PROXY_SERVER="$LIVE_LOCAL_PROXY"' in launcher
     assert 'export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$LIVE_LOCAL_PROXY"' in launcher
     assert 'export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$EDGE_PROXY_DEFAULT"' in launcher
+    assert "export ICLOUD_GATEWAY_HME_SESSION_UPLOAD_ENABLED=1" in launcher
+    assert "/admin/api/hme-session/import" in launcher
     assert (
         'ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$EDGE_PROXY_DEFAULT}"'
         not in launcher

@@ -20,13 +20,13 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .browser_capture import CaptureBusyError
 from .config import Settings
 from .database import ConflictError, DatabaseError, NotFoundError
-from .hme import HmeError, HmeSessionError
+from .hme import HmeError, HmeNetworkError, HmeSessionError, ICloudHmeSession
 from .imap_otp import ImapCredentialsError, ImapError
 from .jobs import BatchJobManager
 from .operator_sso import (
@@ -63,6 +63,8 @@ NOTICE_MESSAGES = {
     "imap_error": "IMAP 配置未保存，请检查连接信息。",
     "hme_saved": "HME Session 已验证并保存，历史 Alias 已导入。",
     "hme_error": "HME Session 未更新，原有会话保持不变。",
+    "hme_uploaded": "本机保存的 HME Session 已重新上传到服务器。",
+    "hme_upload_error": "本机 Session 仍已保存，但上传服务器失败；请检查网络后重试。",
     "capture_started": "已启动 HME Session 捕获，请在 iCloud 浏览器中完成 Apple 登录。",
     "capture_busy": "HME Session 捕获正在进行。",
     "capture_cancelled": "已请求取消 HME Session 捕获。",
@@ -162,6 +164,9 @@ CAPTURE_ERROR_MESSAGES = {
     "capture_save_session": "已捕获浏览器会话，但 Apple 拒绝了该 Session；请重新登录后重试。",
     "capture_save_validation": "已捕获浏览器会话，但 Apple 返回的数据未通过验证；请稍后重试。",
     "capture_save_failed": "已捕获浏览器会话，但本地保存失败；原有 Session 未被覆盖。",
+    "capture_upload_failed": (
+        "Session 已加密保存在本机，但自动上传服务器失败；无需重新登录，恢复网络后点“重新上传”。"
+    ),
 }
 
 
@@ -351,6 +356,31 @@ class ControlKeyRequest(BaseModel):
 
 class ControlStateRequest(BaseModel):
     state: Literal["active", "inactive"]
+
+
+class HmeSessionImportRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    host: Annotated[str, Field(min_length=1, max_length=255)]
+    dsid: Annotated[str, Field(min_length=1, max_length=128)]
+    client_id: Annotated[str, Field(min_length=1, max_length=512)]
+    client_build_number: Annotated[str, Field(min_length=1, max_length=128)]
+    client_mastering_number: Annotated[str, Field(min_length=1, max_length=128)]
+    cookie: Annotated[str, Field(min_length=1, max_length=262_144)]
+    lang_code: Annotated[str, Field(default="en-us", max_length=32)] = "en-us"
+    origin: Annotated[str, Field(default="https://www.icloud.com", max_length=2048)] = (
+        "https://www.icloud.com"
+    )
+    referer: Annotated[str, Field(default="https://www.icloud.com/", max_length=2048)] = (
+        "https://www.icloud.com/"
+    )
+    user_agent: Annotated[str, Field(default="", max_length=4096)] = ""
+
+
+class HmeSessionUploadRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    session: HmeSessionImportRequest
 
 
 def _capture_view(status: dict[str, Any]) -> dict[str, Any]:
@@ -739,6 +769,21 @@ def create_app(
             return _redirect_notice("hme_error")
         return _redirect_notice("hme_saved")
 
+    @app.post("/admin/hme/upload")
+    async def upload_hme(request: Request):
+        if not settings.manages_hme or not settings.hme_session_upload_enabled:
+            return _redirect_notice("hme_upload_error")
+        session = _admin_session(request, session_codec, settings=settings)
+        if session is None:
+            return RedirectResponse("/admin/login", status_code=303)
+        form = await request.form()
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
+        try:
+            await asyncio.to_thread(gateway.upload_hme_session)
+        except (GatewayError, HmeError, DatabaseError, ValueError):
+            return _redirect_notice("hme_upload_error")
+        return _redirect_notice("hme_uploaded")
+
     @app.post("/admin/hme/capture/start")
     async def start_capture(request: Request):
         if not settings.manages_hme:
@@ -771,6 +816,45 @@ def create_app(
         if _admin_session(request, session_codec, settings=settings) is None:
             raise HTTPException(status_code=401, detail="admin authentication required")
         return _capture_view(gateway.capture_manager.status())
+
+    @app.post("/admin/api/hme-session/import")
+    async def import_remote_hme_session(request: Request):
+        if not settings.manages_hme:
+            return JSONResponse({"status": "not_allowed"}, status_code=404)
+        _require_control_token(request, settings)
+        decision = gateway.rate_limiter.check(
+            "hme-session-import",
+            _client_ip(request),
+            limit=6,
+            window_seconds=600,
+        )
+        if not decision.allowed:
+            return JSONResponse(
+                {"status": "rate_limited", "retry_after": decision.retry_after},
+                status_code=429,
+                headers={"Retry-After": str(decision.retry_after)},
+            )
+        try:
+            payload = HmeSessionUploadRequest.model_validate(await request.json())
+        except (ValueError, ValidationError):
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        try:
+            hme_session = ICloudHmeSession.from_mapping(payload.session.model_dump())
+            aliases = await asyncio.to_thread(gateway.save_hme_session, hme_session)
+        except GatewayBusyError:
+            return JSONResponse(
+                {"status": "busy", "retry_after": 3},
+                status_code=503,
+                headers={"Retry-After": "3"},
+            )
+        except HmeNetworkError:
+            gateway.database.record_audit_event("hme_session_upload", "network_failed")
+            return JSONResponse({"status": "apple_unavailable"}, status_code=503)
+        except (HmeSessionError, HmeError, DatabaseError, ValueError, SecurityError):
+            gateway.database.record_audit_event("hme_session_upload", "rejected")
+            return JSONResponse({"status": "invalid_session"}, status_code=422)
+        gateway.database.record_audit_event("hme_session_upload", "received")
+        return {"status": "ok", "aliases": aliases, "persisted": True}
 
     @app.post("/admin/hme/sync")
     async def sync_hme(request: Request):

@@ -41,7 +41,13 @@ const elements = {
 
 if (unifiedAdmin && elements.switchLink) {
   elements.switchLink.href = "/admin";
-  elements.switchLink.textContent = "iCloud 管理";
+  elements.switchLink.textContent = "邮箱管理";
+}
+if (unifiedAdmin && elements.logoutButton) {
+  // Unified admin has one real logout on the management page. A second button
+  // here previously cleared only the mailbox cookie, then immediately returned
+  // to the still-authenticated admin page, which read like a broken logout.
+  elements.logoutButton.hidden = true;
 }
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {

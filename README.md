@@ -18,6 +18,8 @@ iCloud Hide My Email
 
 普通用户响应仍只包含 GPT/Grok 验证码和时间；操作员后台从新邮件开始可在安全沙箱中查看原始 HTML 排版，并下载私有加密附件。历史邮件未保存过 HTML/附件，继续以纯文本显示。
 
+管理员入口按同一站点的两个工作区组织：`/admin` 是“邮箱管理”，`/admin/mail/` 是“邮件收件箱”。两页共享一次管理员登录，顶部可以直接切换；管理员 Cookie 默认保持 30 天，邮件收件箱 Cookie 保持 24 小时并可由管理员会话静默续签。两种 Cookie 都是 `HttpOnly + Secure + SameSite=Strict`，不写入浏览器存储。
+
 本地 `control` 的 `/control/v1/*` 同步合同保持不变，因此只需把 `ICLOUD_GATEWAY_EDGE_BASE_URL` 和 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 改成 Worker 自定义域名，再执行“同步到云端”。切换验证完成后可以移除本地 QQ IMAP 凭据，并下线旧 VPS edge、Chromium 和 `cn-proxy`。服务器 2 可以作为 Wrangler 部署机，但 Worker 与 D1 实际运行在 Cloudflare。
 
 部署、D1、Email Routing、Apple 转发和回滚步骤见 [cloudflare-mailbox/README.md](cloudflare-mailbox/README.md)。
@@ -58,6 +60,7 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 - `DELETE /control/v1/aliases/by-email/{email}/key`
 - `POST /control/v1/aliases/by-email/{email}/state`
 - `DELETE /control/v1/aliases/by-email/{email}`
+- `POST /admin/api/hme-session/import`：本地浏览器捕获后，把结构化 HME Session 通过 HTTPS 上传远程 control；服务器会再次只读验证 Apple 列表，再加密落盘。
 
 本地签发或轮换 access key 后，会自动把密钥同步到云端 edge；公开用户仍然只访问云端 `https://icloud.yunbay.xyz/` 输入密钥取码。
 
@@ -81,7 +84,7 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 ICLOUD_GATEWAY_BROWSER_PROFILE_DIR=~/.icloud-code-gateway/browser-profile
 ```
 
-管理页点击「登录更新」后会弹出本机 Chromium；完成 Apple 登录后自动捕获 Session。创建仍在本地完成，并同步到云端 edge。
+管理页点击「登录更新」后会弹出本机 Chromium；完成 Apple 登录后自动捕获 Session。Session 先加密保存在本机 SQLite，再自动上传远程 control 服务器；上传失败不会丢失本地登录态，也无需重新登录，恢复网络后可在连接面板点“重新上传服务器”。创建仍在本地完成，并同步到云端 edge。
 
 本地脚本默认开启：
 

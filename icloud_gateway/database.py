@@ -343,6 +343,17 @@ class Database:
             raise DatabaseError("encrypted setting is invalid")
         return value
 
+    def get_secret_updated_at(self, key: str) -> str | None:
+        name = _clean_text(key, limit=120)
+        row = (
+            self._connect()
+            .execute("SELECT updated_at FROM settings WHERE key = ?", (name,))
+            .fetchone()
+        )
+        if row is None or row["updated_at"] is None:
+            return None
+        return str(row["updated_at"])
+
     def upsert_alias(
         self,
         *,

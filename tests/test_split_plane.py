@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from icloud_gateway.config import ConfigurationError, Settings, decode_master_key
 from icloud_gateway.edge_sync import EdgeSyncClient, EdgeSyncError
+from icloud_gateway.hme import ICloudHmeSession
 from icloud_gateway.security import AdminSessionCodec, generate_access_key
 from icloud_gateway.service import GatewayService
 from icloud_gateway.web import ADMIN_COOKIE, create_app
@@ -224,6 +225,48 @@ def test_control_plane_pushes_issued_key_to_edge(tmp_path: Path):
     assert call["json"]["access_key"] == issued.access_key
     assert call["headers"]["Authorization"].startswith("Bearer ")
 
+    service.shutdown(timeout=1, close_database=True)
+
+
+def test_local_control_uploads_validated_hme_session_to_remote_server(tmp_path: Path):
+    fake = _FakeSession()
+    settings = _settings(
+        tmp_path,
+        deployment_mode="control",
+        edge_base_url="https://icloud.yunbay.xyz",
+        edge_sync_enabled=True,
+        hme_session_upload_enabled=True,
+    )
+    edge = EdgeSyncClient(settings, session=fake)
+    service = GatewayService(
+        settings,
+        start_maintenance=False,
+        edge_sync_client=edge,
+        hme_client_factory=lambda _session: type(
+            "Client",
+            (),
+            {"list_aliases": lambda self: [], "close": lambda self: None},
+        )(),
+    )
+    session = ICloudHmeSession(
+        host="p123-maildomainws.icloud.com.cn",
+        dsid="123",
+        client_id="client",
+        client_build_number="build",
+        client_mastering_number="master",
+        cookie=(
+            "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+            "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+        ),
+        origin="https://www.icloud.com.cn",
+        referer="https://www.icloud.com.cn/icloudplus/",
+    )
+
+    assert service.save_hme_session(session) == 0
+    call = fake.calls[-1]
+    assert call["url"] == "https://icloud.yunbay.xyz/admin/api/hme-session/import"
+    assert call["json"] == {"session": session.as_secret_dict()}
+    assert call["headers"]["Authorization"].startswith("Bearer ")
     service.shutdown(timeout=1, close_database=True)
 
 
