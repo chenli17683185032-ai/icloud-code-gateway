@@ -57,7 +57,10 @@ app.notFound(async (context) => {
     ["/admin/mail", "/admin/mail/"].includes(context.req.path)
   ) {
     const assetUrl = new URL(context.req.url);
-    assetUrl.pathname = "/admin/index.html";
+    // Cloudflare Assets canonicalizes explicit index.html requests back to
+    // /admin/. Request the directory form internally so the external
+    // /admin/mail/ URL is preserved instead of redirecting to the VPS admin.
+    assetUrl.pathname = "/admin/";
     return context.env.ASSETS.fetch(
       new Request(assetUrl.toString(), context.req.raw),
     );
