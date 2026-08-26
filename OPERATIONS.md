@@ -4,16 +4,16 @@
 
 ## 1. 生产边界
 
-推荐的新数据面位于 `cloudflare-mailbox/`：Cloudflare Email Worker 接收域名邮件，D1 加密保存，查询网页同时供操作者和普通用户使用。它验证完成后可以完整替代下述 VPS `app/cn-proxy` 与 QQ IMAP 路径；Worker/D1 不运行在 VPS，服务器 2 仅作为 Wrangler 部署机。
+生产数据面位于 `cloudflare-mailbox/`：Cloudflare Email Worker 接收域名邮件，D1 加密保存，查询网页同时供操作者和普通用户使用。服务器 2 是 Apple HME 控制面：运行 FastAPI、SQLite、持久 Chromium/noVNC，负责创建 Alias、保存 Session、签发 Token，并把映射同步给 Worker。QQ IMAP 不再是生产收件路径。
 
-- `app`：FastAPI 与 SQLite，非 root，根文件系统只读，数据卷为 `icloud-code-gateway_gateway-data`。
+- `app`：服务器 2 上的 `control` 模式 FastAPI 与 SQLite，非 root，根文件系统只读，数据卷为 `icloud-code-gateway_gateway-data`。
 - `browser`：独立 Chromium/Xvfb/noVNC，固定非 root UID 102，profile 卷为 `icloud-code-gateway_browser-data`。
-  **只在本地 `full` / `control` 使用**；云端 `edge` 把它放在 `legacy-browser` profile 里，`up -d` 不会启动。
-- `cn-proxy`：云端必需，不可与 browser 一起删除。edge 的 IMAP 会继承 HME 代理走它出中国。
-- `caddy`：公网 80/443、自动 HTTPS、管理员认证后的 noVNC 反向代理（云端由共享 Caddy 承担，且不再反代 noVNC）。
+  服务器部署时显式启用 `legacy-browser` profile；普通不带 profile 的 `up -d` 仍不会误启 Chromium。
+- `cn-proxy`：旧兼容容器继续保留，但 iCloud 控制面不再复用它。2026-08-26 实测其 HTTPS 为 SSL 错误，而服务器直连 Apple/Cloudflare 均正常。
+- `caddy`：共享 Caddy 承担公网 `/admin*`、`/static/*` 与管理员认证后的 noVNC；根用户页、API、控制同步和 `/admin/mail*` 继续由 Worker 精确路由接管。
 - 原始 noVNC：只监听宿主 `127.0.0.1:${BROWSER_NOVNC_PORT}`。
 - CDP：只 `expose` 给 Docker 网络，不发布宿主端口；`edge` 模式下 `Settings` 会强制清空 CDP 与 profile。
-- iCloud browser 与 HME API：共用 `CN_PROXY_*`；`CN_PROXY_REQUIRED=1` 时配置缺失或代理故障均失败关闭。
+- iCloud browser 与 HME API：分别使用 `BROWSER_PROXY_*` 与 `ICLOUD_GATEWAY_HME_PROXY_*`；当前服务器生产均留空直连。Edge 同步另支持 `ICLOUD_GATEWAY_EDGE_PROXY_*`。
 - IMAP：在管理页单独配置。**`edge` 模式下若未单独填写代理，会自动继承 HME 代理**，否则德国直连 QQ 很慢甚至不通。
   可选填写一个垃圾邮件文件夹，保存时会与主文件夹一并执行只读验证；QQ 主机即使未填写也会自动扫描 `Junk`。
 
@@ -367,6 +367,10 @@ app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带
 
 ## 11. 运维记录
 
+- 2026-08-26：按用户要求把本机 iCloud Alias 控制系统迁到服务器 2，并统一到 `https://icloud.yunbay.xyz/admin`。事故起点是新建 5 个 Alias 在 Apple/本地均成功且 Token 已签发，但本机 control 启动时只探测旧 Clash `7897`，实际 FlClash 为 `7890`；直连 Cloudflare 又被重置，导致 5 次 `edge_sync=failed`、D1 中完全缺失。先经 `7890` 幂等回填 598 个活动 Alias（失败 0），原 5 个邮箱随后均为 D1 active、Token 两个索引齐全，逐一公网登录与消息接口均为 200。代码新增独立 `ICLOUD_GATEWAY_EDGE_PROXY_*`，本机启动器优先 `7890`、兼容 `7897`，提交为 `d238fe1`。
+- 2026-08-26：服务器迁移最终提交链为 `d238fe1`、`ee13d92`、`e3ece26`，服务器源码标记 `e3ece26`；app 镜像 `sha256:d930d54c655dd94a9bde9c5abe08c2851e5945ac957bef11e8ee57ccdb079b8b`，既有 browser 镜像 `sha256:a271017d9e56f3b363e647203f8726e946e8ff82d2f93c8e1eef8e2c972d1a56` 继续复用。迁移前本机一致性快照位于 `/Users/ethan/.icloud-code-gateway/backups/server2-migration-20260826T094330Z-d238fe1`，`SHA256SUMS` 摘要为 `74fb6a7b5db7a41e09cc7093e755bb03cf0d70887c4566ca5030e108a87ee199`；服务器旧源码、环境、SQLite 卷、browser 卷和镜像备份位于 `/opt/new-api/icloud-code-gateway/backups/server-control-migration-20260826T094004Z-d238fe1`，最终清单摘要为 `40018862ca877f4ba5120e2661a0281137dd004e68f33b1e3a2a4d28b68c0209`，旧 app/browser 回滚标签均为 `rollback-pre-server-control-20260826T094004Z`。本机 control 已停止，两个“打开本地 iCloud 控制台”快捷方式已改为打开线上 `/admin`；本机数据库/profile 只作离线回滚，不得与服务器同时启动写 Apple。
+- 2026-08-26：服务器旧 `cn-proxy` 对所有 HTTPS 均报 SSL 错误，而服务器直连 Apple、Cloudflare 和 iCloud 页面均为 200；因此 `ee13d92` 将服务器 HME API 与 browser 的代理独立覆盖为空，当前 iCloud 控制面直连，旧代理容器保留但不参与 iCloud。迁移后 Apple HME 只读列表与 SQLite 收敛为 622 条（604 active、18 inactive），372 个 Token 全部可恢复；187 个批任务 active=0。迁移时两个排队 5 项任务中，旧任务按安全边界 5 项均以 `remote write was not attempted` 失败，没有重放不确定写；用户较新的任务 5/5 完成，5 个新 Alias 均创建后自动 upsert D1，逐一公网 Token 登录、邮箱匹配和消息接口均为 200。D1 最终为 605 个 active Alias、373 个 Token（均包含 1 个操作员映射），与本地 604/372 精确相差操作员 1 条。
+- 2026-08-26：Worker 最终版本 `565f351f-37dd-47d8-89e9-0c1cc7194ce6`。原 `icloud.yunbay.xyz/*` 全站路由拆为根页、静态文件、`/api/*`、`/control/*`、`/healthz`、`/readyz`、`/admin/mail*` 和 `/admin/app.js` 的精确路由；未匹配的 `/admin*` 与 `/static/*` 回到服务器 2。统一管理员入口 `/admin` 使用原服务器管理员密码；顶部“邮件后台”进入 `/admin/mail/`，操作员 Token 和 API 仍由 Worker 管理；`mailbox.yunbay.xyz/admin/` 继续可用。生产复核根页/健康/API/管理员登录/静态资源/邮件后台均为 200，未登录 `/admin` 与 noVNC 为 303，管理员登录后 dashboard/noVNC 为 200，HME 显示“连接正常”；app/browser/cn-proxy/Caddy 均 healthy、restart=0、OOM=false，SQLite `quick_check=ok`，iCloud 站点 Caddy upstream/5xx 为 0。仅回滚入口时应从 `f40af3c` 重新部署旧 Worker 路由；不要仅执行 Worker version rollback 后假设 route 配置会自动恢复。普通服务器代码回滚不恢复 SQLite，以免丢失迁移后新建 Alias。
 - 2026-08-25：操作员后台解除“最近 50 封”总量限制并新增全档案搜索，生产 Worker 最终版本 `5dcbc4db-8483-4df6-aa53-d90dc867fcd3`，上一版 `ed8fd5ec-26cc-49ff-977c-cbbfc1b9abed` 保留回滚。`GET /api/operator/messages` 保持单页最多 50 封，新增基于 `(received_at, created_at, id)`、不含敏感数据且严格校验格式的游标响应 `next_cursor/has_more`；分页查询使用严格倒序和参数绑定，非法游标返回 422。前端首屏仍只解密最新 50 封，显示“50+ 封”和“加载全部历史邮件”；点击后循环读取全部页。搜索框匹配邮箱、发件人、标题、正文、验证码及附件名，若仍有历史页会自动加载全部后再搜索，解密结果只驻留当前操作员页面内存，不进入 localStorage/sessionStorage，退出或会话失效时立即清空列表和阅读器 DOM。生产候选 `60edb2e9-6f79-4eeb-b4d7-24a595903e42` 在当时 89 封保留邮件上验证真实分页为 `50 + 39`，合计与 D1 精确一致且 0 重复；1440px/390px 后台均从“50+”加载为 89 封，第二页关键词搜索结果正确、清空后恢复 89 行，无横向溢出和控制台错误。26 项 Worker 测试、格式/类型/dry-run、非法游标与三封测试分页合同均通过。
 - 2026-08-25：操作员后台切换为大视野工作台，生产 Worker `ed8fd5ec-26cc-49ff-977c-cbbfc1b9abed`，上一版 `b2e0a597-b331-478b-ab36-2242e4844b61` 保留回滚。登录页仍保持原 1180px 居中排版；成功进入后台后由脚本给 `body` 添加 `operator-active`，将页头压至 72px、页面内边距压至 16px、隐藏页脚，并把工作区宽度扩至最大 1800px/浏览器两侧仅 1–2rem。1440×1000 生产实测工作区从上一版约 `1180×570` 扩至 `1411×822`（占视口 81%），邮件栏保持 400px，新增宽度全部给正文区，正文从 778px 扩至 1009px且同屏邮件从 7 封升至 10 封；1024×768 工作区 `1004×590`、正文 681px、占视口 75%。390px 继续使用上下排列，邮件栏与正文均为 372px 宽，无横向溢出；三个视口控制台错误均为 0。25 项 Worker 测试、格式/类型/dry-run 通过。
 - 2026-08-25：操作员后台邮件栏密度与完整显示修复，生产 Worker `b2e0a597-b331-478b-ab36-2242e4844b61`，上一稳定版 `d9c17ee1-dbb9-45eb-a87d-c391725a6412` 保留回滚。按用户澄清，邮件栏宽度保持原样（1440px 视口仍为 400px，1024px 仍为 319px），只压缩单封邮件行：高度从约 118px 降为 72px，隐藏列表内重复的正文预览，将保留标记放到主题同一行，并让操作员列表使用完整可用高度和栏内滚动。真实生产 50 封邮件验证：1440px 同屏完整显示 7 封、1024px 显示 6 封、390px 显示 4 封，滚动到底最后一封可完整到达；原文阅读区、用户取码页和邮件栏宽度均未改变，三个尺寸横向溢出与控制台错误均为 0。25 项 Worker 测试、格式/类型/dry-run 通过。
