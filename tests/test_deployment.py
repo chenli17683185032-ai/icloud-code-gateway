@@ -34,6 +34,16 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "icloud-code-gateway-app" in overlay
     assert "legacy-browser" in overlay
     assert "ICLOUD_GATEWAY_CDP_URL: ${ICLOUD_GATEWAY_CDP_URL:-}" in overlay
+    assert "BROWSER_PROXY_SERVER: ${BROWSER_PROXY_SERVER:-}" in overlay
+    assert "BROWSER_PROXY_REQUIRED: ${BROWSER_PROXY_REQUIRED:-0}" in overlay
+    assert (
+        "ICLOUD_GATEWAY_HME_PROXY_SERVER: ${ICLOUD_GATEWAY_HME_PROXY_SERVER:-}"
+        in overlay
+    )
+    assert (
+        "ICLOUD_GATEWAY_HME_PROXY_REQUIRED: ${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
+        in overlay
+    )
     assert "condition: service_started" not in overlay
     # Edge still needs the China egress: IMAP inherits the HME proxy there.
     assert "cn-proxy" in overlay
