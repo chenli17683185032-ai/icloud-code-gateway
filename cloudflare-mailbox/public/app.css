@@ -1195,6 +1195,20 @@ body.operator-active #operator-view .mailbox-workspace {
 }
 
 @media (max-width: 520px) {
+  .site-header {
+    gap: 0.6rem;
+  }
+
+  .brand {
+    gap: 0.55rem;
+  }
+
+  .brand strong {
+    font-size: 0.92rem;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+
   .brand small {
     display: none;
   }
@@ -1206,8 +1220,9 @@ body.operator-active #operator-view .mailbox-workspace {
 
   .workspace-switcher a {
     min-height: 38px;
-    padding-inline: 0.68rem;
-    font-size: 0.72rem;
+    padding-inline: 0.55rem;
+    font-size: 0.69rem;
+    white-space: nowrap;
   }
 
   .page-shell {
