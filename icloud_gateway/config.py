@@ -81,6 +81,7 @@ class Settings:
     deployment_mode: Literal["full", "control", "edge"] = "full"
     control_plane_token: str = ""
     edge_base_url: str = ""
+    edge_proxy: str = ""
     edge_sync_enabled: bool = True
     edge_timeout_seconds: int = 20
     # Control mode: periodically reconcile all active aliases/keys to the edge so a
@@ -138,6 +139,10 @@ class Settings:
             hme_proxy = proxy_from_environment("ICLOUD_GATEWAY_HME_PROXY")
         except ProxyConfigurationError as exc:
             raise ConfigurationError("ICLOUD_GATEWAY_HME_PROXY is invalid") from exc
+        try:
+            edge_proxy = proxy_from_environment("ICLOUD_GATEWAY_EDGE_PROXY")
+        except ProxyConfigurationError as exc:
+            raise ConfigurationError("ICLOUD_GATEWAY_EDGE_PROXY is invalid") from exc
         mode = str(os.environ.get("ICLOUD_GATEWAY_DEPLOYMENT_MODE") or "full").strip().casefold()
         if mode not in {"full", "control", "edge"}:
             raise ConfigurationError(
@@ -210,6 +215,7 @@ class Settings:
             deployment_mode=mode,  # type: ignore[arg-type]
             control_plane_token=control_plane_token,
             edge_base_url=edge_base_url,
+            edge_proxy="" if edge_proxy is None else edge_proxy.requests_url,
             edge_sync_enabled=_boolean_environment("ICLOUD_GATEWAY_EDGE_SYNC_ENABLED", True),
             edge_timeout_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_EDGE_TIMEOUT_SECONDS", 20, minimum=3, maximum=120

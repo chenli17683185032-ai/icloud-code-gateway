@@ -34,7 +34,11 @@ class EdgeSyncClient:
         # Local macOS often cannot TLS-direct to Cloudflare; force explicit proxy
         # and ignore ambient HTTP(S)_PROXY so control plane routing is deterministic.
         self.session.trust_env = False
-        proxy_url = str(proxy if proxy is not None else settings.hme_proxy or "").strip()
+        proxy_url = str(
+            proxy
+            if proxy is not None
+            else settings.edge_proxy or settings.hme_proxy or ""
+        ).strip()
         if proxy_url:
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
         else:

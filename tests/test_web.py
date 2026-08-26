@@ -467,6 +467,8 @@ def test_admin_browser_auth_and_dashboard_link(settings, service) -> None:
 
         dashboard = browser_client.get("/admin")
         assert dashboard.status_code == 200
+        assert 'href="/admin/mail/"' in dashboard.text
+        assert "邮件后台" in dashboard.text
         assert "/admin/browser/vnc.html?" in dashboard.text
         assert "打开 iCloud 浏览器" in dashboard.text
 

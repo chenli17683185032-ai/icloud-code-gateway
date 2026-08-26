@@ -120,6 +120,10 @@ describe("worker integration", () => {
     expect(adminScript).toContain("async function loadAllMessages");
     expect(adminScript).toContain("fetchMessagePage");
     expect(adminScript).toContain("messageSearchText");
+
+    const mergedAdminPage = await SELF.fetch("https://example.com/admin/mail/");
+    expect(mergedAdminPage.status).toBe(200);
+    expect(await mergedAdminPage.text()).toContain("隐邮操作台");
     expect(stylesheet).toContain("body.operator-active .page-shell {");
     expect(stylesheet).toContain(
       "width: min(1800px, calc(100% - clamp(1rem, 2vw, 2rem)));",

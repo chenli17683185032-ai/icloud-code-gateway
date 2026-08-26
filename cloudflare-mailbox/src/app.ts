@@ -53,6 +53,16 @@ app.onError((error, context) => {
 
 app.notFound(async (context) => {
   if (
+    context.req.method === "GET" &&
+    ["/admin/mail", "/admin/mail/"].includes(context.req.path)
+  ) {
+    const assetUrl = new URL(context.req.url);
+    assetUrl.pathname = "/admin/index.html";
+    return context.env.ASSETS.fetch(
+      new Request(assetUrl.toString(), context.req.raw),
+    );
+  }
+  if (
     context.req.path.startsWith("/api/") ||
     context.req.path.startsWith("/control/")
   ) {

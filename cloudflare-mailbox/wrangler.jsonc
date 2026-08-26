@@ -11,7 +11,43 @@
       "custom_domain": true,
     },
     {
-      "pattern": "icloud.yunbay.xyz/*",
+      "pattern": "icloud.yunbay.xyz/",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/app.js",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/app.css",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/favicon.svg",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/healthz",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/readyz",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/api/*",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/control/*",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/admin/mail*",
+      "zone_name": "yunbay.xyz",
+    },
+    {
+      "pattern": "icloud.yunbay.xyz/admin/app.js",
       "zone_name": "yunbay.xyz",
     },
   ],

@@ -8,8 +8,10 @@ Usage:
 from __future__ import annotations
 
 import os
+import socket
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -23,6 +25,23 @@ def _load_env_file(path: Path) -> dict[str, str]:
         key, value = raw.split("=", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def _local_proxy_is_listening(proxy_url: str) -> bool:
+    try:
+        parsed = urlsplit(proxy_url)
+        host = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if host not in {"127.0.0.1", "localhost", "::1"} or port is None:
+        return False
+    try:
+        connection = socket.create_connection((host, port), timeout=0.5)
+    except OSError:
+        return False
+    connection.close()
+    return True
 
 
 def main() -> int:
@@ -77,11 +96,23 @@ def main() -> int:
     )
     os.environ["ICLOUD_GATEWAY_EDGE_SYNC_ENABLED"] = "1"
     os.environ["ICLOUD_GATEWAY_COOKIE_SECURE"] = "0"
-    # Critical: local direct TLS to Cloudflare often fails; sync via Clash.
-    os.environ["ICLOUD_GATEWAY_HME_PROXY_SERVER"] = pick(
-        "ICLOUD_GATEWAY_HME_PROXY_SERVER", default="socks5h://127.0.0.1:7897"
-    )
-    os.environ["ICLOUD_GATEWAY_HME_PROXY_REQUIRED"] = "0"
+    # Local direct TLS to Cloudflare can be reset. Prefer FlClash's current 7890
+    # mixed port while retaining compatibility with the older 7897 setup.
+    edge_proxy = pick("ICLOUD_GATEWAY_EDGE_PROXY_SERVER", "ICLOUD_GATEWAY_EDGE_PROXY")
+    if not edge_proxy:
+        edge_proxy = next(
+            (
+                candidate
+                for candidate in (
+                    "socks5h://127.0.0.1:7890",
+                    "socks5h://127.0.0.1:7897",
+                )
+                if _local_proxy_is_listening(candidate)
+            ),
+            "socks5h://127.0.0.1:7890",
+        )
+    os.environ["ICLOUD_GATEWAY_EDGE_PROXY_SERVER"] = edge_proxy
+    os.environ["ICLOUD_GATEWAY_EDGE_PROXY_REQUIRED"] = "0"
 
     from icloud_gateway.config import Settings
     from icloud_gateway.service import GatewayService
@@ -90,7 +121,7 @@ def main() -> int:
     service = GatewayService(settings, start_maintenance=False)
     print("data_dir:", settings.data_dir)
     print("edge:", settings.edge_base_url)
-    print("proxy:", settings.hme_proxy or "(none)")
+    print("edge_proxy:", settings.edge_proxy or "(none)")
     print("edge_sync_enabled:", settings.edge_sync_enabled)
     print("pushing local access keys ...")
     result = service.push_all_access_keys_to_edge()

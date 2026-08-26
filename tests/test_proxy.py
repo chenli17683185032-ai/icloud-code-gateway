@@ -170,8 +170,11 @@ def test_settings_loads_hme_proxy_and_rejects_missing_required_proxy(
     monkeypatch.setenv("ICLOUD_GATEWAY_HME_PROXY_USERNAME", "user")
     monkeypatch.setenv("ICLOUD_GATEWAY_HME_PROXY_PASSWORD", "pass")
     monkeypatch.setenv("ICLOUD_GATEWAY_HME_PROXY_REQUIRED", "1")
+    monkeypatch.setenv("ICLOUD_GATEWAY_EDGE_PROXY_SERVER", "socks5h://127.0.0.1:7890")
 
-    assert Settings.from_environment().hme_proxy == "http://user:pass@proxy.example:8080"
+    settings = Settings.from_environment()
+    assert settings.hme_proxy == "http://user:pass@proxy.example:8080"
+    assert settings.edge_proxy == "socks5h://127.0.0.1:7890"
 
     monkeypatch.delenv("ICLOUD_GATEWAY_HME_PROXY_SERVER")
     with pytest.raises(ConfigurationError):

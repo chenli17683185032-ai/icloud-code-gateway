@@ -33,7 +33,7 @@ def test_shared_server_overlay_keeps_caddy_and_proxy_boundaries_separate() -> No
     assert "external: true" in overlay
     assert "icloud-code-gateway-app" in overlay
     assert "legacy-browser" in overlay
-    assert 'ICLOUD_GATEWAY_CDP_URL: ""' in overlay
+    assert "ICLOUD_GATEWAY_CDP_URL: ${ICLOUD_GATEWAY_CDP_URL:-}" in overlay
     assert "condition: service_started" not in overlay
     # Edge still needs the China egress: IMAP inherits the HME proxy there.
     assert "cn-proxy" in overlay
@@ -79,6 +79,31 @@ def test_compose_passes_maintenance_and_batch_environment_to_app() -> None:
         assert interpolation in server
 
 
+def test_cloudflare_routes_leave_control_admin_and_static_assets_on_vps() -> None:
+    config = (
+        Path(__file__).resolve().parents[1]
+        / "cloudflare-mailbox"
+        / "wrangler.jsonc"
+    ).read_text()
+
+    assert '"pattern": "icloud.yunbay.xyz/*"' not in config
+    for pattern in (
+        "icloud.yunbay.xyz/",
+        "icloud.yunbay.xyz/app.js",
+        "icloud.yunbay.xyz/app.css",
+        "icloud.yunbay.xyz/favicon.svg",
+        "icloud.yunbay.xyz/healthz",
+        "icloud.yunbay.xyz/readyz",
+        "icloud.yunbay.xyz/api/*",
+        "icloud.yunbay.xyz/control/*",
+        "icloud.yunbay.xyz/admin/mail*",
+        "icloud.yunbay.xyz/admin/app.js",
+    ):
+        assert f'"pattern": "{pattern}"' in config
+    assert '"pattern": "icloud.yunbay.xyz/admin*"' not in config
+    assert '"pattern": "icloud.yunbay.xyz/static/*"' not in config
+
+
 def test_app_does_not_depend_on_the_browser_so_the_edge_profile_can_drop_it() -> None:
     root = Path(__file__).resolve().parents[1]
     base = (root / "docker-compose.yml").read_text()
@@ -95,10 +120,14 @@ def test_local_control_only_auto_enables_a_live_proxy() -> None:
         Path(__file__).resolve().parents[1] / "scripts" / "run-local-control.sh"
     ).read_text()
 
-    assert 'local_proxy_is_listening "$HME_PROXY_DEFAULT"' in launcher
-    assert 'export ICLOUD_GATEWAY_HME_PROXY_SERVER="$HME_PROXY_DEFAULT"' in launcher
+    assert '"socks5h://127.0.0.1:7890"' in launcher
+    assert '"socks5h://127.0.0.1:7897"' in launcher
+    assert 'LIVE_LOCAL_PROXY="$(find_live_local_proxy || true)"' in launcher
+    assert 'export ICLOUD_GATEWAY_HME_PROXY_SERVER="$LIVE_LOCAL_PROXY"' in launcher
+    assert 'export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$LIVE_LOCAL_PROXY"' in launcher
+    assert 'export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$EDGE_PROXY_DEFAULT"' in launcher
     assert (
-        'ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$HME_PROXY_DEFAULT}"'
+        'ICLOUD_GATEWAY_HME_PROXY_SERVER="${ICLOUD_GATEWAY_HME_PROXY_SERVER:-$EDGE_PROXY_DEFAULT}"'
         not in launcher
     )
     assert 'read_env ICLOUD_GATEWAY_EDGE_BASE_URL "$CREDS_FILE"' in launcher
@@ -106,6 +135,17 @@ def test_local_control_only_auto_enables_a_live_proxy() -> None:
     assert 'export ICLOUD_GATEWAY_PUBLIC_BASE_URL="$PUBLIC_URL"' in launcher
     assert 'read_env ICLOUD_GATEWAY_IMAP_ENABLED "$CREDS_FILE"' in launcher
     assert "Cloudflare Email Worker 接管" in launcher
+
+
+def test_manual_edge_sync_prefers_current_flclash_port() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "sync-local-keys-to-edge.py"
+    ).read_text()
+
+    assert '"socks5h://127.0.0.1:7890"' in script
+    assert '"socks5h://127.0.0.1:7897"' in script
+    assert 'os.environ["ICLOUD_GATEWAY_EDGE_PROXY_SERVER"] = edge_proxy' in script
+    assert 'os.environ["ICLOUD_GATEWAY_HME_PROXY_SERVER"]' not in script
 
 
 def test_edge_browser_cleanup_is_scoped_and_preserves_recovery_assets() -> None:

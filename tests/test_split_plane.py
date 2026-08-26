@@ -181,6 +181,23 @@ class _FakeSession:
         return _FakeResponse()
 
 
+def test_edge_sync_prefers_dedicated_edge_proxy(tmp_path: Path):
+    fake = _FakeSession()
+    settings = _settings(
+        tmp_path,
+        hme_proxy="socks5h://127.0.0.1:7897",
+        edge_proxy="socks5h://127.0.0.1:7890",
+    )
+
+    EdgeSyncClient(settings, session=fake)
+
+    assert fake.trust_env is False
+    assert fake.proxies == {
+        "http": "socks5h://127.0.0.1:7890",
+        "https": "socks5h://127.0.0.1:7890",
+    }
+
+
 def test_control_plane_pushes_issued_key_to_edge(tmp_path: Path):
     fake = _FakeSession()
     settings = _settings(

@@ -31,7 +31,11 @@ ADMIN_URL="http://${APP_HOST}:${APP_PORT}/admin"
 EDGE_URL_DEFAULT="https://icloud.yunbay.xyz"
 EDGE_URL="${ICLOUD_GATEWAY_EDGE_BASE_URL:-}"
 PUBLIC_URL="${ICLOUD_GATEWAY_PUBLIC_BASE_URL:-}"
-HME_PROXY_DEFAULT="socks5h://127.0.0.1:7897"
+LOCAL_PROXY_CANDIDATES=(
+  "socks5h://127.0.0.1:7890"
+  "socks5h://127.0.0.1:7897"
+)
+EDGE_PROXY_DEFAULT="${LOCAL_PROXY_CANDIDATES[1]}"
 
 pick_bootstrap_python() {
   local candidates=(
@@ -134,6 +138,17 @@ except OSError:
     raise SystemExit(1)
 connection.close()
 PY
+}
+
+find_live_local_proxy() {
+  local proxy_url
+  for proxy_url in "${LOCAL_PROXY_CANDIDATES[@]}"; do
+    if local_proxy_is_listening "$proxy_url"; then
+      print -r -- "$proxy_url"
+      return 0
+    fi
+  done
+  return 1
 }
 
 ensure_venv() {
@@ -315,19 +330,33 @@ export ICLOUD_GATEWAY_LOG_LEVEL=INFO
 export ICLOUD_GATEWAY_ALIAS_BATCH_LIMIT=100
 # 无 Docker 不走远程 CDP；清空避免误连 docker 主机名
 export ICLOUD_GATEWAY_CDP_URL=""
-# 本机 Clash 回国代理。只有端口真的在线时才自动启用默认代理；否则
+# 本机 Clash 回国代理。只有端口真的在线时才自动启用代理；否则
 # requests 会在“浏览器已捕获 Session”之后卡死/失败，造成误导性的捕获错误。
 # 显式传入的代理仍原样保留，便于有代理需求的环境自行控制。
+LIVE_LOCAL_PROXY="$(find_live_local_proxy || true)"
 if [[ -n "${ICLOUD_GATEWAY_HME_PROXY_SERVER:-}" || -n "${ICLOUD_GATEWAY_HME_PROXY:-}" ]]; then
   echo "HME 网络：使用显式代理配置"
-elif local_proxy_is_listening "$HME_PROXY_DEFAULT"; then
-  export ICLOUD_GATEWAY_HME_PROXY_SERVER="$HME_PROXY_DEFAULT"
-  echo "HME 网络：检测到本机代理，已启用"
+elif [[ -n "$LIVE_LOCAL_PROXY" ]]; then
+  export ICLOUD_GATEWAY_HME_PROXY_SERVER="$LIVE_LOCAL_PROXY"
+  echo "HME 网络：检测到本机代理 ${LIVE_LOCAL_PROXY}，已启用"
 else
   unset ICLOUD_GATEWAY_HME_PROXY_SERVER 2>/dev/null || true
   echo "HME 网络：本机代理未运行，自动直连 Apple"
 fi
 export ICLOUD_GATEWAY_HME_PROXY_REQUIRED="${ICLOUD_GATEWAY_HME_PROXY_REQUIRED:-0}"
+
+# Cloudflare 在当前本地网络直连可能被重置，因此 edge 同步使用独立代理。
+# 即使启动时 FlClash 尚未监听，也保留 7890：代理稍后恢复后，后台对账可自动自愈。
+if [[ -n "${ICLOUD_GATEWAY_EDGE_PROXY_SERVER:-}" || -n "${ICLOUD_GATEWAY_EDGE_PROXY:-}" ]]; then
+  echo "Edge 网络：使用显式代理配置"
+elif [[ -n "$LIVE_LOCAL_PROXY" ]]; then
+  export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$LIVE_LOCAL_PROXY"
+  echo "Edge 网络：检测到本机代理 ${LIVE_LOCAL_PROXY}，已启用"
+else
+  export ICLOUD_GATEWAY_EDGE_PROXY_SERVER="$EDGE_PROXY_DEFAULT"
+  echo "Edge 网络：等待本机代理 ${EDGE_PROXY_DEFAULT} 恢复"
+fi
+export ICLOUD_GATEWAY_EDGE_PROXY_REQUIRED="${ICLOUD_GATEWAY_EDGE_PROXY_REQUIRED:-0}"
 
 
 # 可选：本地 control 直接启用 IMAP 取码（列表行显示验证码）
