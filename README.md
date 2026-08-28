@@ -221,6 +221,6 @@ uv run python -m compileall -q icloud_gateway tests
 - 不保存或自动填写 Apple ID 密码、2FA 码、恢复密钥。
 - 不向普通使用者开放收件箱、邮件正文、Alias 列表或 iCloud 管理能力。
 - 不自动执行真实 HME Alias 生命周期操作；仅支持管理员显式选择最多 100 条后批量停用或永久删除。网关严格串行写入、逐条读取 Apple 状态确认并返回逐项结果；永久删除仅允许失活项且需要二次确认。
-- 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve。Apple 返回 `-41015` 时按开源同款逻辑冷却 30 分钟（`ICLOUD_GATEWAY_HME_CREATE_COOLDOWN_SECONDS=1800`）后自动续跑。reserve 断线时先用已持久化的候选邮箱读取完整 HME 列表：精确命中则补齐本地结果，可信快照明确未命中才重试同一候选，列表暂不可用则退避等待；停用、删除等破坏性写结果未知时仍停止自动重放。
+- 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve。Apple 返回 `-41015` 时按开源同款逻辑冷却 30 分钟（`ICLOUD_GATEWAY_HME_CREATE_COOLDOWN_SECONDS=1800`）后自动续跑。reserve 断线时先用已持久化的候选邮箱读取完整 HME 列表：精确命中则补齐本地结果，网络丢响应且可信快照明确未命中才重试同一候选；Apple 明确限额/拒绝且快照确认未创建时丢弃可能过期的候选，冷却或退避后重新 generate。列表暂不可用则保持 queued；停用、删除等破坏性写结果未知时仍停止自动重放。
 - 不共享联动小铺正在运行的 Chromium 进程/profile。
 - 不保证 Apple Session 永不过期；过期后管理员通过网站中的同一个浏览器重新登录维护。

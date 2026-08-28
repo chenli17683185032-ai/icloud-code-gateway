@@ -1017,12 +1017,12 @@ class BatchJobManager:
                                 candidate, label=values["label"], note=values["note"]
                             )
                         except HmeRateLimitedError as exc:
-                            # generate already succeeded; hold the candidate and cool down.
+                            # Apple's explicit quota response confirms reserve did not happen.
+                            # A generated suggestion may expire during a long cooldown, so
+                            # discard it and generate a fresh candidate after the wait.
                             self._pause_for_rate_limit(
                                 job_id=job_id,
-                                item=self._candidate_item(
-                                    item, candidate, reconcile_before_reserve=False
-                                ),
+                                item=self._candidate_item(item, "", reconcile_before_reserve=False),
                                 code=exc.code,
                                 retry_after_seconds=exc.retry_after_seconds,
                             )
@@ -1039,22 +1039,27 @@ class BatchJobManager:
                                     remote=reconciled,
                                 )
                             else:
+                                regenerate_candidate = resolution == "absent" and not isinstance(
+                                    exc, (HmeNetworkError, HmeSessionError)
+                                )
                                 retry_item = self._candidate_item(
-                                    item, candidate, reconcile_before_reserve=True
+                                    item,
+                                    "" if regenerate_candidate else candidate,
+                                    reconcile_before_reserve=not regenerate_candidate,
                                 )
                                 if isinstance(exc, HmeSessionError):
                                     retry_kind = "session"
                                 elif isinstance(exc, HmeNetworkError):
                                     retry_kind = "network"
                                 else:
-                                    retry_kind = "remote"
-                                if resolution == "absent":
+                                    retry_kind = "remote_rejected"
+                                if resolution == "absent" and not regenerate_candidate:
                                     retry_kind = "reserve_unconfirmed"
                                 self._pause_for_transient_retry(
                                     job_id=job_id,
                                     item=retry_item,
                                     retry_kind=retry_kind,
-                                    reconcile_before_reserve=True,
+                                    reconcile_before_reserve=not regenerate_candidate,
                                 )
                                 return "retry"
                         else:

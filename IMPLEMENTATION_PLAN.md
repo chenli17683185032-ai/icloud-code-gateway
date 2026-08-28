@@ -2170,7 +2170,7 @@ Alias 邮箱按钮
 用户要求“一次生成 50 个邮箱”不能在成功 4～5 项后因网络或 Session 断线直接终止。修复仍保持 Apple 写操作不盲重放：
 
 - generate 候选继续加密持久化；reserve 响应丢失后先读取并校验完整 HME 快照。
-- 候选精确存在时把该项补齐为成功，不再次 reserve；可信快照明确不存在时，退避后再次对账，再重试同一候选。
+- 候选精确存在时把该项补齐为成功，不再次 reserve；网络丢响应且可信快照明确不存在时，退避后再次对账，再重试同一候选。Apple 明确限额/拒绝且快照确认未创建时丢弃可能过期的候选，重新 generate。
 - HME list、Session 或网络暂不可用时，项目保持 queued 并指数退避，不转为整批终态。
 - 进程在 generating 阶段中断可安全重做 generate；在已有候选的 reserving 阶段中断改为 reconciling 后恢复。
 - 停用、恢复、永久删除等破坏性操作继续沿用 unknown/needs_reconcile，不扩大自动重试范围。

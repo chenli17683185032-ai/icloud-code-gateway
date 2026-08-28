@@ -8,7 +8,7 @@ import pytest
 
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, Database
-from icloud_gateway.hme import HmeNetworkError, HmeRateLimitedError, ICloudHmeSession
+from icloud_gateway.hme import HmeError, HmeNetworkError, HmeRateLimitedError, ICloudHmeSession
 from icloud_gateway.jobs import BatchJobManager, request_fingerprint
 from icloud_gateway.security import SecretBox
 from icloud_gateway.service import (
@@ -235,6 +235,38 @@ class _Gateway:
     def deactivate_alias(self, _alias_id):
         self.calls += 1
         raise GatewayError("confirmation failed after remote write")
+
+
+def _gateway_with_saved_session(tmp_path, client_factory) -> GatewayService:
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=client_factory,
+        start_maintenance=False,
+    )
+    gateway.database.set_secret(
+        "hme_session",
+        ICloudHmeSession(
+            host="p123-maildomainws.icloud.com.cn",
+            dsid="123",
+            client_id="client",
+            client_build_number="build",
+            client_mastering_number="master",
+            cookie=(
+                "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+                "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+            ),
+            origin="https://www.icloud.com.cn",
+            referer="https://www.icloud.com.cn/icloudplus/",
+        ).as_secret_dict(),
+    )
+    gateway._last_validated_ts = gateway.clock()
+    return gateway
 
 
 def test_reconciliation_job_remains_visible_with_normalized_item_error(
@@ -818,6 +850,128 @@ def test_unavailable_reconciliation_keeps_create_item_queued_without_candidate_l
         assert public["retry_after_seconds"] >= 0
         assert "candidate" not in public["results"][0]
         assert "reconcile_before_reserve" not in public["results"][0]
+    finally:
+        gateway.shutdown()
+
+
+def test_explicit_reserve_rejection_regenerates_after_absent_snapshot(tmp_path) -> None:
+    remote: list[dict[str, object]] = []
+    generated: list[str] = []
+    reserved: list[str] = []
+
+    class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            return list(remote)
+
+        def generate_alias(self):
+            candidate = f"candidate-{len(generated) + 1}@icloud.com"
+            generated.append(candidate)
+            return candidate
+
+        def reserve_alias(self, candidate, *, label, note):
+            reserved.append(candidate)
+            if len(reserved) == 1:
+                raise HmeError("generated candidate was rejected")
+            created = {
+                "hme": candidate,
+                "anonymousId": candidate,
+                "isActive": True,
+                "label": label,
+                "note": note,
+            }
+            remote.append(created)
+            return created
+
+    gateway = _gateway_with_saved_session(tmp_path, Client)
+    manager = BatchJobManager(
+        gateway,
+        throttle_seconds=0,
+        transient_retry_base_seconds=0,
+        transient_retry_max_seconds=0,
+    )
+    job, _created = manager.create_alias_job(
+        count=1,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "completed"
+        assert current["succeeded"] == 1
+        assert generated == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
+        assert reserved == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
+        assert [item["hme"] for item in remote] == ["candidate-2@icloud.com"]
+    finally:
+        gateway.shutdown()
+
+
+def test_reserve_rate_limit_discards_candidate_before_cooldown_retry(tmp_path) -> None:
+    remote: list[dict[str, object]] = []
+    generated: list[str] = []
+    reserved: list[str] = []
+
+    class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            return list(remote)
+
+        def generate_alias(self):
+            candidate = f"candidate-{len(generated) + 1}@icloud.com"
+            generated.append(candidate)
+            return candidate
+
+        def reserve_alias(self, candidate, *, label, note):
+            reserved.append(candidate)
+            if len(reserved) == 1:
+                raise HmeRateLimitedError(code="-41015", retry_after_seconds=0)
+            created = {
+                "hme": candidate,
+                "anonymousId": candidate,
+                "isActive": True,
+                "label": label,
+                "note": note,
+            }
+            remote.append(created)
+            return created
+
+    gateway = _gateway_with_saved_session(tmp_path, Client)
+    manager = BatchJobManager(
+        gateway,
+        throttle_seconds=0,
+        rate_limit_cooldown_seconds=0,
+        transient_retry_base_seconds=0,
+        transient_retry_max_seconds=0,
+    )
+    job, _created = manager.create_alias_job(
+        count=1,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "completed"
+        assert current["succeeded"] == 1
+        assert generated == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
+        assert reserved == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
     finally:
         gateway.shutdown()
 
