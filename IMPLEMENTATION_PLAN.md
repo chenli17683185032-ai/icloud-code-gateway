@@ -2189,7 +2189,16 @@ Alias 邮箱按钮
 - [x] B：新增候选精确对账、瞬时故障退避、重启恢复和显式历史任务恢复状态机。
 - [x] C：新增 50 项 fake HME 故障注入；第 6 次 reserve 丢失响应后最终 50/50，失败候选只远端创建一次。
 - [x] D：新增“远端已成功但响应丢失”测试，确认只读命中后 reserve 调用总数仍为 1；新增列表不可用时 queued、内部候选不出现在 API 的测试。
-- [ ] E：全量测试、Ruff/format、Python/JS 语法、Compose、diff 和秘密扫描。
-- [ ] F：建立服务器 2 SQLite/源码/marker/旧镜像回滚点，隔离候选验证后由独立 watchdog 只替换 app。
-- [ ] G：部署后验证在途冷却任务仍 queued/自动续跑，显式恢复本次 50 项任务并观察到完成或继续处于限额/瞬时等待，而不是 needs_reconcile。
-- [ ] H：更新 `OPERATIONS.md`、服务器 2 唯一维护记录与 GitHub `main`，清理候选资源和本地临时件。
+- [x] E：全量测试、Ruff/format、Python/JS 语法、Compose、diff 和秘密扫描。
+- [x] F：建立服务器 2 SQLite/源码/marker/旧镜像回滚点，隔离候选验证后由独立 watchdog 只替换 app。
+- [x] G：部署后验证在途冷却任务仍 queued/自动续跑，显式恢复本次 50 项任务并观察到继续处于限额等待，而不是 needs_reconcile。
+- [x] H：更新 `OPERATIONS.md`、服务器 2 唯一维护记录与 GitHub `main`，清理候选资源和本地临时件。
+
+### 28.4 部署与生产闭环
+
+- 最终代码谱系为 `6a4f5b7`（候选精确对账与退避）、`5343942`（明确拒绝后重新 generate）、`9873bad`（限额后刷新候选）和 `7645ac8`（兼容已过期的旧限额等待）。最终门禁为 292 项 Python 测试、26 项 Worker 测试、Ruff lint/format、Python/JS/TypeScript、两套 Compose、diff 与秘密扫描全部通过。
+- 第一阶段镜像 `877ff9cc5418…` 在生产 SQLite 副本、断网候选容器和 fake HME 50/50 闭环通过，watchdog 16 秒只替换 app；随后显式恢复最新 50 项任务，Apple list 再次确认保存候选不存在且快照覆盖全部本地远端 ID。任务从旧 `needs_reconcile / 1 unknown / 49 queued` 变为 `queued / 0 failed / 50 queued`，其他 27 个历史 reconcile 任务未恢复。
+- 现场发现该旧候选来自限额冷却前，连续 reserve 后再次返回 `-41015`。最终补丁在生产库副本上验证：旧 `waiting_quota` 候选先清除，再生成 50 个 fresh fake 候选并完成 50/50；最终镜像 `76161f7d8fc3…` 由第二个独立 watchdog 在 28 秒接受，marker/`latest`/`prod`/`release-7645ac8` 均固定到 `7645ac8e77df6098e3a423f81125f57cf3106f1e`。
+- 生产真实冷却到期时，目标任务先从 `candidate_present=true` 变为 running 且 `candidate_present=false`，随后 fresh candidate 的 reserve 再次被 Apple 限额；新版本立即丢弃该候选并进入下一轮 `queued + rate_limited`，`failed=0`、`candidate_present=false`、没有回到 unknown/needs_reconcile。系统继续后台续跑，不绕过 Apple 30 分钟配额。
+- 最终 SQLite `quick_check=ok`：695 Alias、677 active、417 keyed、5776 audit、198 job、1023 item、2 setting。app `5f61348c5df3…` healthy/restart=0/OOM=false；browser `4a82fe724d2a…`、cn-proxy `289f56a88201…`、Caddy `7905a1baa633…` ID 未变。稳定期管理入口 20/20 为 200，app 严重日志和最近 Caddy 5xx/error 均为 0。
+- 最终审计目录 `/opt/new-api/icloud-code-gateway/backups/batch-resume-final-20260828T203630Z-7645ac8`，清单 SHA-256 为 `8d5f403dc212992bc5d6f678bceebca9659fcd8646edd4088703a846e6ca56a3`；第一阶段审计目录清单为 `5b49c86ea09befe0954621c60c4b678f83e4175981609142568395db5ab565e6`。候选容器、卷、标签、staging 和未切换的 `9873bad` 预检目录均已清理为 0。
