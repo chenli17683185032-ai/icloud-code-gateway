@@ -1207,14 +1207,26 @@ def test_legacy_rate_limit_wait_discards_saved_reserve_candidate(
         },
         error="rate_limited:-41015",
     )
-    item = database.get_batch_job(job["id"])["items"][0]
+    observed_results: list[object] = []
 
-    cleared = manager._clear_rate_limit_wait(job["id"], item)
+    def run_item(_job, item):
+        observed_results.append(item["result"])
+        database.update_batch_item(
+            job["id"],
+            item["index"],
+            stage="completed",
+            status="success",
+            alias_id="replacement",
+            result={"id": "replacement"},
+        )
+        return "ok"
 
-    assert cleared["stage"] == "queued"
-    assert cleared["status"] == "queued"
-    assert cleared["result"] == {}
-    assert cleared["error"] is None
+    manager._run_item = run_item
+    manager._run_job(database.get_batch_job(job["id"]))
+
+    current = database.get_batch_job(job["id"])
+    assert current["status"] == "completed"
+    assert observed_results == [{}]
 
 
 def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(

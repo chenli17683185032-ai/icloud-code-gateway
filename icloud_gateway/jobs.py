@@ -649,6 +649,14 @@ class BatchJobManager:
                 job = self.database.get_batch_job(job["id"])
                 # Retry the same item after cooldown metadata is cleared.
                 continue
+            if (
+                isinstance(item.get("result"), Mapping)
+                and str(item["result"].get("wait_reason") or "") == "rate_limited"
+            ):
+                self.database.set_batch_job_status(job["id"], "running", error=None)
+                item = self._clear_rate_limit_wait(job["id"], item)
+                job = self.database.get_batch_job(job["id"])
+                continue
             if self._item_is_retrying(item):
                 result = item.get("result") if isinstance(item.get("result"), Mapping) else {}
                 resume_at = str(result.get("resume_at") or "")
