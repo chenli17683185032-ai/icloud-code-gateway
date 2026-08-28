@@ -1181,6 +1181,42 @@ def test_rate_limited_generate_keeps_item_queued_for_resume(database: Database, 
     assert public["retry_after_seconds"] >= 0
 
 
+def test_legacy_rate_limit_wait_discards_saved_reserve_candidate(
+    database: Database, tmp_path
+) -> None:
+    gateway = _Gateway(database, tmp_path)
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = database.create_batch_job(
+        kind="create_aliases",
+        action="create",
+        fingerprint=b"l" * 32,
+        items=[{"label": "Team", "note": "", "sender_filter": ""}],
+    )
+    database.update_batch_item(
+        job["id"],
+        1,
+        stage="waiting_quota",
+        status="queued",
+        result={
+            "candidate": "expired@icloud.com",
+            "reconcile_before_reserve": True,
+            "wait_reason": "rate_limited",
+            "resume_at": "2000-01-01T00:00:00.000Z",
+            "code": "-41015",
+            "retry_after_seconds": 1800,
+        },
+        error="rate_limited:-41015",
+    )
+    item = database.get_batch_job(job["id"])["items"][0]
+
+    cleared = manager._clear_rate_limit_wait(job["id"], item)
+
+    assert cleared["stage"] == "queued"
+    assert cleared["status"] == "queued"
+    assert cleared["result"] == {}
+    assert cleared["error"] is None
+
+
 def test_ten_item_job_reports_five_success_one_unknown_and_four_queued(
     database: Database, tmp_path
 ) -> None:

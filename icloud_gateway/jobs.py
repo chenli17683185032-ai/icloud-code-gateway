@@ -398,9 +398,19 @@ class BatchJobManager:
         cleaned = {
             key: value
             for key, value in result.items()
-            if key not in {"wait_reason", "resume_at", "code", "retry_after_seconds"}
+            if key
+            not in {
+                "candidate",
+                "reconcile_before_reserve",
+                "wait_reason",
+                "resume_at",
+                "code",
+                "retry_after_seconds",
+            }
         }
-        # Keep any generated candidate across the cooldown window.
+        # A candidate can only be present here when reserve returned an explicit
+        # rate-limit response. Apple therefore did not create it, and the suggestion
+        # may expire during a long cooldown. Always generate a fresh one afterward.
         # Always write a result payload so COALESCE does not leave wait metadata behind.
         self.database.update_batch_item(
             job_id,
