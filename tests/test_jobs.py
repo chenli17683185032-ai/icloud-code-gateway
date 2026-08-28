@@ -8,7 +8,7 @@ import pytest
 
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, Database
-from icloud_gateway.hme import HmeRateLimitedError, ICloudHmeSession
+from icloud_gateway.hme import HmeNetworkError, HmeRateLimitedError, ICloudHmeSession
 from icloud_gateway.jobs import BatchJobManager, request_fingerprint
 from icloud_gateway.security import SecretBox
 from icloud_gateway.service import (
@@ -111,6 +111,78 @@ def test_interrupted_running_item_requires_reconciliation_and_is_not_requeued(
     assert recovered["items"][0]["status"] == "unknown"
     assert recovered["items"][1]["status"] == "queued"
     assert database.next_batch_job() is None
+
+
+def test_interrupted_create_candidate_is_requeued_for_read_reconciliation(
+    database: Database,
+) -> None:
+    job, _created = database.create_batch_job(
+        kind="create_aliases",
+        action="create",
+        fingerprint=b"k" * 32,
+        items=[
+            {"label": "Team 1", "note": "", "sender_filter": ""},
+            {"label": "Team 2", "note": "", "sender_filter": ""},
+        ],
+    )
+    database.update_batch_item(
+        job["id"],
+        1,
+        stage="generated",
+        status="queued",
+        result={"candidate": "saved@icloud.com"},
+    )
+    database.update_batch_item(job["id"], 1, stage="reserving", status="running")
+    database.set_batch_job_status(job["id"], "running")
+
+    database.recover_interrupted_batch_jobs()
+
+    recovered = database.get_batch_job(job["id"])
+    assert recovered["status"] == "queued"
+    assert recovered["current"] == 0
+    assert recovered["items"][0]["status"] == "queued"
+    assert recovered["items"][0]["stage"] == "reconciling"
+    assert recovered["items"][0]["result"] == {
+        "candidate": "saved@icloud.com",
+        "reconcile_before_reserve": True,
+    }
+    assert recovered["items"][1]["status"] == "queued"
+    assert database.next_batch_job()["id"] == job["id"]
+
+
+def test_stopped_create_job_only_resumes_after_explicit_candidate_reconciliation(
+    database: Database,
+) -> None:
+    job, _created = database.create_batch_job(
+        kind="create_aliases",
+        action="create",
+        fingerprint=b"m" * 32,
+        items=[
+            {"label": "Team 1", "note": "", "sender_filter": ""},
+            {"label": "Team 2", "note": "", "sender_filter": ""},
+        ],
+    )
+    database.update_batch_item(
+        job["id"],
+        1,
+        stage="unknown",
+        status="unknown",
+        result={"candidate": "saved@icloud.com"},
+        error="remote write outcome is unknown",
+    )
+    database.set_batch_job_status(job["id"], "needs_reconcile")
+
+    assert database.next_batch_job() is None
+
+    resumed = database.resume_reconcilable_create_job(job["id"])
+
+    assert resumed["status"] == "queued"
+    assert resumed["current"] == 0
+    assert resumed["items"][0]["status"] == "queued"
+    assert resumed["items"][0]["stage"] == "reconciling"
+    assert resumed["items"][0]["result"]["reconcile_before_reserve"] is True
+    assert resumed["items"][1]["status"] == "queued"
+    assert database.next_batch_job()["id"] == job["id"]
 
 
 def test_completed_items_survive_restart_without_secret_job_results(database: Database) -> None:
@@ -584,37 +656,264 @@ def test_stale_client_cookie_cannot_overwrite_a_newer_saved_session(tmp_path) ->
         gateway.shutdown()
 
 
-def test_reserve_failure_is_unknown_and_stops_replay(database: Database, tmp_path) -> None:
-    gateway = _Gateway(database, tmp_path)
-    gateway._remote_write_active = False
-    gateway._hme_lock = threading.RLock()
-    gateway._begin_remote_write = lambda: setattr(gateway, "_remote_write_active", True)
-    gateway._finish_remote_write = lambda: setattr(gateway, "_remote_write_active", False)
-    gateway._ensure_hme_fresh = lambda: None
-    gateway.get_hme_session = lambda: object()
-    gateway._close_client = lambda _client: None
-    gateway._persist_rotated_hme_session = lambda _original, _candidate: False
+def test_lost_reserve_response_is_reconciled_without_duplicate_write(tmp_path) -> None:
+    remote: list[dict[str, object]] = []
+    reserve_calls = 0
+    list_calls = 0
 
     class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            nonlocal list_calls
+            list_calls += 1
+            return list(remote)
+
         def generate_alias(self):
             return "candidate@icloud.com"
 
         def reserve_alias(self, candidate, *, label, note):
-            raise RuntimeError("connection lost after request")
+            nonlocal reserve_calls
+            reserve_calls += 1
+            created = {
+                "hme": candidate,
+                "anonymousId": "candidate",
+                "isActive": True,
+                "label": label,
+                "note": note,
+            }
+            remote.append(created)
+            raise HmeNetworkError("connection lost after request")
 
-    gateway.hme_client_factory = lambda _session: Client()
-    job, _created = database.create_batch_job(
-        kind="create_aliases",
-        action="create",
-        fingerprint=b"r" * 32,
-        items=[{"label": "Team", "note": "", "sender_filter": ""}],
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=Client,
+        start_maintenance=False,
     )
-    item = database.get_batch_job(job["id"])["items"][0]
+    gateway.database.set_secret(
+        "hme_session",
+        ICloudHmeSession(
+            host="p123-maildomainws.icloud.com.cn",
+            dsid="123",
+            client_id="client",
+            client_build_number="build",
+            client_mastering_number="master",
+            cookie=(
+                "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+                "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+            ),
+            origin="https://www.icloud.com.cn",
+            referer="https://www.icloud.com.cn/icloudplus/",
+        ).as_secret_dict(),
+    )
+    gateway._last_validated_ts = gateway.clock()
+    manager = BatchJobManager(
+        gateway,
+        throttle_seconds=0,
+        transient_retry_base_seconds=0,
+        transient_retry_max_seconds=0,
+    )
+    job, _created = manager.create_alias_job(
+        count=1,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
 
-    assert BatchJobManager(gateway)._create_alias(item, job_id=job["id"]) == "unknown"
-    recovered = database.get_batch_job(job["id"])["items"][0]
-    assert recovered["status"] == "unknown"
-    assert recovered["result"] == {"candidate": "candidate@icloud.com"}
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "completed"
+        assert current["succeeded"] == 1
+        assert reserve_calls == 1
+        assert list_calls == 1
+        assert len(remote) == 1
+    finally:
+        gateway.shutdown()
+
+
+def test_unavailable_reconciliation_keeps_create_item_queued_without_candidate_leak(
+    tmp_path,
+) -> None:
+    class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            raise HmeNetworkError("read path unavailable")
+
+        def generate_alias(self):
+            return "candidate@icloud.com"
+
+        def reserve_alias(self, candidate, *, label, note):
+            raise HmeNetworkError("connection lost after request")
+
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=Client,
+        start_maintenance=False,
+    )
+    gateway.database.set_secret(
+        "hme_session",
+        ICloudHmeSession(
+            host="p123-maildomainws.icloud.com.cn",
+            dsid="123",
+            client_id="client",
+            client_build_number="build",
+            client_mastering_number="master",
+            cookie=(
+                "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+                "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+            ),
+            origin="https://www.icloud.com.cn",
+            referer="https://www.icloud.com.cn/icloudplus/",
+        ).as_secret_dict(),
+    )
+    gateway._last_validated_ts = gateway.clock()
+    manager = BatchJobManager(
+        gateway,
+        throttle_seconds=0,
+        transient_retry_base_seconds=60,
+        transient_retry_max_seconds=60,
+    )
+    job, _created = manager.create_alias_job(
+        count=1,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        item = gateway.database.get_batch_job(job["id"])["items"][0]
+
+        assert manager._create_alias(item, job_id=job["id"]) == "retry"
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "queued"
+        assert current["items"][0]["status"] == "queued"
+        assert current["items"][0]["stage"] == "waiting_reconcile"
+        public = manager.public_job(job["id"])
+        assert public["wait_reason"] == "transient_error"
+        assert public["retry_kind"] == "network"
+        assert public["retry_after_seconds"] >= 0
+        assert "candidate" not in public["results"][0]
+        assert "reconcile_before_reserve" not in public["results"][0]
+    finally:
+        gateway.shutdown()
+
+
+def test_fifty_item_job_retries_absent_candidate_and_finishes(tmp_path) -> None:
+    remote: list[dict[str, object]] = []
+    generate_calls = 0
+    reserve_calls = 0
+    failed_candidate = ""
+
+    class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            return list(remote)
+
+        def generate_alias(self):
+            nonlocal generate_calls
+            generate_calls += 1
+            return f"candidate-{generate_calls}@icloud.com"
+
+        def reserve_alias(self, candidate, *, label, note):
+            nonlocal failed_candidate, reserve_calls
+            reserve_calls += 1
+            if reserve_calls == 6:
+                failed_candidate = candidate
+                raise HmeNetworkError("connection lost before response")
+            created = {
+                "hme": candidate,
+                "anonymousId": candidate,
+                "isActive": True,
+                "label": label,
+                "note": note,
+            }
+            remote.append(created)
+            return created
+
+    gateway = GatewayService(
+        Settings(
+            data_dir=tmp_path,
+            master_key=bytes(range(32)),
+            admin_password="correct horse battery staple",
+            cookie_secure=False,
+            cdp_url="",
+        ),
+        hme_client_factory=Client,
+        start_maintenance=False,
+    )
+    gateway.database.set_secret(
+        "hme_session",
+        ICloudHmeSession(
+            host="p123-maildomainws.icloud.com.cn",
+            dsid="123",
+            client_id="client",
+            client_build_number="build",
+            client_mastering_number="master",
+            cookie=(
+                "X-APPLE-DS-WEB-SESSION-TOKEN=session; "
+                "X-APPLE-WEBAUTH-USER=user; X-APPLE-WEBAUTH-TOKEN=token"
+            ),
+            origin="https://www.icloud.com.cn",
+            referer="https://www.icloud.com.cn/icloudplus/",
+        ).as_secret_dict(),
+    )
+    gateway._last_validated_ts = gateway.clock()
+    manager = BatchJobManager(
+        gateway,
+        throttle_seconds=0,
+        transient_retry_base_seconds=0,
+        transient_retry_max_seconds=0,
+    )
+    job, _created = manager.create_alias_job(
+        count=50,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "completed"
+        assert current["succeeded"] == 50
+        assert all(item["status"] == "success" for item in current["items"])
+        assert generate_calls == 50
+        assert reserve_calls == 51
+        assert failed_candidate
+        assert sum(item["hme"] == failed_candidate for item in remote) == 1
+        assert len(remote) == 50
+    finally:
+        gateway.shutdown()
 
 
 def test_rate_limited_create_cools_down_then_continues(database: Database, tmp_path) -> None:

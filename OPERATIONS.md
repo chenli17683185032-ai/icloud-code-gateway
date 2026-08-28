@@ -41,7 +41,7 @@ UID，每封邮件只解析一次，按收件别名建内存索引。公开 `/ap
 - 创建和批量操作均返回持久任务，前端必须持续轮询普通状态接口，并只通过管理员 Cookie + CSRF 的 POST results 显式读取成功项密钥。
 - 单次创建默认与硬上限均为 100；任务仍逐项串行调用 Apple，不得把 100 项改成并发 HME 写入，也不得用真实 Apple 批量创建作为发布测试。
 - `needs_reconcile` 不是整批失败：页面须分别显示成功、明确失败、远端结果不确定和尚未开始数量；已成功项仍可输出标准字段。
-- Apple generate/reserve 等写操作的远端结果不确定时禁止自动重放。先人工或只读对账，再决定后续操作。
+- 创建任务会加密保存 generate 候选。reserve 断线后必须先读取并校验完整 HME 快照：候选精确存在时补齐本地记录，可信快照明确不存在时才重试同一候选，列表/Session 暂不可用时保持 queued 并退避续跑；不得跳过只读对账盲重放。
 - HME API 响应 Cookie 轮换会在原 Session 仍是当前版本时安全保存；若人工登录或后台刷新已写入更新 Session，则丢弃旧客户端的轮换结果。
 
 ## 2. 首次部署
@@ -205,7 +205,7 @@ HME Session 使用主密钥加密保存在 SQLite，Chromium profile 保存在�
 - Apple 列表确认 `isActive=false` 后，本地才标记失活并清除该 Alias 的密钥哈希、提示和密文。
 - 失活 Alias 可以恢复；Apple 列表确认 `isActive=true` 后，本地才恢复活动状态，恢复后仍需按需重新签发访问密钥。
 - 永久删除只对失活 Alias 开放，并要求输入完整 Alias 邮箱。Apple 列表确认远端 ID 已消失后，本地记录才删除。
-- 远端写请求不会自动重试。页面提示状态未确认时，先使用“导入 / 刷新”读取实际 Apple 状态，不要连续重复点击破坏性动作。
+- 停用、恢复、永久删除等破坏性远端写不会自动重试。页面提示状态未确认时，先使用“导入 / 刷新”读取实际 Apple 状态，不要连续重复点击；创建 Alias 仅在候选邮箱完成精确只读对账后自动续跑。
 - 数据库备份只能恢复本地配置和密钥映射，不能撤销已经在 Apple 远端完成的停用、恢复或永久删除。
 
 ### 4.2 验证码查询记录
@@ -364,7 +364,7 @@ app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带
 
 1. Alias lifecycle 写成功后只提交已经证明集合完整的同一份确认快照，不进行第二次 list；停用、恢复和删除均不能让无关 Alias 失活或丢失 key。
 2. `queued -> running` 在单个 SQLite `BEGIN IMMEDIATE` 事务中原子完成；数据库旁的 worker owner 锁跨进程独占。只有 owner 执行恢复和远端副作用，阻塞线程未退出时不得释放锁。
-3. `needs_reconcile` 持续出现在管理页恢复接口，逐项错误只返回规范化代码；远端结果不确定的项不自动重放，尚未开始的项保持 queued。
+3. `needs_reconcile` 持续出现在管理页恢复接口，逐项错误只返回规范化代码；破坏性远端结果不确定的项不自动重放。创建项只有持久化候选且先经完整 HME 快照精确对账后才能续跑，尚未开始的项保持 queued。
 4. lifespan 先同时广播 job 和 Gateway stop，再使用同一个 10 秒 deadline 等待；stop 后不得开始 reserve/deactivate/reactivate/delete，任一后台线程未停时不得关闭 SQLite。
 5. 两套 Compose 自定义环境展开、完整测试、Ruff check/format、Python/JS 语法、diff 和秘密扫描必须通过。切换前还必须在隔离数据库副本上验证迁移与任务恢复，候选不得连接生产数据库启动 worker。
 6. 使用真实现有 Apple 会话只执行一次 setup validate 和一次 HME list 只读验收；不记录 Cookie、token、Apple ID、Alias 或响应正文，不执行 generate/reserve/deactivate/reactivate/delete。

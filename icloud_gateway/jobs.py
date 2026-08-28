@@ -28,6 +28,13 @@ TERMINAL_JOB_STATUSES = {
     "cancelled",
 }
 DEFAULT_HME_RATE_LIMIT_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_TRANSIENT_RETRY_BASE_SECONDS = 15
+DEFAULT_TRANSIENT_RETRY_MAX_SECONDS = 15 * 60
+_INTERNAL_RESULT_FIELDS = {
+    "candidate",
+    "reconcile_before_reserve",
+    "transient_retry_attempts",
+}
 
 
 def request_fingerprint(kind: str, payload: Mapping[str, Any]) -> bytes:
@@ -47,6 +54,8 @@ class BatchJobManager:
         *,
         throttle_seconds: float = 2.0,
         rate_limit_cooldown_seconds: float | None = None,
+        transient_retry_base_seconds: float = DEFAULT_TRANSIENT_RETRY_BASE_SECONDS,
+        transient_retry_max_seconds: float | None = None,
     ) -> None:
         self.gateway = gateway
         self.database: Database = gateway.database
@@ -60,6 +69,18 @@ class BatchJobManager:
             self.rate_limit_cooldown_seconds = max(0.0, float(configured_cooldown))
         else:
             self.rate_limit_cooldown_seconds = max(0.0, float(rate_limit_cooldown_seconds))
+        self.transient_retry_base_seconds = max(0.0, float(transient_retry_base_seconds))
+        configured_retry_max = (
+            getattr(getattr(gateway, "settings", None), "hme_retry_max_seconds", None)
+            if transient_retry_max_seconds is None
+            else transient_retry_max_seconds
+        )
+        if configured_retry_max is None:
+            configured_retry_max = DEFAULT_TRANSIENT_RETRY_MAX_SECONDS
+        self.transient_retry_max_seconds = max(
+            self.transient_retry_base_seconds,
+            float(configured_retry_max),
+        )
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -234,7 +255,13 @@ class BatchJobManager:
                 value["error"] = item_error
             result = item.get("result")
             if isinstance(result, Mapping):
-                value.update({key: entry for key, entry in result.items() if key != "candidate"})
+                value.update(
+                    {
+                        key: entry
+                        for key, entry in result.items()
+                        if key not in _INTERNAL_RESULT_FIELDS
+                    }
+                )
             alias_id = value.get("id")
             if (
                 reveal_keys
@@ -267,9 +294,9 @@ class BatchJobManager:
             "results": results,
             "public_url": self.gateway.settings.public_base_url,
         }
-        cooldown = self._cooldown_public_fields(job)
-        if cooldown is not None:
-            public.update(cooldown)
+        wait = self._wait_public_fields(job)
+        if wait is not None:
+            public.update(wait)
         return public
 
     @staticmethod
@@ -282,29 +309,41 @@ class BatchJobManager:
             return "remote_write_unknown"
         if str(item.get("error") or "").startswith("rate_limited"):
             return "rate_limited"
+        if str(item.get("error") or "").startswith("retryable:"):
+            return "retrying"
         if item.get("error") in {"not_found", "conflict"}:
             return str(item["error"])
         if str(item.get("error")) == "remote write was not attempted":
             return "remote_write_not_attempted"
         return "operation_failed"
 
-    def _cooldown_public_fields(self, job: Mapping[str, Any]) -> dict[str, Any] | None:
+    def _wait_public_fields(self, job: Mapping[str, Any]) -> dict[str, Any] | None:
         for item in job.get("items") or []:
             result = item.get("result")
             if not isinstance(result, Mapping):
                 continue
-            if str(result.get("wait_reason") or "") != "rate_limited":
+            wait_reason = str(result.get("wait_reason") or "")
+            if wait_reason not in {"rate_limited", "transient_error"}:
                 continue
             if item.get("status") != "queued":
                 continue
             resume_at = str(result.get("resume_at") or "").strip()
             remaining = self._seconds_until(resume_at)
-            return {
-                "wait_reason": "rate_limited",
+            public = {
+                "wait_reason": wait_reason,
                 "resume_at": resume_at or None,
                 "retry_after_seconds": max(0, remaining if remaining is not None else 0),
-                "cooldown_code": str(result.get("code") or "-41015"),
             }
+            if wait_reason == "rate_limited":
+                public["cooldown_code"] = str(result.get("code") or "-41015")
+            else:
+                public["retry_kind"] = str(result.get("retry_kind") or "network")
+                try:
+                    retry_attempts = int(result.get("transient_retry_attempts") or 1)
+                except (TypeError, ValueError):
+                    retry_attempts = 1
+                public["retry_attempts"] = max(1, retry_attempts)
+            return public
         return None
 
     @staticmethod
@@ -376,6 +415,101 @@ class BatchJobManager:
             if int(entry["index"]) == int(item["index"]):
                 return entry
         return item
+
+    def _item_is_retrying(self, item: Mapping[str, Any]) -> bool:
+        result = item.get("result")
+        if not isinstance(result, Mapping):
+            return False
+        if str(result.get("wait_reason") or "") != "transient_error":
+            return False
+        remaining = self._seconds_until(str(result.get("resume_at") or ""))
+        return remaining is not None and remaining > 0
+
+    def _clear_transient_wait(self, job_id: str, item: Mapping[str, Any]) -> Mapping[str, Any]:
+        result = item.get("result")
+        if not isinstance(result, Mapping):
+            return item
+        if str(result.get("wait_reason") or "") != "transient_error":
+            return item
+        cleaned = {
+            key: value
+            for key, value in result.items()
+            if key not in {"wait_reason", "resume_at", "retry_kind", "retry_after_seconds"}
+        }
+        if cleaned.get("reconcile_before_reserve"):
+            stage = "reconciling"
+        elif cleaned.get("candidate"):
+            stage = "generated"
+        else:
+            stage = "queued"
+        self.database.update_batch_item(
+            job_id,
+            int(item["index"]),
+            stage=stage,
+            status="queued",
+            result=cleaned,
+            error=None,
+        )
+        refreshed = self.database.get_batch_job(job_id)
+        for entry in refreshed["items"]:
+            if int(entry["index"]) == int(item["index"]):
+                return entry
+        return item
+
+    def _transient_retry_delay(self, attempt: int) -> float:
+        if self.transient_retry_base_seconds <= 0:
+            return 0.0
+        exponent = min(max(0, int(attempt) - 1), 10)
+        return min(
+            self.transient_retry_max_seconds,
+            self.transient_retry_base_seconds * (2**exponent),
+        )
+
+    def _pause_for_transient_retry(
+        self,
+        *,
+        job_id: str,
+        item: Mapping[str, Any],
+        retry_kind: str,
+        reconcile_before_reserve: bool = False,
+    ) -> None:
+        index = int(item["index"])
+        saved_result = (
+            dict(item.get("result") or {}) if isinstance(item.get("result"), Mapping) else {}
+        )
+        for key in ("wait_reason", "resume_at", "retry_kind", "retry_after_seconds"):
+            saved_result.pop(key, None)
+        attempts = max(0, int(saved_result.get("transient_retry_attempts") or 0)) + 1
+        delay = self._transient_retry_delay(attempts)
+        resume_at = self._rate_limit_resume_at(seconds=delay)
+        saved_result.update(
+            {
+                "wait_reason": "transient_error",
+                "resume_at": resume_at,
+                "retry_kind": str(retry_kind or "network"),
+                "retry_after_seconds": int(delay),
+                "transient_retry_attempts": attempts,
+            }
+        )
+        if reconcile_before_reserve:
+            saved_result["reconcile_before_reserve"] = True
+        stage = (
+            "waiting_reconcile" if saved_result.get("reconcile_before_reserve") else "waiting_retry"
+        )
+        self.database.update_batch_item(
+            job_id,
+            index,
+            stage=stage,
+            status="queued",
+            result=saved_result,
+            error=f"retryable:{saved_result['retry_kind']}",
+        )
+        self.database.set_batch_job_status(
+            job_id,
+            "queued",
+            error=f"temporary HME failure; retrying at {resume_at}",
+        )
+        self.database.record_audit_event("alias_create", "retrying")
 
     def _pause_for_rate_limit(
         self,
@@ -505,6 +639,32 @@ class BatchJobManager:
                 job = self.database.get_batch_job(job["id"])
                 # Retry the same item after cooldown metadata is cleared.
                 continue
+            if self._item_is_retrying(item):
+                result = item.get("result") if isinstance(item.get("result"), Mapping) else {}
+                resume_at = str(result.get("resume_at") or "")
+                self.database.set_batch_job_status(
+                    job["id"],
+                    "queued",
+                    error=f"temporary HME failure; retrying at {resume_at}",
+                )
+                if self._wait_for_resume(resume_at):
+                    self.database.set_batch_job_status(job["id"], "queued")
+                    return
+                if self._stopping():
+                    self.database.set_batch_job_status(job["id"], "queued")
+                    return
+                self.database.set_batch_job_status(job["id"], "running", error=None)
+                item = self._clear_transient_wait(job["id"], item)
+                job = self.database.get_batch_job(job["id"])
+                continue
+            if (
+                isinstance(item.get("result"), Mapping)
+                and str(item["result"].get("wait_reason") or "") == "transient_error"
+            ):
+                self.database.set_batch_job_status(job["id"], "running", error=None)
+                item = self._clear_transient_wait(job["id"], item)
+                job = self.database.get_batch_job(job["id"])
+                continue
             outcome = self._run_item(job, item)
             if outcome == "unknown":
                 self.database.set_batch_job_status(
@@ -548,6 +708,39 @@ class BatchJobManager:
                 self.database.set_batch_job_status(job["id"], "running", error=None)
                 job = self.database.get_batch_job(job["id"])
                 continue
+            if outcome == "retry":
+                refreshed = self.database.get_batch_job(job["id"])
+                parked = next(
+                    (
+                        entry
+                        for entry in refreshed["items"]
+                        if int(entry["index"]) == int(item["index"])
+                    ),
+                    None,
+                )
+                resume_at = None
+                retry_after = 0
+                if parked is not None and isinstance(parked.get("result"), Mapping):
+                    resume_at = str(parked["result"].get("resume_at") or "")
+                    try:
+                        retry_after = max(0, int(parked["result"].get("retry_after_seconds") or 0))
+                    except (TypeError, ValueError):
+                        retry_after = 0
+                if self._wait_for_resume(resume_at):
+                    return
+                if self._stopping():
+                    self.database.set_batch_job_status(job["id"], "queued")
+                    return
+                if (
+                    retry_after <= 0
+                    and self.throttle_seconds > 0
+                    and self._stop.wait(self.throttle_seconds)
+                ):
+                    self.database.set_batch_job_status(job["id"], "queued")
+                    return
+                self.database.set_batch_job_status(job["id"], "running", error=None)
+                job = self.database.get_batch_job(job["id"])
+                continue
             if self._stopping():
                 self.database.set_batch_job_status(job["id"], "queued")
                 return
@@ -570,10 +763,155 @@ class BatchJobManager:
             return self._create_alias(item, job_id=job["id"])
         return "unknown" if self._bulk_alias(item, job_id=job["id"], action=job["action"]) else "ok"
 
+    def _close_create_client(self, client: Any, original_session: Any) -> None:
+        if client is None:
+            return
+        rotated_session = getattr(client, "session", original_session)
+        if isinstance(original_session, ICloudHmeSession) and isinstance(
+            rotated_session, ICloudHmeSession
+        ):
+            with suppress(Exception):
+                self.gateway._persist_rotated_hme_session(original_session, rotated_session)
+        self.gateway._close_client(client)
+
+    def _validated_candidate_snapshot(self, candidate: str) -> tuple[str, dict[str, Any] | None]:
+        """Return found/absent/unavailable from a read-only, complete-enough snapshot."""
+
+        refreshed_auth = False
+        while True:
+            self._raise_if_stopping()
+            session = None
+            client = None
+            try:
+                session = self.gateway.get_hme_session()
+                if session is None:
+                    return "unavailable", None
+                client = self.gateway.hme_client_factory(session)
+                remote_aliases = client.list_aliases()
+                validator = getattr(self.gateway, "_validated_remote_aliases", None)
+                if callable(validator):
+                    remote_aliases = validator(remote_aliases)
+                else:
+                    if not isinstance(remote_aliases, list) or any(
+                        not isinstance(remote, Mapping) for remote in remote_aliases
+                    ):
+                        raise HmeError("iCloud HME returned an invalid alias snapshot")
+                    remote_aliases = [dict(remote) for remote in remote_aliases]
+            except HmeSessionError:
+                if refreshed_auth:
+                    return "unavailable", None
+                refresh = getattr(self.gateway, "_refresh_hme_session", None)
+                if not callable(refresh):
+                    return "unavailable", None
+                try:
+                    refresh(during_write=True)
+                except Exception:
+                    return "unavailable", None
+                refreshed_auth = True
+                continue
+            except (HmeNetworkError, HmeError, GatewayError, OSError, TimeoutError):
+                return "unavailable", None
+            except Exception:
+                return "unavailable", None
+            finally:
+                if client is not None:
+                    self._close_create_client(client, session)
+
+            match = next(
+                (
+                    dict(remote)
+                    for remote in remote_aliases
+                    if str(remote.get("hme") or remote.get("email") or "").strip().casefold()
+                    == candidate
+                ),
+                None,
+            )
+            if match is not None:
+                return "found", match
+            snapshot_ids = {
+                str(remote.get("anonymousId") or "").strip() for remote in remote_aliases
+            }
+            try:
+                known_ids = {
+                    str(remote.get("anonymousId") or "").strip()
+                    for alias in self.database.list_aliases()
+                    for remote in [alias.get("remote_metadata")]
+                    if isinstance(remote, Mapping) and str(remote.get("anonymousId") or "").strip()
+                }
+            except Exception:
+                return "unavailable", None
+            if known_ids.issubset(snapshot_ids):
+                return "absent", None
+            return "unavailable", None
+
+    @staticmethod
+    def _candidate_item(
+        item: Mapping[str, Any],
+        candidate: str,
+        *,
+        reconcile_before_reserve: bool,
+    ) -> dict[str, Any]:
+        result = dict(item.get("result") or {}) if isinstance(item.get("result"), Mapping) else {}
+        for key in ("wait_reason", "resume_at", "retry_kind", "retry_after_seconds"):
+            result.pop(key, None)
+        if candidate:
+            result["candidate"] = candidate
+        else:
+            result.pop("candidate", None)
+        if reconcile_before_reserve:
+            result["reconcile_before_reserve"] = True
+        else:
+            result.pop("reconcile_before_reserve", None)
+        if reconcile_before_reserve:
+            stage = "reconciling"
+        elif candidate:
+            stage = "generated"
+        else:
+            stage = "queued"
+        return {
+            **dict(item),
+            "result": result,
+            "stage": stage,
+            "status": "queued",
+        }
+
+    def _complete_created_alias(
+        self,
+        *,
+        job_id: str,
+        index: int,
+        values: Mapping[str, Any],
+        remote: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
+        if email.count("@") != 1 or not str(remote.get("anonymousId") or "").strip():
+            raise HmeError("iCloud HME reserve response is incomplete")
+        alias = self.database.upsert_alias(
+            email=email,
+            remote_metadata=remote,
+            label=str(values["label"]),
+            note=str(values["note"]),
+            sender_filter=str(values["sender_filter"]),
+            state="inactive" if remote.get("isActive") is False else "active",
+        )
+        issued = self.database.issue_access_key(alias["id"])
+        self.database.update_batch_item(
+            job_id,
+            index,
+            stage="completed",
+            status="success",
+            alias_id=alias["id"],
+            result={"id": alias["id"], "email": alias["email"], "label": alias["label"]},
+        )
+        self.database.record_audit_event("alias_create", "succeeded", alias_id=alias["id"])
+        return self.database.get_alias(alias["id"]), issued.access_key
+
     def _create_alias(self, item: Mapping[str, Any], *, job_id: str) -> str:
         index = int(item["index"])
         values = dict(item["input"])
         client = None
+        session = None
+        candidate = ""
         remote_write_started = False
         remote_write_attempted = False
         try:
@@ -590,7 +928,7 @@ class BatchJobManager:
                 if hasattr(client, "generate_alias") and hasattr(client, "reserve_alias"):
                     saved_result = item.get("result")
                     candidate = (
-                        str(saved_result.get("candidate") or "").strip()
+                        str(saved_result.get("candidate") or "").strip().casefold()
                         if isinstance(saved_result, Mapping)
                         else ""
                     )
@@ -608,6 +946,9 @@ class BatchJobManager:
                                 retry_after_seconds=exc.retry_after_seconds,
                             )
                             return "rate_limited"
+                        candidate = str(candidate or "").strip().casefold()
+                        if candidate.count("@") != 1:
+                            raise HmeError("iCloud HME generate response is invalid")
                         self.database.update_batch_item(
                             job_id,
                             index,
@@ -621,26 +962,108 @@ class BatchJobManager:
                             "stage": "generated",
                             "status": "queued",
                         }
-                    self.database.update_batch_item(
-                        job_id, index, stage="reserving", status="running"
-                    )
-                    remote_write_attempted = True
-                    try:
-                        remote = client.reserve_alias(
-                            candidate, label=values["label"], note=values["note"]
+                    if (
+                        isinstance(item.get("result"), Mapping)
+                        and item["result"].get("reconcile_before_reserve") is True
+                    ):
+                        self._close_create_client(client, session)
+                        client = None
+                        resolution, reconciled = self._validated_candidate_snapshot(candidate)
+                        if resolution == "found" and reconciled is not None:
+                            created, access_key = self._complete_created_alias(
+                                job_id=job_id,
+                                index=index,
+                                values=values,
+                                remote=reconciled,
+                            )
+                        elif resolution == "unavailable":
+                            retry_item = self._candidate_item(
+                                item, candidate, reconcile_before_reserve=True
+                            )
+                            self._pause_for_transient_retry(
+                                job_id=job_id,
+                                item=retry_item,
+                                retry_kind="reconcile",
+                                reconcile_before_reserve=True,
+                            )
+                            return "retry"
+                        else:
+                            item = self._candidate_item(
+                                item, candidate, reconcile_before_reserve=False
+                            )
+                            self.database.update_batch_item(
+                                job_id,
+                                index,
+                                stage="generated",
+                                status="queued",
+                                result=item["result"],
+                                error=None,
+                            )
+                            session = self.gateway.get_hme_session()
+                            if session is None:
+                                raise HmeSessionError("iCloud HME session is not configured")
+                            client = self.gateway.hme_client_factory(session)
+                    else:
+                        created = None
+                        access_key = ""
+                    if client is not None:
+                        self._raise_if_stopping()
+                        self.database.update_batch_item(
+                            job_id, index, stage="reserving", status="running"
                         )
-                    except HmeRateLimitedError as exc:
-                        # generate already succeeded; hold the candidate and cool down.
-                        self._pause_for_rate_limit(
-                            job_id=job_id,
-                            item={
-                                **dict(item),
-                                "result": {"candidate": candidate},
-                            },
-                            code=exc.code,
-                            retry_after_seconds=exc.retry_after_seconds,
-                        )
-                        return "rate_limited"
+                        remote_write_attempted = True
+                        try:
+                            remote = client.reserve_alias(
+                                candidate, label=values["label"], note=values["note"]
+                            )
+                        except HmeRateLimitedError as exc:
+                            # generate already succeeded; hold the candidate and cool down.
+                            self._pause_for_rate_limit(
+                                job_id=job_id,
+                                item=self._candidate_item(
+                                    item, candidate, reconcile_before_reserve=False
+                                ),
+                                code=exc.code,
+                                retry_after_seconds=exc.retry_after_seconds,
+                            )
+                            return "rate_limited"
+                        except (HmeNetworkError, HmeSessionError, HmeError) as exc:
+                            self._close_create_client(client, session)
+                            client = None
+                            resolution, reconciled = self._validated_candidate_snapshot(candidate)
+                            if resolution == "found" and reconciled is not None:
+                                created, access_key = self._complete_created_alias(
+                                    job_id=job_id,
+                                    index=index,
+                                    values=values,
+                                    remote=reconciled,
+                                )
+                            else:
+                                retry_item = self._candidate_item(
+                                    item, candidate, reconcile_before_reserve=True
+                                )
+                                if isinstance(exc, HmeSessionError):
+                                    retry_kind = "session"
+                                elif isinstance(exc, HmeNetworkError):
+                                    retry_kind = "network"
+                                else:
+                                    retry_kind = "remote"
+                                if resolution == "absent":
+                                    retry_kind = "reserve_unconfirmed"
+                                self._pause_for_transient_retry(
+                                    job_id=job_id,
+                                    item=retry_item,
+                                    retry_kind=retry_kind,
+                                    reconcile_before_reserve=True,
+                                )
+                                return "retry"
+                        else:
+                            created, access_key = self._complete_created_alias(
+                                job_id=job_id,
+                                index=index,
+                                values=values,
+                                remote=remote,
+                            )
                 else:
                     self.database.update_batch_item(
                         job_id, index, stage="reserving", status="running"
@@ -656,60 +1079,64 @@ class BatchJobManager:
                             retry_after_seconds=exc.retry_after_seconds,
                         )
                         return "rate_limited"
-                email = str(remote.get("hme") or remote.get("email") or "").strip().casefold()
-                if email.count("@") != 1 or not str(remote.get("anonymousId") or "").strip():
-                    raise HmeError("iCloud HME reserve response is incomplete")
-                alias = self.database.upsert_alias(
-                    email=email,
-                    remote_metadata=remote,
-                    label=values["label"],
-                    note=values["note"],
-                    sender_filter=values["sender_filter"],
-                    state="inactive" if remote.get("isActive") is False else "active",
-                )
-                issued = self.database.issue_access_key(alias["id"])
-                rotated_session = getattr(client, "session", session)
-                if isinstance(rotated_session, ICloudHmeSession):
-                    self.gateway._persist_rotated_hme_session(session, rotated_session)
-                self.database.update_batch_item(
-                    job_id,
-                    index,
-                    stage="completed",
-                    status="success",
-                    alias_id=alias["id"],
-                    result={"id": alias["id"], "email": alias["email"], "label": alias["label"]},
-                )
-                self.database.record_audit_event("alias_create", "succeeded", alias_id=alias["id"])
-                created = self.database.get_alias(alias["id"])
+                    created, access_key = self._complete_created_alias(
+                        job_id=job_id,
+                        index=index,
+                        values=values,
+                        remote=remote,
+                    )
+                self._close_create_client(client, session)
+                client = None
             # Register the new alias and its key on the cloud edge immediately, but
             # outside the HME lock so Apple traffic is never blocked. A failed push
             # is audited by _push_alias_to_edge and healed by the periodic
             # edge reconcile loop; it must not fail the locally-successful item.
             with suppress(Exception):
-                self.gateway._push_alias_to_edge(
-                    created, access_key=issued.access_key, action="upsert"
-                )
+                self.gateway._push_alias_to_edge(created, access_key=access_key, action="upsert")
             return "ok"
-        except (HmeNetworkError, HmeSessionError):
-            if remote_write_attempted:
-                self.database.update_batch_item(
-                    job_id,
-                    index,
-                    stage="unknown",
-                    status="unknown",
-                    error="remote write outcome is unknown",
-                )
-                self.database.record_audit_event("alias_create", "unknown")
-                return "unknown"
+        except GatewayStoppingError:
+            prior_reconcile = bool(
+                isinstance(item.get("result"), Mapping)
+                and item["result"].get("reconcile_before_reserve") is True
+            )
+            needs_reconcile = bool(candidate and (remote_write_attempted or prior_reconcile))
+            retry_item = self._candidate_item(
+                item,
+                candidate,
+                reconcile_before_reserve=needs_reconcile,
+            )
             self.database.update_batch_item(
                 job_id,
                 index,
-                stage="failed",
-                status="failed",
-                error="remote write was not attempted",
+                stage=str(retry_item["stage"]),
+                status="queued",
+                result=retry_item["result"],
+                error=None,
             )
-            self.database.record_audit_event("alias_create", "error")
-            return "failed"
+            return "stopped"
+        except (HmeNetworkError, HmeSessionError) as exc:
+            if isinstance(exc, HmeSessionError):
+                refresh = getattr(self.gateway, "_refresh_hme_session", None)
+                if callable(refresh):
+                    with suppress(Exception):
+                        refresh(during_write=remote_write_started)
+            prior_reconcile = bool(
+                isinstance(item.get("result"), Mapping)
+                and item["result"].get("reconcile_before_reserve") is True
+            )
+            needs_reconcile = bool(candidate and (remote_write_attempted or prior_reconcile))
+            retry_item = self._candidate_item(
+                item,
+                candidate,
+                reconcile_before_reserve=needs_reconcile,
+            )
+            self._pause_for_transient_retry(
+                job_id=job_id,
+                item=retry_item,
+                retry_kind="session" if isinstance(exc, HmeSessionError) else "network",
+                reconcile_before_reserve=needs_reconcile,
+            )
+            return "retry"
         except Exception as exc:
             if not remote_write_attempted and self._stopping():
                 return "failed"
@@ -730,7 +1157,7 @@ class BatchJobManager:
             return "failed"
         finally:
             if client is not None:
-                self.gateway._close_client(client)
+                self._close_create_client(client, session)
             if remote_write_started:
                 self.gateway._finish_remote_write()
 

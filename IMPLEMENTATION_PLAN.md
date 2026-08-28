@@ -2160,3 +2160,36 @@ Alias 邮箱按钮
 - 2026-08-09：审计目录 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T062455Z-b38773b` 的切换已通过真实探针，但 postflight 记录 Docker health 长时间 `starting`，共享 Caddy 随后出现 Docker DNS 短暂失败并返回 503；脚本自动恢复旧版。下一次 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T161345Z-b38773b` 通过窄字段 `Health.Log` 建立直接根因：镜像内 healthcheck 未携带生产可信 Host，连续收到 HTTP 400。该次同样自动恢复旧 marker/镜像和公网 200。
 - 2026-08-09：从生产谱系 `b38773b` 建立最小补丁 `83df4668e4ccbd606c47a0d97c1bee5c6118fa04`，只修改 Docker healthcheck 从 `ICLOUD_GATEWAY_PUBLIC_BASE_URL` 提取 Host，并增加部署回归测试；生产基线全量 219 项测试、Ruff、格式、compileall、Docker health 命令解析和 diff 门禁通过。
 - 2026-08-09：最终 app-only 发布成功。watchdog `26s` 接受新镜像 `d25512d…`，marker/镜像 revision/`latest`/`prod`/`release-83df466` 均固定到 `83df466`；旧镜像 `5defdf1…` 保留专用 rollback 标签。SQLite 前后均为 `quick_check=ok`，375/357/357 个 Alias/active/keyed、2 个 setting、1 个 metadata、2158 条 audit、22 个 job、156 个 item 及各表摘要守恒，`usage_label` schema 正确且非空用途为 0、active job 为 0。生产 UI/API、OTP fixture、404 无效 key、实时有效 key（HTTP 200 `waiting`）、公网/管理页/noVNC 边界均通过；browser、cn-proxy、共享 Caddy ID 未变，四容器最终 `healthy/restart=0/OOM=false`。成功审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T162411Z-83df466`，最终清单 SHA-256 为 `01cf7b4c85b331d94cc411d3249d1888e82b83b0c8bc11f731d283f89f81d115`，候选资源为 0。
+
+---
+
+## 28. 批量创建断线自动续跑（2026-08-29）
+
+### 28.1 目标与安全边界
+
+用户要求“一次生成 50 个邮箱”不能在成功 4～5 项后因网络或 Session 断线直接终止。修复仍保持 Apple 写操作不盲重放：
+
+- generate 候选继续加密持久化；reserve 响应丢失后先读取并校验完整 HME 快照。
+- 候选精确存在时把该项补齐为成功，不再次 reserve；可信快照明确不存在时，退避后再次对账，再重试同一候选。
+- HME list、Session 或网络暂不可用时，项目保持 queued 并指数退避，不转为整批终态。
+- 进程在 generating 阶段中断可安全重做 generate；在已有候选的 reserving 阶段中断改为 reconciling 后恢复。
+- 停用、恢复、永久删除等破坏性操作继续沿用 unknown/needs_reconcile，不扩大自动重试范围。
+- 历史 `needs_reconcile` 创建任务不在启动时自动复活；只允许显式选择仍有明确业务意图且每个 unknown 项均保存候选的任务恢复。
+
+### 28.2 线上脱敏证据
+
+- 服务器 2 当前 marker 为 `b6ee2919edfd…`，app/browser/cn-proxy healthy，Caddy running，SQLite `quick_check=ok`。
+- 最近 72 小时 `alias_create` 为 58 success、12 rate_limited、7 unknown、8 error。最新一个 5 项任务已成功 4 项并在 `-41015` 冷却，证明配额等待路径有效。
+- 一个 50 项任务在第 1 项进入 unknown 后留下 49 queued；多个 5 项任务在第 1 或第 5 项进入 unknown，均被旧状态机直接终止。
+- 单次 Apple list 只读快照返回 695 项且覆盖全部本地远端 ID。最近 12 个停止创建任务均保存候选；其中 11 个候选明确不在可信快照中、1 个精确存在，证明“精确命中补齐 / 明确缺失后续跑”能够同时避免重复创建与无故终止。
+
+### 28.3 实施节点
+
+- [x] A：生产只读取证并固定根因；未输出 Cookie、Token、完整 Alias、候选邮箱或响应正文。
+- [x] B：新增候选精确对账、瞬时故障退避、重启恢复和显式历史任务恢复状态机。
+- [x] C：新增 50 项 fake HME 故障注入；第 6 次 reserve 丢失响应后最终 50/50，失败候选只远端创建一次。
+- [x] D：新增“远端已成功但响应丢失”测试，确认只读命中后 reserve 调用总数仍为 1；新增列表不可用时 queued、内部候选不出现在 API 的测试。
+- [ ] E：全量测试、Ruff/format、Python/JS 语法、Compose、diff 和秘密扫描。
+- [ ] F：建立服务器 2 SQLite/源码/marker/旧镜像回滚点，隔离候选验证后由独立 watchdog 只替换 app。
+- [ ] G：部署后验证在途冷却任务仍 queued/自动续跑，显式恢复本次 50 项任务并观察到完成或继续处于限额/瞬时等待，而不是 needs_reconcile。
+- [ ] H：更新 `OPERATIONS.md`、服务器 2 唯一维护记录与 GitHub `main`，清理候选资源和本地临时件。

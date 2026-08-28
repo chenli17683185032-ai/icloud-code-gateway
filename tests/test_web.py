@@ -1392,6 +1392,7 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "明确失败 ${counts.failed} 项" in script
     assert "远端结果不确定 ${counts.unknown} 项" in script
     assert "尚未开始 ${counts.queued} 项" in script
+    assert "自动对账并继续剩余任务，不会终止整批" in script
     assert "async function writeClipboard" in script
     assert 'document.execCommand("copy")' in script
     clipboard = script.split("async function writeClipboard", 1)[1].split(

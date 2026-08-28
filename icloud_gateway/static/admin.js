@@ -348,6 +348,20 @@
   }
 
   function jobProgressText(job) {
+    if (job.wait_reason === "transient_error") {
+      const retryAfter = Number(job.retry_after_seconds || 0);
+      const reason = job.retry_kind === "session"
+        ? "Apple Session 暂时不可用"
+        : "Apple 连接暂时中断";
+      const timing = retryAfter > 0
+        ? `约 ${formatCountdown(retryAfter)} 后`
+        : "正在";
+      return (
+        `${reason}，已成功 ${job.succeeded}/${job.requested}。` +
+        `${timing}自动对账并继续剩余任务，不会终止整批。`
+      );
+    }
+
     if (job.wait_reason === "rate_limited") {
       const retryAfter = Number(job.retry_after_seconds || 0);
       const code = job.cooldown_code || "-41015";

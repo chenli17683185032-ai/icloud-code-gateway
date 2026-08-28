@@ -1027,11 +1027,73 @@ class Database:
         with self.transaction() as connection:
             interrupted = connection.execute(
                 """
-                SELECT job_id, item_index FROM batch_job_items
-                WHERE status = 'running'
+                SELECT i.job_id, i.item_index, i.stage, i.result_blob, j.kind
+                FROM batch_job_items AS i
+                JOIN batch_jobs AS j ON j.id = i.job_id
+                WHERE i.status = 'running'
                 """
             ).fetchall()
+            affected_job_ids: set[str] = set()
             for row in interrupted:
+                job_id = str(row["job_id"])
+                affected_job_ids.add(job_id)
+                retry_stage: str | None = None
+                retry_result_blob: bytes | None = None
+                if str(row["kind"]) == "create_aliases":
+                    if str(row["stage"]) == "generating":
+                        # generate only returns an unreserved suggestion. Repeating it cannot
+                        # create a remote Alias, so a crash here is safe to resume.
+                        retry_stage = "queued"
+                    elif row["result_blob"] is not None:
+                        try:
+                            result = json.loads(
+                                self.secret_box.decrypt(
+                                    bytes(row["result_blob"]), "batch-job-result"
+                                )
+                            )
+                            candidate = (
+                                str(result.get("candidate") or "").strip().casefold()
+                                if isinstance(result, Mapping)
+                                else ""
+                            )
+                            if candidate.count("@") == 1:
+                                result = dict(result)
+                                result["reconcile_before_reserve"] = True
+                                retry_result_blob = self.secret_box.encrypt(
+                                    json.dumps(
+                                        result,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                        sort_keys=True,
+                                    ).encode("utf-8"),
+                                    "batch-job-result",
+                                )
+                                retry_stage = "reconciling"
+                        except (SecurityError, UnicodeDecodeError, json.JSONDecodeError):
+                            retry_stage = None
+                if retry_stage is not None:
+                    connection.execute(
+                        """
+                        UPDATE batch_job_items
+                        SET status = 'queued', stage = ?,
+                            result_blob = CASE WHEN ? IS NULL THEN result_blob ELSE ? END,
+                            error = NULL, updated_at = ?
+                        WHERE job_id = ? AND item_index = ?
+                        """,
+                        (
+                            retry_stage,
+                            retry_result_blob,
+                            (
+                                None
+                                if retry_result_blob is None
+                                else sqlite3.Binary(retry_result_blob)
+                            ),
+                            timestamp,
+                            job_id,
+                            row["item_index"],
+                        ),
+                    )
+                    continue
                 connection.execute(
                     """
                     UPDATE batch_job_items
@@ -1039,7 +1101,7 @@ class Database:
                         error = 'interrupted during an in-flight operation', updated_at = ?
                     WHERE job_id = ? AND item_index = ?
                     """,
-                    (timestamp, row["job_id"], row["item_index"]),
+                    (timestamp, job_id, row["item_index"]),
                 )
                 connection.execute(
                     """
@@ -1048,7 +1110,7 @@ class Database:
                         error = 'an in-flight operation was interrupted; automatic replay stopped',
                         updated_at = ? WHERE id = ?
                     """,
-                    (timestamp, row["job_id"]),
+                    (timestamp, job_id),
                 )
             queued = connection.execute(
                 """
@@ -1060,9 +1122,92 @@ class Database:
             ).fetchall()
             for row in queued:
                 connection.execute(
-                    "UPDATE batch_jobs SET status = 'queued', updated_at = ? WHERE id = ?",
+                    """
+                    UPDATE batch_jobs
+                    SET status = 'queued', error = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
                     (timestamp, row["id"]),
                 )
+                affected_job_ids.add(str(row["id"]))
+            for job_id in affected_job_ids:
+                self._refresh_batch_job_counts(connection, job_id, timestamp)
+
+    def resume_reconcilable_create_job(self, job_id: str) -> dict[str, Any]:
+        """Explicitly resume a stopped create job when every unknown item has a candidate.
+
+        The worker still performs a fresh, complete read-side reconciliation before it can
+        repeat reserve. This method is intentionally not called during startup so historical
+        operator requests are never revived without an explicit decision.
+        """
+
+        clean_job_id = str(job_id)
+        timestamp = _now()
+        with self.transaction() as connection:
+            job = connection.execute(
+                "SELECT kind, status FROM batch_jobs WHERE id = ?", (clean_job_id,)
+            ).fetchone()
+            if job is None:
+                raise NotFoundError("batch job not found")
+            if str(job["kind"]) != "create_aliases" or str(job["status"]) != "needs_reconcile":
+                raise ConflictError("batch job is not a stopped create job")
+            unknown = connection.execute(
+                """
+                SELECT item_index, result_blob FROM batch_job_items
+                WHERE job_id = ? AND status = 'unknown'
+                ORDER BY item_index
+                """,
+                (clean_job_id,),
+            ).fetchall()
+            if not unknown:
+                raise ConflictError("batch job has no reconcilable item")
+            prepared: list[tuple[int, bytes]] = []
+            for item in unknown:
+                try:
+                    result = json.loads(
+                        self.secret_box.decrypt(bytes(item["result_blob"]), "batch-job-result")
+                    )
+                except (TypeError, SecurityError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ConflictError("batch job item has no saved candidate") from exc
+                candidate = (
+                    str(result.get("candidate") or "").strip().casefold()
+                    if isinstance(result, Mapping)
+                    else ""
+                )
+                if candidate.count("@") != 1:
+                    raise ConflictError("batch job item has no saved candidate")
+                result = dict(result)
+                result["reconcile_before_reserve"] = True
+                encrypted = self.secret_box.encrypt(
+                    json.dumps(
+                        result,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8"),
+                    "batch-job-result",
+                )
+                prepared.append((int(item["item_index"]), encrypted))
+            for item_index, encrypted in prepared:
+                connection.execute(
+                    """
+                    UPDATE batch_job_items
+                    SET status = 'queued', stage = 'reconciling', result_blob = ?,
+                        error = NULL, updated_at = ?
+                    WHERE job_id = ? AND item_index = ? AND status = 'unknown'
+                    """,
+                    (sqlite3.Binary(encrypted), timestamp, clean_job_id, item_index),
+                )
+            connection.execute(
+                """
+                UPDATE batch_jobs
+                SET status = 'queued', error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, clean_job_id),
+            )
+            self._refresh_batch_job_counts(connection, clean_job_id, timestamp)
+        return self.get_batch_job(clean_job_id)
 
     def _refresh_batch_job_counts(
         self, connection: sqlite3.Connection, job_id: str, timestamp: str
