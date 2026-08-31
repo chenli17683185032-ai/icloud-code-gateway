@@ -2225,6 +2225,14 @@ Alias 邮箱按钮
 - [x] A：生产只读取证、单次 generate 非 reserve 探针与同类实现交叉确认 `-41012`。
 - [x] B：新增客户端异常、worker 首项停止、API 字段和管理页文案回归测试。
 - [x] C：294 项 Python 测试、26 项 Worker 测试、Ruff/format、Python/JS/TypeScript、Compose 与 diff 门禁通过。
-- [ ] D：提交并推送 GitHub main；生产 SQLite/源码/marker/旧镜像备份与隔离候选验证。
-- [ ] E：app-only watchdog 上线，重分类两条误失败任务并验证不触发 Apple 写。
-- [ ] F：更新两份唯一运维记录、清理候选资源并完成最终 GitHub 同步。
+- [x] D：提交并推送 GitHub main；生产 SQLite/源码/marker/旧镜像备份与隔离候选验证。
+- [x] E：app-only watchdog 上线，重分类两条误失败任务并验证不触发 Apple 写。
+- [x] F：更新两份唯一运维记录、清理候选资源并完成最终 GitHub 同步。
+
+### 29.4 部署与最终状态
+
+- 功能提交 `09d44352499d7e654579785b0e5fb6dbb6ce7430` 已推送。生产 SQLite 副本用 fake HME 证明 50 项容量任务只调用 1 次 generate、0 次 reserve，得到 `needs_reconcile / failed=0 / queued=50`；并准确把两条事故任务恢复为 `5 success + 45 queued` 与 `0 success + 50 queued`。
+- 第一次 watchdog 在切换前读取旧备份字段名失败，旧 app/源码/marker 完全未变；修正脚本后第二次 watchdog 21 秒接受镜像 `940a6837ebc2…`。最终 marker/`latest`/`prod`/`release-09d4435` 均为 `09d4435`，回滚标签 `rollback-pre-hme-capacity-20260831T060200Z` 指向 `76161f7d8fc3…`。
+- 上线后单次真实 generate（不 reserve）被新客户端准确映射为 `HmeCapacityError(-41012)`。两条事故任务只修改 SQLite 状态，Apple 调用数为 0；管理 API 分别返回 `5 success / 45 queued / failed=0` 和 `0 success / 50 queued / failed=0`，`wait_reason=capacity_reached`。
+- 最终 SQLite `quick_check=ok`：750 Alias、732 active、18 inactive、475 keyed、1743 audit、200 job、1123 item、2 setting。app `e7302a235135…` healthy/restart=0/OOM=false；browser/cn-proxy/Caddy ID 未变，稳定期管理入口 20/20 为 200，app 严重日志与最近 Caddy 5xx/error 为 0。
+- 审计目录 `/opt/new-api/icloud-code-gateway/backups/hme-capacity-20260831T060200Z-09d4435`，最终清单 SHA-256 为 `94ae2621f44b50da232427e77b84b9cd5685c5d02c0cc45c5de9b017beb4cfdf`。候选容器、卷、标签、staging 与部署锁均清理为 0；没有自动永久删除任何真实 Alias。

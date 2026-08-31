@@ -374,6 +374,10 @@ app 镜像的 Docker healthcheck 必须为 `127.0.0.1:8080/healthz` 显式携带
 
 ## 11. 运维记录
 
+- 2026-08-31：用户报告新任务全部失败。生产证据为：一个 50 项任务先成功 5 项后 45 个 generate `HmeError`，下一任务 50/50 同类失败；app/worker/SQLite 均健康。Apple list 为 750，单次不 reserve 的 generate 返回 `-41012`。`rtunazzz/hidemyemail-generator#74` 也确认该码为 “You have the maximum number of email addresses”，只有永久删除会释放容量，deactivate 无效。生产本地同为 750 Alias（732 active、18 inactive、475 keyed）。
+- 2026-08-31：提交 `09d4435` 新增 `HmeCapacityError(-41012)`。批任务第一次遇到容量满即停止，当前项与剩余项保持 queued，管理页明确提示“永久删除不再使用的 Alias；仅停用不释放额度”，不再把后续 49 项逐个记为失败；页面刷新后仍显示最新容量阻塞任务。
+- 2026-08-31：生产副本验证 50 项只执行 1 次 fake generate、0 reserve，并把事故任务安全恢复为 `5 success + 45 queued / failed=0` 和 `0 success + 50 queued / failed=0`。第一次 watchdog 在切换前因旧备份字段名不一致退出，生产没有切换；修正后第二次 21 秒 app-only 成功。最终镜像 `sha256:940a6837ebc2daeb4c0269bed1ef979690e0481e93d536545403ba2aef080770`，marker/`latest`/`prod`/`release-09d4435` 对齐，回滚标签 `rollback-pre-hme-capacity-20260831T060200Z` 指向旧镜像 `76161f7d8fc3…`。
+- 2026-08-31：最终 SQLite `quick_check=ok`，750 Alias / 732 active / 18 inactive / 475 keyed / 1743 audit / 200 job / 1123 item / 2 setting。app `e7302a235135…` healthy/restart=0/OOM=false，browser/cn-proxy/Caddy ID 未变；管理入口 20/20 为 200，严重日志与近期 Caddy 5xx/error 为 0。审计目录 `/opt/new-api/icloud-code-gateway/backups/hme-capacity-20260831T060200Z-09d4435` 清单 SHA-256 为 `94ae2621f44b50da232427e77b84b9cd5685c5d02c0cc45c5de9b017beb4cfdf`，候选资源与部署锁均为 0。本轮未自动删除、停用或 reserve 任何 Alias。
 - 2026-08-29：修复批量创建在成功 4～5 项后因 reserve 断线、Session 波动或限额候选过期而直接终止。创建任务现在加密保存候选并先做完整 Apple list 精确对账：候选已存在则补齐本地且不重复 reserve；网络丢响应且可信快照确认不存在才重试同一候选；Apple 明确限额/拒绝且确认未创建时丢弃候选，冷却/退避后重新 generate。generate/reserve 进程中断可恢复；停用、恢复、永久删除的 unknown/needs_reconcile 边界保持不变。
 - 2026-08-29：线上只读取证确认最近 72 小时有 7 个 create unknown，一个 50 项任务在第 1 项停止，多个 5 项任务在第 1/5 项停止；695 项 Apple 快照覆盖全部本地远端 ID，最近 12 个停止创建任务均保存候选，其中 11 个明确不存在、1 个精确存在。最终 292 项 Python 测试、26 项 Worker 测试及全部静态/Compose 门禁通过。
 - 2026-08-29：第一阶段 `6a4f5b7` 由独立 watchdog 16 秒 app-only 切换；显式恢复用户本次 50 项任务时再次确认候选不存在且快照完整，其他 27 个历史 reconcile 任务保持不动。现场随后证明限额冷却会让旧候选过期，因此补充 `5343942`、`9873bad`、`7645ac8`；生产库副本准确模拟旧 `waiting_quota`，清除旧候选后 fresh fake HME 完成 50/50。
