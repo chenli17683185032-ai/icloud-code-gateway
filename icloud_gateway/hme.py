@@ -62,6 +62,19 @@ class HmeNetworkError(HmeError):
     pass
 
 
+class HmeCapacityError(HmeError):
+    """Apple account reached the maximum number of Hide My Email addresses."""
+
+    def __init__(
+        self,
+        message: str = "iCloud HME address capacity is full",
+        *,
+        code: str = "-41012",
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "-41012").strip() or "-41012"
+
+
 class HmeRateLimitedError(HmeError):
     """Apple rejected an HME write because the account creation quota was hit."""
 
@@ -692,6 +705,11 @@ class HmeClient:
             code = _safe_error_code(body)
             if code.upper() in _SETUP_AUTH_ERROR_CODES:
                 raise HmeSessionError("iCloud HME session is expired or rejected")
+            if _is_capacity_code(code):
+                raise HmeCapacityError(
+                    f"iCloud HME address capacity is full ({code or '-41012'})",
+                    code=code or "-41012",
+                )
             if _is_rate_limited_code(code):
                 raise HmeRateLimitedError(
                     f"iCloud HME creation is rate limited ({code or '-41015'})",
@@ -760,8 +778,13 @@ def _is_rate_limited_code(code: str) -> bool:
     return text.lstrip("-") == "41015"
 
 
+def _is_capacity_code(code: str) -> bool:
+    return str(code or "").strip().lstrip("-") == "41012"
+
+
 __all__ = [
     "CORE_SESSION_COOKIE_NAMES",
+    "HmeCapacityError",
     "HmeClient",
     "HmeError",
     "HmeNetworkError",

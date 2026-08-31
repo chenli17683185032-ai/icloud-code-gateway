@@ -8,7 +8,13 @@ import pytest
 
 from icloud_gateway.config import Settings
 from icloud_gateway.database import ConflictError, Database
-from icloud_gateway.hme import HmeError, HmeNetworkError, HmeRateLimitedError, ICloudHmeSession
+from icloud_gateway.hme import (
+    HmeCapacityError,
+    HmeError,
+    HmeNetworkError,
+    HmeRateLimitedError,
+    ICloudHmeSession,
+)
 from icloud_gateway.jobs import BatchJobManager, request_fingerprint
 from icloud_gateway.security import SecretBox
 from icloud_gateway.service import (
@@ -972,6 +978,62 @@ def test_reserve_rate_limit_discards_candidate_before_cooldown_retry(tmp_path) -
         assert current["succeeded"] == 1
         assert generated == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
         assert reserved == ["candidate-1@icloud.com", "candidate-2@icloud.com"]
+    finally:
+        gateway.shutdown()
+
+
+def test_capacity_error_stops_batch_before_remaining_items_fail(tmp_path) -> None:
+    generate_calls = 0
+    reserve_calls = 0
+
+    class Client:
+        def __init__(self, session):
+            self.session = session
+
+        def close(self):
+            pass
+
+        def list_aliases(self):
+            return []
+
+        def generate_alias(self):
+            nonlocal generate_calls
+            generate_calls += 1
+            raise HmeCapacityError(code="-41012")
+
+        def reserve_alias(self, candidate, *, label, note):
+            nonlocal reserve_calls
+            reserve_calls += 1
+            raise AssertionError("reserve must not run after capacity rejection")
+
+    gateway = _gateway_with_saved_session(tmp_path, Client)
+    manager = BatchJobManager(gateway, throttle_seconds=0)
+    job, _created = manager.create_alias_job(
+        count=50,
+        label_prefix="Team",
+        note="",
+        sender_filter="",
+        idempotency_key=None,
+    )
+    try:
+        manager._run_job(gateway.database.get_batch_job(job["id"]))
+
+        current = gateway.database.get_batch_job(job["id"])
+        assert current["status"] == "needs_reconcile"
+        assert current["succeeded"] == 0
+        assert current["failed"] == 0
+        assert current["current"] == 0
+        assert current["items"][0]["stage"] == "waiting_capacity"
+        assert current["items"][0]["status"] == "queued"
+        assert current["items"][0]["error"] == "capacity_reached:-41012"
+        assert all(item["status"] == "queued" for item in current["items"][1:])
+        assert generate_calls == 1
+        assert reserve_calls == 0
+        public = manager.public_job(job["id"])
+        assert public["wait_reason"] == "capacity_reached"
+        assert public["capacity_code"] == "-41012"
+        assert public["results"][0]["error"] == "capacity_reached"
+        assert len(manager.active_jobs()) == 1
     finally:
         gateway.shutdown()
 

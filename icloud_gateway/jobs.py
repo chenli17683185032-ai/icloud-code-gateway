@@ -12,6 +12,7 @@ from typing import Any, BinaryIO
 
 from .database import ConflictError, Database, NotFoundError
 from .hme import (
+    HmeCapacityError,
     HmeError,
     HmeNetworkError,
     HmeRateLimitedError,
@@ -311,6 +312,8 @@ class BatchJobManager:
             return "rate_limited"
         if str(item.get("error") or "").startswith("retryable:"):
             return "retrying"
+        if str(item.get("error") or "").startswith("capacity_reached:"):
+            return "capacity_reached"
         if item.get("error") in {"not_found", "conflict"}:
             return str(item["error"])
         if str(item.get("error")) == "remote write was not attempted":
@@ -323,7 +326,7 @@ class BatchJobManager:
             if not isinstance(result, Mapping):
                 continue
             wait_reason = str(result.get("wait_reason") or "")
-            if wait_reason not in {"rate_limited", "transient_error"}:
+            if wait_reason not in {"rate_limited", "transient_error", "capacity_reached"}:
                 continue
             if item.get("status") != "queued":
                 continue
@@ -336,13 +339,15 @@ class BatchJobManager:
             }
             if wait_reason == "rate_limited":
                 public["cooldown_code"] = str(result.get("code") or "-41015")
-            else:
+            elif wait_reason == "transient_error":
                 public["retry_kind"] = str(result.get("retry_kind") or "network")
                 try:
                     retry_attempts = int(result.get("transient_retry_attempts") or 1)
                 except (TypeError, ValueError):
                     retry_attempts = 1
                 public["retry_attempts"] = max(1, retry_attempts)
+            else:
+                public["capacity_code"] = str(result.get("code") or "-41012")
             return public
         return None
 
@@ -521,6 +526,42 @@ class BatchJobManager:
         )
         self.database.record_audit_event("alias_create", "retrying")
 
+    def _pause_for_capacity(
+        self,
+        *,
+        job_id: str,
+        item: Mapping[str, Any],
+        code: str,
+    ) -> None:
+        saved_result = (
+            dict(item.get("result") or {}) if isinstance(item.get("result"), Mapping) else {}
+        )
+        for key in (
+            "candidate",
+            "reconcile_before_reserve",
+            "wait_reason",
+            "resume_at",
+            "retry_kind",
+            "retry_after_seconds",
+            "transient_retry_attempts",
+        ):
+            saved_result.pop(key, None)
+        saved_result.update(
+            {
+                "wait_reason": "capacity_reached",
+                "code": str(code or "-41012"),
+            }
+        )
+        self.database.update_batch_item(
+            job_id,
+            int(item["index"]),
+            stage="waiting_capacity",
+            status="queued",
+            result=saved_result,
+            error=f"capacity_reached:{saved_result['code']}",
+        )
+        self.database.record_audit_event("alias_create", "capacity_reached")
+
     def _pause_for_rate_limit(
         self,
         *,
@@ -684,6 +725,16 @@ class BatchJobManager:
                 job = self.database.get_batch_job(job["id"])
                 continue
             outcome = self._run_item(job, item)
+            if outcome == "capacity":
+                self.database.set_batch_job_status(
+                    job["id"],
+                    "needs_reconcile",
+                    error=(
+                        "Apple HME address capacity is full; permanently delete unused "
+                        "aliases before creating more"
+                    ),
+                )
+                return
             if outcome == "unknown":
                 self.database.set_batch_job_status(
                     job["id"],
@@ -956,6 +1007,13 @@ class BatchJobManager:
                         )
                         try:
                             candidate = client.generate_alias()
+                        except HmeCapacityError as exc:
+                            self._pause_for_capacity(
+                                job_id=job_id,
+                                item=item,
+                                code=exc.code,
+                            )
+                            return "capacity"
                         except HmeRateLimitedError as exc:
                             self._pause_for_rate_limit(
                                 job_id=job_id,
@@ -1034,6 +1092,13 @@ class BatchJobManager:
                             remote = client.reserve_alias(
                                 candidate, label=values["label"], note=values["note"]
                             )
+                        except HmeCapacityError as exc:
+                            self._pause_for_capacity(
+                                job_id=job_id,
+                                item=item,
+                                code=exc.code,
+                            )
+                            return "capacity"
                         except HmeRateLimitedError as exc:
                             # Apple's explicit quota response confirms reserve did not happen.
                             # A generated suggestion may expire during a long cooldown, so
@@ -1094,6 +1159,13 @@ class BatchJobManager:
                     remote_write_attempted = True
                     try:
                         remote = client.create_alias(label=values["label"], note=values["note"])
+                    except HmeCapacityError as exc:
+                        self._pause_for_capacity(
+                            job_id=job_id,
+                            item=item,
+                            code=exc.code,
+                        )
+                        return "capacity"
                     except HmeRateLimitedError as exc:
                         self._pause_for_rate_limit(
                             job_id=job_id,
@@ -1117,6 +1189,9 @@ class BatchJobManager:
             with suppress(Exception):
                 self.gateway._push_alias_to_edge(created, access_key=access_key, action="upsert")
             return "ok"
+        except HmeCapacityError as exc:
+            self._pause_for_capacity(job_id=job_id, item=item, code=exc.code)
+            return "capacity"
         except GatewayStoppingError:
             prior_reconcile = bool(
                 isinstance(item.get("result"), Mapping)

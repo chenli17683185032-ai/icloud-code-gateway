@@ -2202,3 +2202,29 @@ Alias 邮箱按钮
 - 生产真实冷却到期时，目标任务先从 `candidate_present=true` 变为 running 且 `candidate_present=false`，随后 fresh candidate 的 reserve 再次被 Apple 限额；新版本立即丢弃该候选并进入下一轮 `queued + rate_limited`，`failed=0`、`candidate_present=false`、没有回到 unknown/needs_reconcile。系统继续后台续跑，不绕过 Apple 30 分钟配额。
 - 最终 SQLite `quick_check=ok`：695 Alias、677 active、417 keyed、5776 audit、198 job、1023 item、2 setting。app `5f61348c5df3…` healthy/restart=0/OOM=false；browser `4a82fe724d2a…`、cn-proxy `289f56a88201…`、Caddy `7905a1baa633…` ID 未变。稳定期管理入口 20/20 为 200，app 严重日志和最近 Caddy 5xx/error 均为 0。
 - 最终审计目录 `/opt/new-api/icloud-code-gateway/backups/batch-resume-final-20260828T203630Z-7645ac8`，清单 SHA-256 为 `8d5f403dc212992bc5d6f678bceebca9659fcd8646edd4088703a846e6ca56a3`；第一阶段审计目录清单为 `5b49c86ea09befe0954621c60c4b678f83e4175981609142568395db5ab565e6`。候选容器、卷、标签、staging 和未切换的 `9873bad` 预检目录均已清理为 0。
+
+---
+
+## 29. Apple 容量已满不再整批失败（2026-08-31）
+
+### 29.1 现场证据与目标
+
+- 最新两个 50 项任务分别为 `5 success + 45 HmeError` 和 `0 success + 50 HmeError`；所有失败均发生在 generate、reserve 未调用，数据库/worker/app 均健康。
+- 单次只读 list 返回 750 项；单次不 reserve 的 generate 探针返回 `-41012`。同类实现确认其含义为 “You have the maximum number of email addresses”；永久删除会释放额度，deactivate 不会。
+- 本地当前同为 750 Alias（732 active、18 inactive、475 keyed），所以代码不能让任务自动重试或制造“50 项全部失败”的假象，也不能擅自删除任何 Alias。
+
+### 29.2 修复边界
+
+- HME 客户端新增独立 `HmeCapacityError(-41012)`，与临时 `-41015` 限流分离。
+- 批任务第一次遇到容量错误时，把当前项保存为 `waiting_capacity + queued`，其余项保持 queued，整批进入需人工处理状态；不继续调用后续 generate。
+- API/管理页明确显示“Apple 隐藏邮箱已达上限；永久删除才释放额度，仅停用无效”，页面刷新后仍显示最新容量阻塞任务。
+- 不自动删除、停用或恢复真实 Alias；最新两条误记为全失败的任务只在部署后校验为 generate-only 后改回容量阻塞，保留其剩余 45/50 项且不自动执行。
+
+### 29.3 实施节点
+
+- [x] A：生产只读取证、单次 generate 非 reserve 探针与同类实现交叉确认 `-41012`。
+- [x] B：新增客户端异常、worker 首项停止、API 字段和管理页文案回归测试。
+- [x] C：294 项 Python 测试、26 项 Worker 测试、Ruff/format、Python/JS/TypeScript、Compose 与 diff 门禁通过。
+- [ ] D：提交并推送 GitHub main；生产 SQLite/源码/marker/旧镜像备份与隔离候选验证。
+- [ ] E：app-only watchdog 上线，重分类两条误失败任务并验证不触发 Apple 写。
+- [ ] F：更新两份唯一运维记录、清理候选资源并完成最终 GitHub 同步。

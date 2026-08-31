@@ -1393,6 +1393,8 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     assert "远端结果不确定 ${counts.unknown} 项" in script
     assert "尚未开始 ${counts.queued} 项" in script
     assert "自动对账并继续剩余任务，不会终止整批" in script
+    assert "永久删除不再使用的 Alias" in script
+    assert 'item.wait_reason === "capacity_reached"' in script
     assert "async function writeClipboard" in script
     assert 'document.execCommand("copy")' in script
     clipboard = script.split("async function writeClipboard", 1)[1].split(
@@ -1468,6 +1470,15 @@ const summary = jobSummary(job);
 if (!summary.includes("成功 5 项")) process.exit(2);
 if (!summary.includes("远端结果不确定 1 项")) process.exit(3);
 if (!summary.includes("尚未开始 4 项")) process.exit(4);
+const capacitySummary = jobSummary({
+  status: "needs_reconcile",
+  wait_reason: "capacity_reached",
+  requested: 50,
+  succeeded: 0,
+  results: Array.from({length: 50}, () => ({status: "queued"})),
+});
+if (!capacitySummary.includes("Apple 隐藏邮箱已达上限")) process.exit(8);
+if (!capacitySummary.includes("永久删除不再使用的 Alias")) process.exit(9);
 const items = [
   {
     email: "one@icloud.com",

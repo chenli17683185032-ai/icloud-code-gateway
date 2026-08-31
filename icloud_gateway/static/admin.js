@@ -327,6 +327,13 @@
 
   function jobSummary(job) {
     const counts = jobCounts(job);
+    if (job.wait_reason === "capacity_reached") {
+      return (
+        `Apple 隐藏邮箱已达上限；已成功 ${counts.success}/${job.requested}。` +
+        `剩余 ${counts.queued} 项未开始。请永久删除不再使用的 Alias 后再创建，` +
+        `仅停用不会释放额度。`
+      );
+    }
     const parts = [`请求 ${job.requested} 项`, `成功 ${counts.success} 项`];
     if (counts.failed) parts.push(`明确失败 ${counts.failed} 项`);
     if (counts.unknown) parts.push(`远端结果不确定 ${counts.unknown} 项，需人工对账`);
@@ -348,6 +355,9 @@
   }
 
   function jobProgressText(job) {
+    if (job.wait_reason === "capacity_reached") {
+      return jobSummary(job);
+    }
     if (job.wait_reason === "transient_error") {
       const retryAfter = Number(job.retry_after_seconds || 0);
       const reason = job.retry_kind === "session"
@@ -865,7 +875,15 @@
     try {
       const data = await api("/admin/api/jobs");
       const job = firstNonTerminalJob(data.jobs);
-      if (!job) return;
+      if (!job) {
+        const capacityJob = [...data.jobs]
+          .reverse()
+          .find((item) => item.wait_reason === "capacity_reached");
+        if (capacityJob && createMessage) {
+          createMessage.textContent = jobSummary(capacityJob);
+        }
+        return;
+      }
       const messageElement = job.kind === "create_aliases" ? createMessage : bulkMessage;
       if (!messageElement) return;
       messageElement.textContent = `正在恢复任务 ${job.current}/${job.requested}…`;

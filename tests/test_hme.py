@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from icloud_gateway.hme import (
+    HmeCapacityError,
     HmeClient,
     HmeError,
     HmeNetworkError,
@@ -161,6 +162,17 @@ def test_client_maps_apple_41015_to_rate_limited_error() -> None:
         client.generate_alias()
     assert excinfo.value.code == "-41015"
     assert excinfo.value.retry_after_seconds == 30 * 60
+
+
+def test_client_maps_apple_41012_to_capacity_error() -> None:
+    def requester(method, url, **kwargs):
+        return FakeResponse({"success": False, "errorCode": "-41012"})
+
+    client = HmeClient(session(), requester=requester)
+
+    with pytest.raises(HmeCapacityError) as excinfo:
+        client.generate_alias()
+    assert excinfo.value.code == "-41012"
 
 
 def test_client_lists_and_creates_alias_using_generate_then_reserve() -> None:
