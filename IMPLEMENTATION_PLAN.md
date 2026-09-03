@@ -17,7 +17,7 @@
 - Chromium 始终复用唯一的 `/browser-data/profile`，容器替换或异常退出后仍保留长期 Cookie，不允许捕获任务创建临时 profile。
 - 管理员登录网站后可通过同域 HTTPS 的 `/admin/browser/*` 在线操作同一 Chromium；未登录请求不得取得 noVNC 页面、静态资源或 WebSocket。
 - 德国服务器上的 iCloud CN 浏览器与 HME API 通过显式配置的回国 HTTP/SOCKS5 代理出站；代理已配置时故障必须失败关闭，不得静默改为德国 IP 直连。
-- iCloud 与联动小铺复用同一 Playwright/Chromium 基础镜像层以减少磁盘占用，但保持独立进程、独立 profile、独立健康检查与重启边界。
+- iCloud 与同机既有项目复用同一 Playwright/Chromium 基础镜像层以减少磁盘占用，但保持独立进程、独立 profile、独立健康检查与重启边界。
 
 ### 1.1 生产热修复补充验收
 
@@ -79,7 +79,7 @@
 - 不持久化邮件正文或 OTP；每次查询从 IMAP 只读测量。
 - 远程 HME list 是 Alias 状态事实来源，本地数据不猜测 Apple 状态。
 - 浏览器 profile 持久化且只允许一个容器持有；Chromium CDP 监听浏览器自身回环并经内部代理仅暴露在 Docker 网络，不映射宿主端口，app 每次捕获前动态解析 browser 容器地址；noVNC 原始端口只绑定服务器回环地址，并额外经管理员认证后的同域 HTTPS 路由提供在线维护。
-- 联动小铺 Worker 使用 `mcr.microsoft.com/playwright:v1.61.1-jammy`；iCloud browser 使用同一基础镜像与其内置 Chromium，Docker 共享基础层，不把支付 Worker 的临时 BrowserContext 与 iCloud 长期 profile 放进同一浏览器进程。
+- 同机既有项目 Worker 使用 `mcr.microsoft.com/playwright:v1.61.1-jammy`；iCloud browser 使用同一基础镜像与其内置 Chromium，Docker 共享基础层，不把支付 Worker 的临时 BrowserContext 与 iCloud 长期 profile 放进同一浏览器进程。
 - 回国代理参数只由服务器 Secret/`0600` 环境文件注入；浏览器整体出站与 HME HTTPS 请求使用同一代理端点，IMAP 是否走代理仍按其邮箱可达性独立配置。
 
 ## 4. 系统边界与架构
@@ -109,7 +109,7 @@ FastAPI
   -> Chromium CDP (Docker 内网)
 
 Browser runtime
-  -> 复用联动小铺的 Playwright/Chromium 基础镜像层
+  -> 复用同机既有项目的 Playwright/Chromium 基础镜像层
   -> 独立 Chromium 进程 + 独立持久 profile
   -> 回国代理出站 + noVNC 管理界面
 ```
@@ -121,7 +121,7 @@ Browser runtime
 - 不开放 HME 停用、删除或 Apple 账户其他写操作。
 - 不把 noVNC 原始端口或 CDP 端口直接公开到互联网；noVNC 只能经管理员认证后的 HTTPS 反向代理访问。
 - 不在请求日志中记录原始密钥、OTP、Cookie 或 IMAP 密码。
-- 不复用联动小铺正在运行的 Chromium 进程、临时 BrowserContext 或 profile，也不让其收款任务重启影响 iCloud。
+- 不复用同机既有项目正在运行的 Chromium 进程、临时 BrowserContext 或 profile，也不让其收款任务重启影响 iCloud。
 
 ## 5. 数据模型
 
@@ -244,7 +244,7 @@ Browser runtime
 ### 节点 H：容器与服务器部署
 
 - [x] App Dockerfile：非 root 运行、健康检查、持久 `/data`。
-- [x] Browser Dockerfile：复用联动小铺的 Playwright/Chromium 基础镜像层，独立 Chromium + Xvfb + noVNC，唯一持久 `/browser-data/profile`，跨容器独占锁与异常恢复，Chromium CDP 回环监听并通过不映射宿主的内部代理供 app 使用。
+- [x] Browser Dockerfile：复用同机既有项目的 Playwright/Chromium 基础镜像层，独立 Chromium + Xvfb + noVNC，唯一持久 `/browser-data/profile`，跨容器独占锁与异常恢复，Chromium CDP 回环监听并通过不映射宿主的内部代理供 app 使用。
 - [x] 德国机房出站：browser 和 HME API 复用同一回国代理配置，支持 HTTP/SOCKS5，代理开启后故障失败关闭；browser 使用无认证内网 Mihomo 端点，HME API 可选认证；生产使用独立 Mihomo 进程，避免与收款 Worker 共用重启边界。
 - [x] Docker Compose：app/browser/Caddy，持久卷，重启策略，noVNC 原始端口只绑定 `127.0.0.1`；共享服务器覆盖文件禁用内置 Caddy并接入既有 edge 网络。
 - [x] Caddy HTTPS：域名环境变量、安全头、请求体限制、管理员认证后的 `/admin/browser/*` noVNC 页面与 WebSocket 转发。
@@ -264,12 +264,12 @@ Browser runtime
 当前线上闭环（2026-07-26）：
 
 - [x] 独立 browser、app、cn-proxy 在生产持续健康，异常 Chromium 可在 60 秒内自恢复且不重启 app。
-- [x] Cloudflare 控制面新增 `icloud.yunbay.xyz A 13.140.180.223`，开启代理并使用自动 TTL。
+- [x] Cloudflare 控制面新增 `icloud.yunbay.xyz A <server-1-ip>`，开启代理并使用自动 TTL。
 - [x] Cloudflare 权威服务与 Cloudflare/Google 公共 DoH 返回该代理记录。
 - [x] 为共享 Caddy 主动健康检查显式设置 `Host: icloud.yunbay.xyz`，回归测试和候选配置验证通过。
 - [x] 备份共享 Caddyfile，使用 graceful reload 上线站点；Caddy 与业务容器重启计数保持不变。
 - [x] 公网 `/healthz`、首页、管理员登录、未登录 noVNC 拒绝以及登录后 noVNC WebSocket/RFB 全部通过。
-- [x] 修正 CDP 运维探针并把服务器部署结果写回本文件、`OPERATIONS.md` 与云贝唯一连接手册。
+- [x] 修正 CDP 运维探针并把服务器部署结果写回本文件、`OPERATIONS.md` 与本地连接手册。
 - [x] 全量门禁通过，提交并推送 GitHub `main`，随后只清理本任务 builder、QA 标签和悬空镜像。
 - [x] 清理后复测服务并记录 `docker system df` 与根卷可用空间前后值，最终工作树保持干净。
 
@@ -293,7 +293,7 @@ Browser runtime
 部署前：
 
 1. 生成主密钥、管理员密码和 VNC 密码，以服务器 Secret/权限 `0600` 环境文件保存。
-2. 从联动小铺已有 Secret 取得回国代理的协议、端点和可选认证信息，注入 iCloud browser 与 HME API，不复制到仓库。
+2. 从同机既有项目已有 Secret 取得回国代理的协议、端点和可选认证信息，注入 iCloud browser 与 HME API，不复制到仓库。
 3. 验证域名 DNS、80/443 端口、服务器 NTP 以及 browser/HME 代理出口 IP。
 4. 如有旧数据，先使用 SQLite 在线备份并检查 `quick_check`。
 5. 先启动 browser 与 app，健康后再让 Caddy 切换公网流量。
@@ -310,7 +310,7 @@ Browser runtime
 - 首版支持一个 iCloud HME 资源池和一个转发 IMAP，数据模型不阻塞以后扩展多资源池。
 - 验证码形式以现有 `Team-Workflow` 业务的 6 位数字码为准。
 - 隐藏邮箱邮件已转发到可用 IMAP 登录的邮箱。
-- 联动小铺现有 Worker 已证明代理参数形式为 server + 可选 username/password；最终上线前仍需在服务器上只读确认实际协议、出口 IP 和 Secret 文件位置。
+- 同机既有项目现有 Worker 已证明代理参数形式为 server + 可选 username/password；最终上线前仍需在服务器上只读确认实际协议、出口 IP 和 Secret 文件位置。
 - 最终上线需要实际服务器 IP/主机名、SSH 用户/密钥路径和域名。这些信息不影响本地实现与容器验收。
 - 本计划不记录任何真实 Apple/IMAP/API 凭据。
 
@@ -320,9 +320,9 @@ Browser runtime
 - 2026-07-25：完成 GitHub 相近项目检索与架构取舍，选定“HME 管理面与 OTP 公开面分离、不持久化邮件正文、服务器持久 Chromium profile”方案。
 - 2026-07-26：根据新增要求，将“唯一长期 Cookie 浏览器”和“管理员登录后通过同域网站在线可视化维护 iCloud”升级为强制验收项；SSH 隧道保留为故障恢复备用路径。
 - 2026-07-26：故障注入证明 app/browser 共享网络命名空间会在 browser 单独重启后留下旧网络引用，方案改为独立容器网络 + browser 动态地址解析，消除必须人工重启 app 的失稳点。
-- 2026-07-26：根据德国服务器与联动小铺现有回国代理，方案调整为复用同一 Playwright/Chromium 基础镜像层、独立 iCloud 进程/profile，browser 与 HME API 同代理出站且无直连降级。
+- 2026-07-26：根据德国服务器与同机既有项目现有回国代理，方案调整为复用同一 Playwright/Chromium 基础镜像层、独立 iCloud 进程/profile，browser 与 HME API 同代理出站且无直连降级。
 - 2026-07-26：本地容器验收通过。Browser 7 秒健康，固定 UID 102 无损接管旧 profile；Chromium 故障注入后 browser 独立恢复，app 未重启，Cookie 与 SQLite Alias 保持。Caddy WebSocket 认证缺陷已修复，登录后 101/RFB、未登录 303。SQLite/profile 备份恢复演练通过，实际 browser 停机约 28 秒。
-- 2026-07-26：只读审计德国服务器。现有 Caddy 独占 80/443；联动小铺 Mihomo 仅绑定共享网络命名空间回环。生产方案确定为：复用其订阅配置但运行独立 `cn-proxy`，app/browser 通过唯一别名接入既有 Caddy 网络，不修改或重启收款 Worker。
+- 2026-07-26：只读审计德国服务器。现有 Caddy 独占 80/443；同机既有项目 Mihomo 仅绑定共享网络命名空间回环。生产方案确定为：复用其订阅配置但运行独立 `cn-proxy`，app/browser 通过唯一别名接入既有 Caddy 网络，不修改或重启收款 Worker。
 - 2026-07-26：私有 GitHub 仓库 `chenli17683185032-ai/icloud-code-gateway` 已建立，首个完整实现提交已推送 `main`。服务器部署目录选定为 deploy 用户可控的 `/opt/new-api/icloud-code-gateway`，不依赖 sudo。
 - 2026-07-26：生产首次启动发现 `proxychains4` 不接受 Docker DNS 名 `cn-proxy` 作为首个代理节点；故障 browser 已停止，app 与独立 cn-proxy 保持健康。修复限定为 browser 配置渲染时将代理主机解析为容器网络 IPv4，解析失败继续失败关闭；HME 请求仍保留 `socks5h` 主机名语义。当前节点为 H 的线上闭环验收，完成后进入 I 的定向清理。
 - 2026-07-26：browser 代理 DNS 修复完成本地闭环：新增解析成功与失败关闭回归测试，全量 `79 passed`；Ruff、compileall、Compose 合并配置与 `git diff --check` 均通过。
@@ -396,15 +396,15 @@ Browser runtime
 
 ### 13.1 目标与验收指标
 
-目标是在不改变 browser、cn-proxy、SQLite 卷和 CDP 网络归属的前提下，把 GitHub `main` 的 `91369cf` 部署到云贝服务器，并上线新的 Cloudflare 来源 IP 信任边界。
+目标是在不改变 browser、cn-proxy、SQLite 卷和 CDP 网络归属的前提下，把 GitHub `main` 的 `91369cf` 部署到生产服务器，并上线新的 Cloudflare 来源 IP 信任边界。
 
 - 构建期间旧 app 持续提供服务；正式 app 替换必须有 60 秒上界，失败立即恢复旧镜像。
 - 部署前完成 SQLite 在线备份和 `quick_check=ok`，部署后再次确认数据库完整。
-- 只重建 app；browser、cn-proxy、共享 Caddy 和其他云贝服务不得重启。
+- 只重建 app；browser、cn-proxy、共享 Caddy 和该机其他服务不得重启。
 - 共享 Caddyfile 先生成候选、用运行中 Caddy 2.11.4 验证，再原位更新并 graceful reload；验证失败不改运行时配置。
 - 公网 `/healthz`、首页、管理员登录、未登录 noVNC 拒绝、分块超限 413 和安全响应头全部通过。
 - app 恢复健康应小于 60 秒；browser/cn-proxy/Caddy 的 restart count 前后不变。
-- 服务器部署标记记录实际功能提交 `91369cf`；本地计划、运维手册和云贝唯一连接手册写回结果后推送 GitHub `main`。
+- 服务器部署标记记录实际功能提交 `91369cf`；本地计划、运维手册和本地连接手册写回结果后推送 GitHub `main`。
 - 最终本地 `main == origin/main`，工作树干净，候选容器、临时文件和无用镜像全部清理。
 
 ### 13.2 控制结构与扰动
@@ -433,7 +433,7 @@ Browser runtime
 - [x] 节点 4：服务器侧独立 60 秒 watchdog 仅替换 app，新容器 10 秒恢复健康；SQLite、内部/公网健康和 revision 通过，未触发回滚。
 - [x] 节点 5：完整共享 Caddy 候选与挂载配置均通过 2.11.4 验证，原位写入后 graceful reload；inode、权限、容器 ID 和 `restart=0` 保持不变。
 - [x] 节点 6：公网与内部闭环通过；分块超限 413、小分块正常到达路由、Unicode 错误口令 401、来源头可信链、SQLite/CDP、安全头、日志和磁盘均正常，四个容器均为 `restart=0`。
-- [x] 节点 7：更新服务器部署标记、`OPERATIONS.md` 和云贝唯一连接手册，清理临时件；本地最终门禁为 `104 passed`、Ruff/格式/编译/diff/秘密扫描通过，最终记录提交并推送 GitHub `main`。
+- [x] 节点 7：更新服务器部署标记、`OPERATIONS.md` 和本地连接手册，清理临时件；本地最终门禁为 `104 passed`、Ruff/格式/编译/diff/秘密扫描通过，最终记录提交并推送 GitHub `main`。
 
 ### 13.5 回滚边界
 
@@ -448,7 +448,7 @@ Browser runtime
 - 服务器非删除式同步 Git 提交 `91369cf1c54fb5161b4cfc5f8953c95e94878ac2`，69 个跟踪文件逐项 SHA-256 验证通过，`.env` 保持 `0600`。候选镜像在独立临时卷上通过健康、SQLite 与 Unicode 口令比较验证。
 - 服务器侧独立 60 秒 watchdog 只 force-recreate app；新 app 在 10 秒内恢复健康，镜像为 `sha256:906ffbefc34aff91ad762523cae37859b42c7d5a937acc3169e88edf865fe99e`，没有触发回滚。browser、cn-proxy 与 Caddy 的容器 ID、启动时间和 restart count 均未变化。
 - 共享 Caddy 候选只新增 Cloudflare 来源头可信边界，完整配置和挂载配置均通过运行中 Caddy 2.11.4 验证；原位写入保持 inode/权限，graceful reload 后 Caddy 容器 ID 不变且 `restart=0`。最终 Caddy SHA-256 为 `90dec04b2024eeabaa67f0dcde1d254e3ed02ce9f4bd6f9dc550f7c51f13c3f8`。
-- 公网 `/healthz`、首页、管理员登录为 200，未登录 noVNC 为 303，中文错误口令为 401；安全响应头完整。应用直连 3 MiB 分块请求为 413，小分块表单为 401。直连源站伪造 XFF/`CF-Connecting-IP` 被丢弃，经 Cloudflare 请求恢复真实出口 `202.8.9.242`。
+- 公网 `/healthz`、首页、管理员登录为 200，未登录 noVNC 为 303，中文错误口令为 401；安全响应头完整。应用直连 3 MiB 分块请求为 413，小分块表单为 401。直连源站伪造 XFF/`CF-Connecting-IP` 被丢弃，经 Cloudflare 请求恢复真实出口 `<真实出口 IP>`。
 - 生产标记 `.icloud-code-gateway-deploy-sha` 为完整功能提交；新镜像保留 `latest/prod/release-91369cf`，旧镜像只保留专用 rollback 标签。候选容器、临时卷、候选标签、部署锁和一次性脚本均已清理，没有本轮悬空镜像；未修改 CDP 9222 网络归属，未执行 Apple/HME 远端写操作。
 
 ## 14. 历史 Alias 导入与 iCloud 管理闭环
@@ -468,7 +468,7 @@ Browser runtime
 - CSRF、管理员会话、确认字段、动作状态约束和错误映射均有直接回归测试。
 - 全量测试、Ruff、格式、Python 编译、`git diff --check` 和秘密扫描通过。
 - 部署前完成 SQLite 在线备份；构建期间旧 app 持续服务，只替换 app，60 秒 watchdog 失败自动回滚；browser、cn-proxy、Caddy 和 CDP 网络归属不变。
-- 部署后只执行 HME list 读取和本地导入，不自动停用、恢复或删除任何真实 Apple Alias；最终更新 `OPERATIONS.md`、云贝唯一连接手册并推送 GitHub `main`，本地工作树保持干净。
+- 部署后只执行 HME list 读取和本地导入，不自动停用、恢复或删除任何真实 Apple Alias；最终更新 `OPERATIONS.md`、本地连接手册并推送 GitHub `main`，本地工作树保持干净。
 
 ### 14.2 控制结构与扰动
 
@@ -570,7 +570,7 @@ Browser runtime
 - [x] 节点 4：已增加管理导航和“查询记录”栏目，提供邮箱/结果/来源指纹/北京时间及空状态；1440×900、820×900、390×844 均无横向溢出或内容重叠，导航定位不会被粘性顶栏遮挡。
 - [x] 节点 5：README/运维说明已更新；`116 passed`，Ruff、格式、Python/JS 语法、两套 Compose、`git diff --check` 和秘密扫描全部通过。三视口 UI 无溢出/重叠，控制台错误为 0，固定 UTC 样本正确显示为北京时间且 HTML 不含验证码、Key 或原始 IP。
 - [x] 节点 6：功能提交 `bd1b4fe` 已推送 GitHub `main`；服务器完成 SQLite/源码备份后，用独立 60 秒 watchdog 只替换 app，新容器约 10 秒恢复健康且未回滚。
-- [x] 节点 7：生产只读核对迁移列、索引、17 条既有查询记录及管理页展示；补充修正三份空证据，更新 `OPERATIONS.md`、本计划和云贝唯一连接手册，并清理本地/服务器临时件。本节随最终纯文档提交推送 GitHub `main`。
+- [x] 节点 7：生产只读核对迁移列、索引、17 条既有查询记录及管理页展示；补充修正三份空证据，更新 `OPERATIONS.md`、本计划和本地连接手册，并清理本地/服务器临时件。本节随最终纯文档提交推送 GitHub `main`。
 
 ### 15.6 测试矩阵
 
@@ -608,7 +608,7 @@ Browser runtime
 - 优先复用唯一持久 Chromium profile 捕获新 Session；捕获的新 Session 必须先通过 HME list 验证，验证成功后才能原子保存并对账。
 - 恢复后远端有效 ID 集与本地远端 ID 集差异均为 0，SQLite `quick_check=ok`，app/browser/cn-proxy/Caddy 保持 `healthy / restart=0`。
 - 不以真实创建请求作为恢复验收探针，避免用户已经点击两次后再产生第三个 Alias；以只读 list、幂等 sync 和管理页状态作为闭环证据。
-- 补齐查询记录部署证据文件，更新 `OPERATIONS.md` 和云贝唯一连接手册，最终推送 GitHub `main` 并清理本轮临时件。
+- 补齐查询记录部署证据文件，更新 `OPERATIONS.md` 和本地连接手册，最终推送 GitHub `main` 并清理本轮临时件。
 
 ### 16.2 控制结构与扰动
 
@@ -636,7 +636,7 @@ Browser runtime
 - [x] 节点 3：捕获保存时已执行一次幂等对账；随后只读复核 Apple 为 108 条（98 活动、10 失活），本地同为 108 条，双向 ID 集差异、重复 ID/邮箱和畸形项均为 0。相较故障前基线新增 1 条，证明两次 502 中一次已在 Apple 侧完成创建并由本次对账恢复；未再调用显式同步或创建接口。
 - [x] 节点 4：管理页已显示 108 条 Alias 和 17 条查询记录，HME 为已配置；SQLite、内部/公网健康和 CDP 均正常，app/browser/cn-proxy/Caddy 全部 `healthy / restart=0 / OOM=false`，未再次创建真实 Alias。
 - [x] 节点 5：查询记录部署补充验收通过；生产与隔离候选的数据库/页面证据均非空且断言通过，最终 SHA-256 清单复验成功，候选容器、卷和远程脚本已清理。
-- [x] 节点 6：实施计划、`OPERATIONS.md` 和云贝唯一连接手册已更新；本节随最终纯文档提交推送 GitHub `main`，服务器部署标记继续指向功能提交 `bd1b4fe`。
+- [x] 节点 6：实施计划、`OPERATIONS.md` 和本地连接手册已更新；本节随最终纯文档提交推送 GitHub `main`，服务器部署标记继续指向功能提交 `bd1b4fe`。
 - [x] 节点 7：服务器候选容器/卷和一次性脚本已删除；本机 5 个任务临时路径已移入独立废纸篓目录。最终提交推送后复核工作树干净且 `main == origin/main`。
 
 ### 16.5 回滚与停止条件
@@ -724,7 +724,7 @@ Browser runtime
 - [x] 节点 6：README/运维说明已更新；全量 `125 passed`，Ruff/格式、Python/JS 语法、两套 Compose、diff 与秘密扫描通过。1440px、768px、390px 浏览器验收均无横向溢出、按钮重叠或控制台错误；初始 HTML 不含完整 key/验证码，审计不含 OTP。
 - [x] 节点 7：功能提交 `312e8ba809d5cf9799fb54780ebe6dc2902fa20f` 已推送 GitHub `main`。部署前完成 SQLite/源码/旧镜像备份；隔离候选迁移与 key 加密闭环通过后，60 秒 watchdog 只替换 app，约 22.4 秒恢复 healthy，公网最长连续非 200 为 16.243 秒，未触发回滚。
 - [x] 节点 8：生产新增 `access_key_blob` 后 `quick_check=ok`，115 个 Alias、4 条旧 key 哈希指纹和 17 条公开查询记录均保持；旧 key reveal 返回 409 且未自动轮换。管理员验证码接口实际扫描 44 封候选、返回 0 条、未截断；未制造验证码、未执行 Apple/HME 写操作，browser/cn-proxy/Caddy 未重启。
-- [x] 节点 9：`OPERATIONS.md`、本计划和云贝唯一连接手册已更新，最终记录提交已纳入 GitHub `main`。服务器候选容器/卷、release、候选标签和部署锁均已清理，部署标记保持实际功能提交 `312e8ba809d5cf9799fb54780ebe6dc2902fa20f`。
+- [x] 节点 9：`OPERATIONS.md`、本计划和本地连接手册已更新，最终记录提交已纳入 GitHub `main`。服务器候选容器/卷、release、候选标签和部署锁均已清理，部署标记保持实际功能提交 `312e8ba809d5cf9799fb54780ebe6dc2902fa20f`。
 
 ### 17.7 测试矩阵
 
@@ -957,7 +957,7 @@ Browser runtime
 #### 节点 P：计划固化与只读预检
 
 - [x] 确认本地 `main`、GitHub `main` 和功能提交存在，工作树在计划编辑前干净。
-- [x] 定位云贝唯一 SSH 密钥和连接手册，不读取或回显私钥内容。
+- [x] 定位本地唯一 SSH 密钥和连接手册，不读取或回显私钥内容。
 - [x] 本节部署计划已由提交 `dbda19c` 推送到 GitHub `main`。
 - [x] 只读采集生产部署标记、源码/镜像、容器健康/restart/OOM、磁盘、时间同步、
   `.env` 权限、SQLite 完整性与脱敏计数、内外 health 基线。
@@ -998,7 +998,7 @@ Browser runtime
 - [x] 固定 `release-46c8bbb` 与回滚标签，生成并复验最终 SHA-256 清单。
 - [x] 清理候选容器/卷/标签、一次性脚本和部署锁；保留正式 release、唯一 rollback 和审计
   目录，复验正式服务不受清理影响。
-- [x] 把实际镜像、停机时长、健康/数据结果和回滚位置写回本节、`OPERATIONS.md` 与云贝
+- [x] 把实际镜像、停机时长、健康/数据结果和回滚位置写回本节、`OPERATIONS.md` 与本地
   唯一连接手册；提交并推送 GitHub `main`，本地工作树恢复干净。
 
 ### 19.4 回滚与不确定性
@@ -1051,7 +1051,7 @@ Browser runtime
   解压源码、一次性 watchdog 和部署锁均已清理；清理后内外 health、SQLite 和四容器状态
   复验通过，根卷可用 45GB。审计目录保留 34 个权限受限文件，最终清单 SHA-256 为
   `6f160aaf1d89d69257153b1c485ebcb6f27e18bee4c4ae8a387bba8d42bcda57`，清单内文件全部
-  复验通过。本计划、`OPERATIONS.md` 和云贝唯一连接手册已同步，最终记录提交推送
+  复验通过。本计划、`OPERATIONS.md` 和本地连接手册已同步，最终记录提交推送
   GitHub `main` 后本轮闭环完成。
 
 ## 20. 10:30 验证码未返回事故诊断计划（2026-07-31）
@@ -1194,7 +1194,7 @@ Browser runtime
 - 部署前后 SQLite `quick_check=ok`，Alias、key、审计和设置的计数及脱敏聚合指纹守恒；
   browser、cn-proxy、共享 Caddy 的容器 ID、restart 和 OOM 状态不变。
 - 功能提交、生产部署标记、release 镜像和服务器源码一致；最终记录同步本计划、
-  `OPERATIONS.md` 与本地云贝唯一连接手册，推送 GitHub `main` 后工作树干净。
+  `OPERATIONS.md` 与本地连接手册，推送 GitHub `main` 后工作树干净。
 
 ### 21.2 工程控制结构
 
@@ -1257,7 +1257,7 @@ Browser runtime
 
 #### 节点 Y：生产预检、备份与隔离候选
 
-- [x] 从本地云贝唯一连接手册定位 SSH 主机和密钥，不读取或回显私钥；只读确认生产部署
+- [x] 从本地连接手册定位 SSH 主机和密钥，不读取或回显私钥；只读确认生产部署
   标记、源码/镜像、NTP、磁盘、`.env=0600`、四容器健康/restart/OOM、内外 health。
 - [x] 建立权限 `0700` 的唯一审计目录；在线备份 SQLite 并验证 `quick_check=ok`，保存脱敏
   数据基线、源码和镜像元数据清单，给现 app 镜像增加唯一 rollback 标签。
@@ -1279,7 +1279,7 @@ Browser runtime
   不制造真实验证码，不执行 Apple/HME 写操作，不轮换 key。
 - [x] 固定 release 和唯一 rollback，清理候选容器/卷/标签、一次性脚本、上传归档和部署锁；
   保留审计目录并复验服务。
-- [x] 更新本节、`OPERATIONS.md` 与云贝唯一连接手册，提交并推送 GitHub `main`，清理本地
+- [x] 更新本节、`OPERATIONS.md` 与本地连接手册，提交并推送 GitHub `main`，清理本地
   临时件并恢复工作树干净。
 
 ### 21.5 回滚与不确定性
@@ -1343,7 +1343,7 @@ Browser runtime
   受限文件，清单全部复验通过，清单 SHA-256 为
   `f41a509fd184dbbdad196e2a8d0e97d13066477066b088d9432de5cd1673eb24`。
 - 2026-07-31：节点 Z 收口完成。本计划与 `OPERATIONS.md` 的部署记录提交 `6110c95` 已推送
-  GitHub `main`，桌面云贝唯一连接手册已原位更新且保持 `0600`；本地取证/切换脚本和采样
+  GitHub `main`，本地连接手册已原位更新且保持 `0600`；本地取证/切换脚本和采样
   临时件均已清理。Clash 保持任务开始时的 `rule / US 33 AI加速 x1.0`，未改变用户网络选择。
 
 ## 22. `3030701` 发布阻断修复计划（2026-08-01）
@@ -1508,7 +1508,7 @@ P2，当前禁止部署到生产：
   单快照提交、原子 claim、跨进程 owner 锁、可见 reconcile 和两阶段关停。
 - [x] 节点 D：运行定向故障注入和完整本地门禁；更新第 22 节完成状态与 `OPERATIONS.md` 发布条件，
   创建最小功能提交并推送 GitHub `main`，再次确认远端提交未漂移。
-- [x] 节点 E：从桌面云贝唯一连接手册建立 SSH；只读采集部署标记、源码/镜像、容器健康、restart/
+- [x] 节点 E：从本地连接手册建立 SSH；只读采集部署标记、源码/镜像、容器健康、restart/
   OOM、NTP、磁盘、`.env` 权限、Compose 展开、SQLite 和脱敏数据基线，确认无待恢复任务。
 - [ ] 节点 F：建立权限 `0700` 的唯一审计目录，备份 SQLite/profile/源码/marker/旧镜像元数据并校验；
   非删除式同步 Git 跟踪文件并逐文件核对，构建唯一候选镜像，在隔离数据库副本上验证迁移、恢复、
@@ -1516,7 +1516,7 @@ P2，当前禁止部署到生产：
 - [ ] 节点 G：预先启动独立 60 秒 watchdog，只 force-recreate app；验证 healthy、内部/公网入口、
   revision、SQLite、数据摘要、日志和无关容器不变。任一反馈失败自动回滚，不能等待人工介入。
 - [ ] 节点 H：固定唯一 release/rollback 标签，删除候选容器/卷/标签、上传包、脚本和部署锁；更新
-  本计划、`OPERATIONS.md` 与桌面云贝唯一连接手册，推送最终记录提交并清理本地临时资料。
+  本计划、`OPERATIONS.md` 与本地连接手册，推送最终记录提交并清理本地临时资料。
 
 ### 23.5 测试与验收矩阵
 
@@ -1624,8 +1624,8 @@ P2，当前禁止部署到生产：
 
 已确认：
 
-- 桌面入口 `/Users/ethan/Desktop/鲨鱼工具库/启动本地iCloud控制台.command` 可执行，并转发到 `icloud 工具/启动本地iCloud控制台.command`。
-- 第二层启动器可执行，固定调用 `/Users/ethan/Documents/plus 项目/scripts/run-local-control.sh`；该脚本当前存在且可执行。
+- 桌面入口 `<本地工具目录>/启动本地iCloud控制台.command` 可执行，并转发到 `icloud 工具/启动本地iCloud控制台.command`。
+- 第二层启动器可执行，固定调用 `<项目目录>/scripts/run-local-control.sh`；该脚本当前存在且可执行。
 - 项目本地 Git `HEAD` 为 `8cefa8e`（2026-08-04）；配置的 GitHub `origin` 为 `chenli17683185032-ai/icloud-code-gateway`。2026-08-08 的 `git ls-remote origin main` 未能访问远端，此项仅记录为交付同步阻塞，不作为本地启动故障的推断依据。
 
 ### 24.3 实施节点
@@ -2045,7 +2045,7 @@ cloud_key_still_active_after_backfill=True
 - [x] G：生产真实构建输入确认精确对应 `5a5d49b` 后，从该基线建立最小热修复提交 `07a3534`；该提交已作为父提交合并进 GitHub `main`（合并提交 `d7c48c7`）。
 - [x] H：建立受限回滚目录、SQLite/源码/marker/旧镜像备份和唯一回滚标签；隔离候选证明旧镜像对事故邮件返回空、新镜像成功提取后，由独立 60 秒 watchdog app-only 切换。
 - [x] I：生产内外闭环、真实事故邮件只读复验、数据守恒和无关容器不变均通过；两次错误发布门禁均在 11–13 秒切换后自动回滚，修正门禁后最终切换 10 秒成功。
-- [ ] J：更新本计划、`OPERATIONS.md` 与云贝唯一连接手册，推送最终记录，清理候选资源和本地临时件。
+- [ ] J：更新本计划、`OPERATIONS.md` 与本地连接手册，推送最终记录，清理候选资源和本地临时件。
 
 ### 26.6 停止与回滚条件
 
@@ -2135,7 +2135,7 @@ Alias 邮箱按钮
 - [x] O：把 Settings、Compose、`.env.example`、本地启动器和前端 fallback 统一为 100；持久 job 测试确认一次建模 100 个串行 queued item，101 被拒绝。
 - [x] P：GitHub `main` 已包含功能提交 `e38c708`，并以不改变主线代码树的 merge `8d6f731` 纳入生产适配谱系 `b38773b`；生产基线全量 218 项测试、Ruff、格式、Python/JS 语法、Compose、diff 与秘密扫描通过。
 - [x] Q：通过当前 Clash `jp22` 节点完成 app-only 部署。最终生产补丁 `83df466` 修正 Docker healthcheck Host 合同；watchdog 在 26 秒内以容器、内网、公网、Caddy-origin、SQLite/schema、edge 批量上限 50 连续三轮接受，新 app 随后通过 `healthy` 与完整 postflight。
-- [x] R：README 现有功能说明复核无漂移；`OPERATIONS.md`、本计划和云贝唯一连接手册已更新，生产补丁已合并 GitHub `main`，临时 worktree/分支/脚本/归档和远端候选状态已清理。
+- [x] R：README 现有功能说明复核无漂移；`OPERATIONS.md`、本计划和本地连接手册已更新，生产补丁已合并 GitHub `main`，临时 worktree/分支/脚本/归档和远端候选状态已清理。
 
 ### 27.5 停止与回滚条件
 
@@ -2151,7 +2151,7 @@ Alias 邮箱按钮
 - 2026-08-08：新增 `POST /admin/api/aliases/{id}/usage`，要求管理员会话和 CSRF；缺 CSRF 为 403、未登录为 401、无效值为 422、未知 Alias 为 404。自定义 HTML 字符串在模板中转义，前端只用 `textContent` 更新。
 - 2026-08-08：管理页每条 Alias 显示 GPT/Grok/其他/清除按钮，选中项有显式勾选；其他用途展开 80 字符输入。点击邮箱直接复制并显示“已复制”，Clipboard API 失败时使用临时 textarea 选区回退，不写浏览器存储。
 - 2026-08-08：本机 control 已重启为新代码，PID `55651` 仅监听 `127.0.0.1:18081`；SQLite `quick_check=ok`，369 个 Alias，`usage_label` 列存在，页面导出批量上限 100。真实浏览器在第一条 Alias 上完成复制、GPT、自定义、刷新持久化并恢复原空值；1440px 与 390px 的 `scrollWidth == innerWidth`，移动端自定义表单与操作按钮均可达，未调用 Apple 创建或生命周期写。
-- 2026-08-08：用户将本机 Clash 出口切换为 `jp22`；`127.0.0.1:7897 -> 13.140.180.223:2222` 已在严格 known_hosts、固定私钥和 `BatchMode` 下只读连通，远端主机为既有生产机。服务器地址、SSH 用户和端口未变。
+- 2026-08-08：用户将本机 Clash 出口切换为 `jp22`；`127.0.0.1:7897 -> <server-1-ip>:2222` 已在严格 known_hosts、固定私钥和 `BatchMode` 下只读连通，远端主机为既有生产机。服务器地址、SSH 用户和端口未变。
 - 2026-08-09：生产适配提交 `b38773b` 已作为祖先纳入 GitHub `main`。云下 control 保持一次建模 100 项；云上 edge 因不负责 Alias 生成且仍有既知生命周期门控缺口，在 `.env` 中显式保持批量上限 50，避免扩大破坏半径。
 - 2026-08-09：第一次正式切换前，生产库副本迁移、候选用途 API/XSS/静态资源 SHA/OTP fixture、旧镜像读取 Alias/管理页/invalid-key 兼容均通过；源树 20 项实际字节差异精确匹配。正式 app 替换后公网在 20 秒观察窗内仍返回 503，watchdog 主动回滚，切换到恢复共 29 秒；最终 marker、镜像、源码和 `.env` 均恢复 `07a3534`，公网 200、app healthy/restart=0/OOM=false，未留下候选容器、卷或部署锁。
 - 2026-08-09：第二次正式切换的审计目录为 `/opt/new-api/icloud-code-gateway/backups/alias-usage-20260809T060824Z-b38773b`。候选迁移、用途 API/UI/XSS、OTP fixture、旧镜像兼容均再次通过；watchdog 脱敏探针显示新容器的 Docker health 在观察窗内始终为 `starting`，旧接受逻辑因此尚未执行内网、公网和 SQLite 真实探针便误判失败。watchdog 在 28 秒后启动回滚，切换后 39 秒内恢复旧 marker `07a3534` 和旧镜像 `5defdf1…`；公网观察期间持续 HTTP 200，app 最终 healthy/restart=0/OOM=false，部署锁与候选资源均清空。

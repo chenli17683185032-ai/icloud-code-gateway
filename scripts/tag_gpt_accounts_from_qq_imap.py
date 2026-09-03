@@ -56,11 +56,10 @@ def main() -> int:
     env: dict[str, str] = {}
     env.update(_load_env(project / ".env"))
     env.update(_load_env(project / "icloud-control-plane.env"))
-    env.update(
-        _load_env(
-            Path.home() / "Desktop" / "鲨鱼工具库" / "iCloud管理工具" / "icloud-control-plane.env"
-        )
-    )
+    env.update(_load_env(runtime / "icloud-control-plane.env"))
+    override = os.environ.get("ICLOUD_GATEWAY_CREDENTIALS_FILE", "").strip()
+    if override:
+        env.update(_load_env(Path(override).expanduser()))
     master = (
         env.get("ICLOUD_GATEWAY_MASTER_KEY")
         or env.get("LOCAL_ICLOUD_GATEWAY_MASTER_KEY")

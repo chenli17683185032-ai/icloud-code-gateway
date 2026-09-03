@@ -11,14 +11,15 @@ PID_FILE="${RUNTIME_ROOT}/control.pid"
 LOG_FILE="${LOG_DIR}/control.log"
 ENV_FILE="${PROJECT_DIR}/.env"
 CREDS_FILE=""
+# 凭据文件位置不写死在仓库里：优先用 ICLOUD_GATEWAY_CREDENTIALS_FILE 指定，
+# 否则按运行时目录 / 项目目录 / 项目上级目录依次查找。
 for candidate in \
-  "${HOME}/Desktop/鲨鱼工具库/云贝平台/服务器相关/icloud-control-plane.env" \
-  "${HOME}/Documents/鲨鱼项目资料/云贝/服务器相关/icloud-control-plane.env" \
-  "${HOME}/Desktop/云贝/服务器相关/icloud-control-plane.env" \
+  "${ICLOUD_GATEWAY_CREDENTIALS_FILE:-}" \
+  "${RUNTIME_ROOT}/icloud-control-plane.env" \
   "${PROJECT_DIR}/icloud-control-plane.env" \
-  "${PROJECT_DIR}/../icloud-control-plane.env" \
-  "${HOME}/Desktop/鲨鱼工具库/iCloud管理工具/icloud-control-plane.env"
+  "${PROJECT_DIR}/../icloud-control-plane.env"
 do
+  [[ -z "$candidate" ]] && continue
   if [[ -f "$candidate" ]]; then
     CREDS_FILE="$candidate"
     break

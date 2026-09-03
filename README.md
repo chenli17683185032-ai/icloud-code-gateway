@@ -69,7 +69,7 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 本地控制台推荐直接跑 Python 进程，不依赖 Docker / OrbStack：
 
 ```bash
-# 一键启动（桌面/鲨鱼工具库也可双击）
+# 一键启动（桌面快捷方式也可双击）
 ./scripts/run-local-control.sh
 ```
 
@@ -77,6 +77,21 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 
 - `~/.icloud-code-gateway/data`：SQLite + 加密 HME Session
 - `~/.icloud-code-gateway/browser-profile`：本机持久 Chromium 登录态
+
+本地凭据文件（master key / control-plane token / 可选 IMAP）不进仓库，按下列顺序查找，命中第一个即用：
+
+1. `ICLOUD_GATEWAY_CREDENTIALS_FILE` 指定的路径
+2. `~/.icloud-code-gateway/icloud-control-plane.env`
+3. `<项目目录>/icloud-control-plane.env`
+4. `<项目目录>/../icloud-control-plane.env`
+
+凭据文件放在别处时，导出环境变量或做一个软链接即可：
+
+```bash
+export ICLOUD_GATEWAY_CREDENTIALS_FILE="/your/private/path/icloud-control-plane.env"
+# 或
+ln -s "/your/private/path/icloud-control-plane.env" ~/.icloud-code-gateway/icloud-control-plane.env
+```
 
 无 Docker 时不配 `ICLOUD_GATEWAY_CDP_URL`，改为：
 
@@ -96,7 +111,7 @@ ICLOUD_GATEWAY_ADMIN_OPEN=1
 
 传统路径仍支持管理端 IMAP 取码：配好转发邮箱 IMAP 后，主页 Alias 列表每一行会显示最近 5 分钟验证码，并支持自动刷新。使用 Cloudflare 收件箱时不再需要这些 `ICLOUD_GATEWAY_IMAP_*` 配置。
 
-把下面这些写进 `~/Desktop/云贝/服务器相关/icloud-control-plane.env`（或项目 `.env`），本地启动脚本会自动注入：
+把下面这些写进 `~/.icloud-code-gateway/icloud-control-plane.env`（或项目 `.env`），本地启动脚本会自动注入：
 
 ```dotenv
 ICLOUD_GATEWAY_IMAP_FORWARDING_EMAIL=you@example.com
@@ -110,7 +125,7 @@ ICLOUD_GATEWAY_IMAP_JUNK_FOLDER=
 
 ## 架构取舍
 
-本项目复用联动小铺所用的 `mcr.microsoft.com/playwright:v1.61.1-jammy` Chromium 基础镜像层，但不复用它正在运行的浏览器进程、BrowserContext 或 profile。
+本项目复用同机既有项目所用的 `mcr.microsoft.com/playwright:v1.61.1-jammy` Chromium 基础镜像层，但不复用它正在运行的浏览器进程、BrowserContext 或 profile。
 
 这样能共享本机/服务器上的大体积镜像层，同时保持以下故障边界独立：
 
@@ -206,7 +221,7 @@ uv run python -m compileall -q icloud_gateway tests
 
 > 发布状态：`3030701` 已被并发与长任务审查标记为不可直接部署。修复分支必须完成 Alias 快照 CAS、SQLite 持久批任务、Compose 变量透传、有界停机及真实 Apple 会话的 validate/list 只读验收后，才能进入生产部署闭环。不要通过放宽 Cloudflare 超时部署同步批处理版本。
 
-德国云贝服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用联动小铺的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
+生产服务器已有 Caddy 占用 80/443 时，使用 `docker-compose.server.yml`：它不会启动项目内置 Caddy，而是将 app 以唯一别名接入现有 `app_yunbay-network`，并启动一个独立 Mihomo 进程复用同机既有项目的代理订阅配置。对应 Caddy 站点片段在 `deploy/Caddyfile.icloud.yunbay.xyz`。
 
 云端 `edge` 不再运行 Chromium：`browser` 被放进 `legacy-browser` profile，`edge` 模式还会强制清空 `ICLOUD_GATEWAY_CDP_URL` 与浏览器 profile。**但 `cn-proxy` 必须保留**——edge 的 IMAP 在未单独配置代理时会继承 HME 代理经由它出中国。
 
@@ -222,5 +237,5 @@ uv run python -m compileall -q icloud_gateway tests
 - 不向普通使用者开放收件箱、邮件正文、Alias 列表或 iCloud 管理能力。
 - 不自动执行真实 HME Alias 生命周期操作；仅支持管理员显式选择最多 100 条后批量停用或永久删除。网关严格串行写入、逐条读取 Apple 状态确认并返回逐项结果；永久删除仅允许失活项且需要二次确认。
 - 批量创建默认与硬上限均为 100，这不是 Apple 配额；普通 Alias 没有公开批量端点，仍由持久任务逐项串行 generate→reserve。Apple 返回 `-41015` 时按开源同款逻辑冷却 30 分钟（`ICLOUD_GATEWAY_HME_CREATE_COOLDOWN_SECONDS=1800`）后自动续跑。reserve 断线时先用已持久化的候选邮箱读取完整 HME 列表：精确命中则补齐本地结果，网络丢响应且可信快照明确未命中才重试同一候选；Apple 明确限额/拒绝且快照确认未创建时丢弃可能过期的候选，冷却或退避后重新 generate。Apple 返回 `-41012` 表示账户已达隐藏邮箱总上限，任务会在第一项停止并保留其余未开始项，提示永久删除不用的 Alias；仅停用不会释放额度。列表暂不可用则保持 queued；停用、删除等破坏性写结果未知时仍停止自动重放。
-- 不共享联动小铺正在运行的 Chromium 进程/profile。
+- 不共享同机既有项目正在运行的 Chromium 进程/profile。
 - 不保证 Apple Session 永不过期；过期后管理员通过网站中的同一个浏览器重新登录维护。

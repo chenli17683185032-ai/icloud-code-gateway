@@ -52,12 +52,18 @@ def main() -> int:
     home = Path.home()
     runtime = home / ".icloud-code-gateway"
     data_dir = runtime / "data"
-    creds_candidates = (
-        home / "Desktop" / "鲨鱼工具库" / "云贝平台" / "服务器相关" / "icloud-control-plane.env",
-        project / "icloud-control-plane.env",
-        project.parent / "icloud-control-plane.env",
-        home / "Desktop" / "鲨鱼工具库" / "iCloud管理工具" / "icloud-control-plane.env",
-        home / "Desktop" / "云贝" / "服务器相关" / "icloud-control-plane.env",
+    # 凭据文件位置不写死在仓库里：优先 ICLOUD_GATEWAY_CREDENTIALS_FILE，否则按
+    # 运行时目录 / 项目目录 / 项目上级目录依次查找。
+    override = os.environ.get("ICLOUD_GATEWAY_CREDENTIALS_FILE", "").strip()
+    creds_candidates = tuple(
+        path
+        for path in (
+            Path(override).expanduser() if override else None,
+            runtime / "icloud-control-plane.env",
+            project / "icloud-control-plane.env",
+            project.parent / "icloud-control-plane.env",
+        )
+        if path is not None
     )
     creds = next((path for path in creds_candidates if path.is_file()), creds_candidates[0])
     local_env = project / ".env"
