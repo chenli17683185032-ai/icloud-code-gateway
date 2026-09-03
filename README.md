@@ -217,7 +217,7 @@ uv run ruff check .
 uv run python -m compileall -q icloud_gateway tests
 ```
 
-完整部署、在线维护、代理验证、备份、恢复和回滚流程见 [OPERATIONS.md](OPERATIONS.md)。工程目标、控制闭环和逐节点验收记录见 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。
+完整部署、在线维护、代理验证、备份、恢复、回滚流程（`OPERATIONS.md`）与逐节点验收记录（`IMPLEMENTATION_PLAN.md`）含生产环境细节，只保留在维护者本地私有目录，不随本仓库发布；两个文件名已在 `.gitignore` 中。
 
 > 发布状态：`3030701` 已被并发与长任务审查标记为不可直接部署。修复分支必须完成 Alias 快照 CAS、SQLite 持久批任务、Compose 变量透传、有界停机及真实 Apple 会话的 validate/list 只读验收后，才能进入生产部署闭环。不要通过放宽 Cloudflare 超时部署同步批处理版本。
 

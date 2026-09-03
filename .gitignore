@@ -17,6 +17,10 @@ backups/
 outputs/
 playwright-report/
 test-results/
+# 运维/实施文档只保留在本地私有目录，不进公开仓库
+OPERATIONS.md
+IMPLEMENTATION_PLAN.md
+LOCAL_PRIVATE_README.md
 cloudflare-mailbox/.dev.vars
 cloudflare-mailbox/.wrangler/
 cloudflare-mailbox/node_modules/
