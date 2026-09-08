@@ -15,6 +15,7 @@ export interface Env {
   MAX_HTML_CHARS?: string;
   MAX_EMAIL_BYTES?: string;
   AUTH_ATTEMPTS_PER_MINUTE?: string;
+  API_REQUESTS_PER_MINUTE?: string;
   INBOX_ADDRESS?: string;
 }
 
@@ -32,6 +33,7 @@ export interface RuntimeConfig {
   maxHtmlChars: number;
   maxEmailBytes: number;
   authAttemptsPerMinute: number;
+  apiRequestsPerMinute: number;
   inboxAddress: string;
 }
 

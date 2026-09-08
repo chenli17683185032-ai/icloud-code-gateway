@@ -145,6 +145,13 @@ export function loadConfig(env: Env): RuntimeConfig {
       120,
       "AUTH_ATTEMPTS_PER_MINUTE",
     ),
+    apiRequestsPerMinute: boundedInteger(
+      env.API_REQUESTS_PER_MINUTE,
+      60,
+      1,
+      600,
+      "API_REQUESTS_PER_MINUTE",
+    ),
     inboxAddress,
   };
 }

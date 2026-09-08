@@ -162,6 +162,101 @@ describe("worker integration", () => {
     });
   });
 
+  it("serves the stateless standard verification-code API", async () => {
+    await upsertAlias();
+    const waiting = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "198.51.100.30",
+        },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    expect(waiting.status).toBe(200);
+    await expect(waiting.json()).resolves.toMatchObject({
+      status: "waiting",
+      data: {
+        email: "hidden.one@icloud.com",
+        code: null,
+        received_at: null,
+        expires_at: null,
+      },
+      retry_after: 5,
+    });
+
+    const raw = [
+      "From: OpenAI <relay-message@icloud.com>",
+      "To: hidden.one@icloud.com",
+      "X-Apple-Original-Recipient: hidden.one@icloud.com",
+      "Subject: Your ChatGPT verification code",
+      "Message-ID: <standard-api@example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Your OpenAI verification code is 987654.",
+    ].join("\r\n");
+    await worker.email?.(
+      emailMessage(raw, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+
+    const post = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "198.51.100.31",
+        },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    expect(post.status).toBe(200);
+    await expect(post.json()).resolves.toMatchObject({
+      status: "found",
+      data: {
+        email: "hidden.one@icloud.com",
+        code: "987654",
+      },
+      retry_after: null,
+    });
+
+    const get = await SELF.fetch(
+      "https://example.com/api/v1/mailboxes/hidden.one%40icloud.com/verification-code",
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "CF-Connecting-IP": "198.51.100.32",
+        },
+      },
+    );
+    expect(get.status).toBe(200);
+    await expect(get.json()).resolves.toMatchObject({
+      status: "found",
+      data: { code: "987654" },
+    });
+
+    const denied = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "hidden.one@icloud.com",
+          key: `icg_${"x".repeat(43)}`,
+        }),
+      },
+    );
+    expect(denied.status).toBe(401);
+    await expect(denied.json()).resolves.toMatchObject({
+      status: "unauthorized",
+      data: null,
+    });
+  });
+
   it("opens historical key-only links without requiring the email", async () => {
     await upsertAlias();
     const response = await SELF.fetch("https://example.com/api/session", {

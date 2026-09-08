@@ -30,6 +30,14 @@ export const mailboxSessionSchema = z.object({
   token: accessToken,
 });
 
+// Machine-to-machine callers use an explicit mailbox/key pair instead of a
+// browser session cookie. Keep this contract deliberately small so the API
+// never accepts or returns arbitrary mail query options.
+export const verificationCodeRequestSchema = z.object({
+  email,
+  key: accessToken,
+});
+
 export const operatorSessionSchema = z.object({
   token: accessToken,
 });

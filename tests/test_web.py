@@ -267,6 +267,71 @@ def test_public_code_api_states_and_safe_response_contract(client, service) -> N
     assert "仅 GPT / Grok" in homepage.text
 
 
+def test_standard_verification_code_api_binds_email_to_key(client, service) -> None:
+    _configure_imap(service)
+    alias, issued = _create_keyed_alias(service)
+    FakeImapReader.result = OtpResult(
+        code="112233",
+        uid="56",
+        received_at=datetime.fromtimestamp(NOW - 1, tz=UTC),
+    )
+
+    post = client.post(
+        "/api/v1/verification-codes",
+        json={"email": alias["email"], "key": issued.access_key},
+    )
+    assert post.status_code == 200
+    assert post.json()["status"] == "found"
+    assert post.json()["data"] == {
+        "email": alias["email"],
+        "code": "112233",
+        "received_at": "2027-01-15T07:59:59Z",
+        "expires_at": "2027-01-15T08:04:59Z",
+    }
+    assert post.json()["request_id"]
+
+    get = client.get(
+        f"/api/v1/mailboxes/{alias['email']}/verification-code",
+        headers={"Authorization": f"Bearer {issued.access_key}"},
+    )
+    assert get.status_code == 200
+    assert get.json()["data"]["code"] == "112233"
+
+    wrong_email = client.post(
+        "/api/v1/verification-codes",
+        json={"email": "other@icloud.com", "key": issued.access_key},
+    )
+    assert wrong_email.status_code == 401
+    assert wrong_email.json()["status"] == "unauthorized"
+    assert wrong_email.json()["data"] is None
+
+    missing_auth = client.get(f"/api/v1/mailboxes/{alias['email']}/verification-code")
+    assert missing_auth.status_code == 401
+    assert missing_auth.headers["www-authenticate"] == "Bearer"
+
+
+def test_standard_verification_code_api_returns_waiting_without_mail(client, service) -> None:
+    _configure_imap(service)
+    alias, issued = _create_keyed_alias(service)
+    response = client.post(
+        "/api/v1/verification-codes",
+        json={"email": alias["email"], "key": issued.access_key},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "status": "waiting",
+        "data": {
+            "email": alias["email"],
+            "code": None,
+            "received_at": None,
+            "expires_at": None,
+        },
+        "retry_after": 5,
+        "request_id": payload["request_id"],
+    }
+
+
 class _WarmWatcher:
     """Stands in for a MailboxWatcher whose index is already live."""
 

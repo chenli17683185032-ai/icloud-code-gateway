@@ -1592,6 +1592,28 @@ class GatewayService:
             client_ip=ip_key,
         )
 
+    def prepare_lookup_for_email(
+        self,
+        email: str,
+        access_key: str,
+        *,
+        client_ip: str,
+    ) -> PreparedLookup | None:
+        """Resolve a key while also binding it to the requested mailbox.
+
+        The key remains the secret credential; the email is an explicit resource
+        selector for integrations that cannot keep a browser session. A key
+        belonging to another mailbox is treated exactly like an invalid key.
+        """
+        prepared = self.prepare_lookup(access_key, client_ip=client_ip)
+        if prepared is None:
+            return None
+        requested_email = str(email or "").strip().casefold()
+        if requested_email != prepared.email:
+            self._audit_lookup("invalid_key", client_ip=prepared.client_ip)
+            return None
+        return prepared
+
     def _found_result(self, code: str, received_at: datetime) -> CodeLookupResult:
         expires_at = received_at + timedelta(seconds=self.settings.otp_max_age_seconds)
         return CodeLookupResult(

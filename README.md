@@ -208,6 +208,42 @@ docker compose ps
 
 公开查询页位于 `https://<GATEWAY_DOMAIN>/`。
 
+### 第三方验证码 API
+
+每个 Alias 的访问密钥（`icg_...`）同时作为 API key。推荐服务端使用无 Cookie 的标准 REST 接口：
+
+```http
+GET /api/v1/mailboxes/{邮箱地址}/verification-code
+Authorization: Bearer icg_...
+Accept: application/json
+```
+
+邮箱地址必须 URL 编码，例如 `hidden.one%40icloud.com`。也可以使用 JSON POST：
+
+```bash
+curl -X POST https://<GATEWAY_DOMAIN>/api/v1/verification-codes \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"hidden.one@icloud.com","key":"icg_..."}'
+```
+
+成功或等待时返回统一结构；`found` 的 `data.code` 是最新验证码，`waiting` 表示当前没有有效验证码。接口不会返回邮件正文、标题或发件人。
+
+```json
+{
+  "status": "found",
+  "data": {
+    "email": "hidden.one@icloud.com",
+    "code": "123456",
+    "received_at": "2026-09-09T08:00:00Z",
+    "expires_at": "2026-09-09T08:05:00Z"
+  },
+  "retry_after": null,
+  "request_id": "..."
+}
+```
+
+错误使用标准 HTTP 状态码：`401` key/邮箱不匹配，`404` 当前部署未开放公开取码，`429` 超出频率限制，`503` 邮箱服务暂不可用。key 只放在 HTTPS 请求头或请求体中，不要写入 URL、前端源码或日志。
+
 ## 本地开发与测试
 
 ```bash

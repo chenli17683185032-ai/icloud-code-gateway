@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import time
+import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -174,6 +175,13 @@ class CodeRequest(BaseModel):
     access_key: Annotated[str, Field(min_length=1, max_length=128)]
 
 
+class VerificationCodeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    email: Annotated[str, Field(min_length=3, max_length=254)]
+    key: Annotated[str, Field(min_length=1, max_length=128)]
+
+
 class CreateAliasesRequest(BaseModel):
     count: Annotated[int, Field(ge=1, le=100)] = 1
     label_prefix: Annotated[str, Field(min_length=1, max_length=140)]
@@ -246,6 +254,122 @@ async def _wait_for_code(
                 return await asyncio.to_thread(gateway.note_lookup_exhausted, prepared)
     finally:
         unsubscribe()
+
+
+async def _direct_verification_code(
+    request: Request,
+    gateway: GatewayService,
+    settings: Settings,
+    *,
+    email: str,
+    key: str,
+) -> Response | dict[str, Any]:
+    """Serve the stateless integration API with a stable JSON envelope."""
+    request_id = uuid.uuid4().hex
+    ip = _client_ip(request)
+    decision = gateway.rate_limiter.check(
+        "api-code-ip",
+        ip,
+        limit=settings.api_requests_per_minute,
+        window_seconds=60,
+    )
+    if not decision.allowed:
+        return JSONResponse(
+            {
+                "status": "rate_limited",
+                "data": None,
+                "retry_after": decision.retry_after,
+                "request_id": request_id,
+            },
+            status_code=429,
+            headers={"Retry-After": str(decision.retry_after)},
+        )
+    budget = max(1, settings.otp_request_timeout_seconds)
+    try:
+        prepared = await asyncio.wait_for(
+            asyncio.to_thread(
+                gateway.prepare_lookup_for_email,
+                email,
+                key,
+                client_ip=ip,
+            ),
+            timeout=budget + 1,
+        )
+        if prepared is None:
+            return JSONResponse(
+                {
+                    "status": "unauthorized",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": request_id,
+                },
+                status_code=401,
+            )
+        result = await _wait_for_code(gateway, prepared, budget)
+    except TimeoutError:
+        return JSONResponse(
+            {
+                "status": "unavailable",
+                "data": None,
+                "retry_after": None,
+                "request_id": request_id,
+            },
+            status_code=503,
+        )
+    except GatewayRateLimitedError as exc:
+        return JSONResponse(
+            {
+                "status": "rate_limited",
+                "data": None,
+                "retry_after": exc.retry_after,
+                "request_id": request_id,
+            },
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except GatewayBusyError:
+        return JSONResponse(
+            {
+                "status": "busy",
+                "data": None,
+                "retry_after": 3,
+                "request_id": request_id,
+            },
+            status_code=503,
+            headers={"Retry-After": "3"},
+        )
+    except GatewayNotAllowedError:
+        return JSONResponse(
+            {
+                "status": "not_allowed",
+                "data": None,
+                "retry_after": None,
+                "request_id": request_id,
+            },
+            status_code=404,
+        )
+    except (GatewayNotConfiguredError, GatewayError):
+        return JSONResponse(
+            {
+                "status": "unavailable",
+                "data": None,
+                "retry_after": None,
+                "request_id": request_id,
+            },
+            status_code=503,
+        )
+    data = {
+        "email": prepared.email,
+        "code": result.code or None,
+        "received_at": result.received_at,
+        "expires_at": result.expires_at,
+    }
+    return {
+        "status": result.status,
+        "data": data,
+        "retry_after": result.retry_after,
+        "request_id": request_id,
+    }
 
 
 def _admin_session(
@@ -553,6 +677,70 @@ def create_app(
             "expires_at": result.expires_at,
             "retry_after": result.retry_after,
         }
+
+    @app.post("/api/v1/verification-codes")
+    async def direct_verification_code(request: Request, payload: VerificationCodeRequest):
+        if not settings.serves_public_otp:
+            return JSONResponse(
+                {
+                    "status": "not_allowed",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=404,
+            )
+        return await _direct_verification_code(
+            request,
+            gateway,
+            settings,
+            email=payload.email,
+            key=payload.key,
+        )
+
+    @app.get("/api/v1/mailboxes/{email}/verification-code")
+    async def direct_verification_code_by_email(request: Request, email: str):
+        if not settings.serves_public_otp:
+            return JSONResponse(
+                {
+                    "status": "not_allowed",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=404,
+            )
+        authorization = str(request.headers.get("Authorization") or "").strip()
+        if not authorization.lower().startswith("bearer "):
+            return JSONResponse(
+                {
+                    "status": "unauthorized",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        key = authorization[7:].strip()
+        if not key:
+            return JSONResponse(
+                {
+                    "status": "unauthorized",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await _direct_verification_code(
+            request,
+            gateway,
+            settings,
+            email=unquote(str(email or "")),
+            key=key,
+        )
 
     @app.get("/healthz")
     async def healthz():
@@ -1298,7 +1486,26 @@ def create_app(
         return {"status": "ok"}
 
     @app.exception_handler(HTTPException)
-    async def http_exception_handler(_request: Request, exc: HTTPException):
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        if request.url.path.startswith("/api/v1/"):
+            status = {
+                401: "unauthorized",
+                404: "not_found",
+                413: "request_too_large",
+                422: "invalid_request",
+                429: "rate_limited",
+                503: "unavailable",
+            }.get(exc.status_code, "error")
+            return JSONResponse(
+                {
+                    "status": status,
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )
         return JSONResponse(
             {"status": "error"},
             status_code=exc.status_code,
@@ -1306,7 +1513,17 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_request: Request, _exc: RequestValidationError):
+    async def validation_exception_handler(request: Request, _exc: RequestValidationError):
+        if request.url.path.startswith("/api/v1/"):
+            return JSONResponse(
+                {
+                    "status": "invalid_request",
+                    "data": None,
+                    "retry_after": None,
+                    "request_id": uuid.uuid4().hex,
+                },
+                status_code=422,
+            )
         return JSONResponse({"status": "invalid_request"}, status_code=422)
 
     return app

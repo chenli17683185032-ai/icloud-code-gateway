@@ -70,6 +70,7 @@ class Settings:
     otp_max_age_seconds: int = 5 * 60
     otp_future_skew_seconds: int = 60
     otp_request_timeout_seconds: int = 20
+    api_requests_per_minute: int = 60
     hme_maintenance_interval_seconds: int = 6 * 60 * 60
     hme_freshness_seconds: int = 60 * 60
     hme_retry_max_seconds: int = 60 * 60
@@ -208,6 +209,12 @@ class Settings:
                 6 * 60 * 60,
                 minimum=300,
                 maximum=7 * 24 * 60 * 60,
+            ),
+            api_requests_per_minute=_integer_environment(
+                "ICLOUD_GATEWAY_API_REQUESTS_PER_MINUTE",
+                60,
+                minimum=1,
+                maximum=600,
             ),
             hme_freshness_seconds=_integer_environment(
                 "ICLOUD_GATEWAY_HME_FRESHNESS_SECONDS",

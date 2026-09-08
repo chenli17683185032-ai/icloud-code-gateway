@@ -82,6 +82,7 @@
     "MAX_HTML_CHARS": "250000",
     "MAX_EMAIL_BYTES": "20000000",
     "AUTH_ATTEMPTS_PER_MINUTE": "10",
+    "API_REQUESTS_PER_MINUTE": "60",
     "INBOX_ADDRESS": "otp@yunbay.xyz",
   },
 }

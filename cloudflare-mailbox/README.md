@@ -164,6 +164,27 @@ https://mailbox.your-domain.com/#email=<隐藏邮箱>&key=<Token>
 - `GET /api/messages`：只返回当前邮箱的 GPT/Grok 验证码和时间。
 - `POST /api/logout`：结束查询会话。
 
+### 第三方验证码 API
+
+每个 Alias 的 `icg_...` Token 即 API key。服务端集成无需建立浏览器会话：
+
+```http
+GET /api/v1/mailboxes/{邮箱地址}/verification-code
+Authorization: Bearer icg_...
+Accept: application/json
+```
+
+邮箱地址放在路径时需要 URL 编码。需要 JSON 请求体时使用：
+
+```http
+POST /api/v1/verification-codes
+Content-Type: application/json
+
+{"email":"hidden.one@icloud.com","key":"icg_..."}
+```
+
+响应固定为 `{status, data, retry_after, request_id}`。`status=found` 时 `data.code` 是最新验证码；`status=waiting` 时 `data` 仍保留邮箱字段但验证码及时间为 `null`。API 只返回验证码和时间，不返回邮件正文、标题、发件人或附件。
+
 普通用户响应不包含发件人、标题、正文或其他类别邮件。
 
 ## 操作员接口
