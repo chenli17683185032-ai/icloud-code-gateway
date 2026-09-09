@@ -12,8 +12,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:ui": "node --test test-ui/*.test.mjs",
     "test:watch": "vitest",
-    "check": "npm run format:check && npm run typecheck && npm run test && wrangler deploy --dry-run --outdir dist",
+    "check": "npm run format:check && npm run typecheck && npm run test && npm run test:ui && wrangler deploy --dry-run --outdir dist",
     "db:create": "wrangler d1 create icloud-mailbox",
     "db:migrate:local": "wrangler d1 migrations apply icloud-mailbox --local",
     "db:migrate:remote": "wrangler d1 migrations apply icloud-mailbox --remote"

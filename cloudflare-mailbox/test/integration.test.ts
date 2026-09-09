@@ -480,18 +480,18 @@ describe("worker integration", () => {
     );
   });
 
-  it("paginates the complete operator archive with a stable cursor", async () => {
+  it("paginates legacy permanent mail past its old expiry without exposing expired codes", async () => {
     await upsertAlias();
     for (let index = 0; index < 3; index += 1) {
       const raw = [
-        "From: Sender <sender@example.com>",
+        "From: OpenAI <noreply@tm.openai.com>",
         "To: hidden.one@icloud.com",
         "X-Original-To: hidden.one@icloud.com",
         `Subject: Archive page ${index}`,
         `Message-ID: <archive-page-${index}@example.com>`,
         "Content-Type: text/plain; charset=utf-8",
         "",
-        `Searchable body ${index}`,
+        `Your OpenAI verification code is 12345${index}.`,
       ].join("\r\n");
       await worker.email?.(
         emailMessage(raw),
@@ -499,13 +499,36 @@ describe("worker integration", () => {
         {} as ExecutionContext,
       );
     }
+    // Reproduce legacy retention migration: the archive flag was updated,
+    // but the previous temporary expiry was left unchanged.
+    await mailboxEnv.DB.prepare(
+      "UPDATE messages SET expires_at = 1, retention_class = 'permanent'",
+    ).run();
+    const temporaryMail = [
+      "From: OpenAI <noreply@tm.openai.com>",
+      "To: hidden.one@icloud.com",
+      "Subject: Your OpenAI verification code",
+      "Message-ID: <expired-temporary@example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Your OpenAI verification code is 987654.",
+    ].join("\r\n");
+    await worker.email?.(
+      emailMessage(temporaryMail),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+    await mailboxEnv.DB.prepare(
+      "UPDATE messages SET expires_at = 1 WHERE retention_class = 'temporary'",
+    ).run();
+
     const operatorCookie = await createOperatorSession();
     const firstResponse = await SELF.fetch(
       "https://example.com/api/operator/messages?limit=2",
       { headers: { Cookie: operatorCookie } },
     );
     const first = (await firstResponse.json()) as {
-      messages: Array<{ id: string }>;
+      messages: Array<{ id: string; permanent: boolean; subject: string }>;
       next_cursor: string;
       has_more: boolean;
     };
@@ -518,7 +541,7 @@ describe("worker integration", () => {
       { headers: { Cookie: operatorCookie } },
     );
     const second = (await secondResponse.json()) as {
-      messages: Array<{ id: string }>;
+      messages: Array<{ id: string; permanent: boolean; subject: string }>;
       next_cursor: string;
       has_more: boolean;
     };
@@ -529,6 +552,36 @@ describe("worker integration", () => {
       new Set([...first.messages, ...second.messages].map((item) => item.id))
         .size,
     ).toBe(3);
+    expect(
+      [...first.messages, ...second.messages].every(
+        (item) => item.permanent && item.subject.startsWith("Archive page"),
+      ),
+    ).toBe(true);
+
+    const userCookie = await createSession();
+    const userMessages = await SELF.fetch("https://example.com/api/messages", {
+      headers: { Cookie: userCookie },
+    });
+    await expect(userMessages.json()).resolves.toMatchObject({ messages: [] });
+    const publicCode = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    await expect(publicCode.json()).resolves.toMatchObject({
+      status: "waiting",
+      data: { code: null, received_at: null, expires_at: null },
+    });
+    for (const cookie of ["", userCookie]) {
+      const denied = await SELF.fetch(
+        "https://example.com/api/operator/messages",
+        { headers: cookie ? { Cookie: cookie } : {} },
+      );
+      expect(denied.status).toBe(401);
+    }
 
     const invalid = await SELF.fetch(
       "https://example.com/api/operator/messages?cursor=invalid!",
@@ -537,175 +590,212 @@ describe("worker integration", () => {
     expect(invalid.status).toBe(422);
   });
 
-  it("archives original HTML and encrypted attachments for operator download", async () => {
-    await upsertAlias();
-    const boundary = "archive-boundary";
-    const raw = [
-      "From: OpenAI <relay-message@icloud.com>",
-      "To: hidden.one@icloud.com",
-      "X-Apple-Original-Recipient: hidden.one@icloud.com",
-      "Subject: Your ChatGPT archive",
-      "Message-ID: <archive@example.com>",
-      `Content-Type: multipart/mixed; boundary=${boundary}`,
-      "",
-      `--${boundary}`,
-      "Content-Type: text/html; charset=utf-8",
-      "",
-      '<table><tr><td style="color:#c44">Original layout</td></tr></table>',
-      '<img src="cid:logo@example"><img src="https://tracker.example/pixel.png">',
-      "<script>alert(1)</script>",
-      `--${boundary}`,
-      "Content-Type: image/png",
-      "Content-ID: <logo@example>",
-      'Content-Disposition: inline; filename="logo.png"',
-      "Content-Transfer-Encoding: base64",
-      "",
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl6sAAAAASUVORK5CYII=",
-      `--${boundary}`,
-      'Content-Type: text/plain; name="report.txt"',
-      'Content-Disposition: attachment; filename="report.txt"',
-      "Content-Transfer-Encoding: base64",
-      "",
-      "YXR0YWNobWVudC1ib2R5Cg==",
-      `--${boundary}--`,
-      "",
-    ].join("\r\n");
-    await worker.email?.(
-      emailMessage(raw, "relay-message@icloud.com"),
-      mailboxEnv,
-      {} as ExecutionContext,
-    );
-    await worker.email?.(
-      emailMessage(raw, "relay-message@icloud.com"),
-      mailboxEnv,
-      {} as ExecutionContext,
-    );
+  it.each([false, true])(
+    "archives original HTML and encrypted attachments for operator download (legacy expiry: %s)",
+    async (legacyExpiry) => {
+      await upsertAlias();
+      const boundary = "archive-boundary";
+      const raw = [
+        "From: OpenAI <relay-message@icloud.com>",
+        "To: hidden.one@icloud.com",
+        "X-Apple-Original-Recipient: hidden.one@icloud.com",
+        "Subject: Your ChatGPT subscription archive",
+        "Message-ID: <archive@example.com>",
+        `Content-Type: multipart/mixed; boundary=${boundary}`,
+        "",
+        `--${boundary}`,
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        '<table><tr><td style="color:#c44">Original layout</td></tr></table>',
+        '<img src="cid:logo@example"><img src="https://tracker.example/pixel.png">',
+        "<script>alert(1)</script>",
+        `--${boundary}`,
+        "Content-Type: image/png",
+        "Content-ID: <logo@example>",
+        'Content-Disposition: inline; filename="logo.png"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl6sAAAAASUVORK5CYII=",
+        `--${boundary}`,
+        'Content-Type: text/plain; name="report.txt"',
+        'Content-Disposition: attachment; filename="report.txt"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        "YXR0YWNobWVudC1ib2R5Cg==",
+        `--${boundary}--`,
+        "",
+      ].join("\r\n");
+      await worker.email?.(
+        emailMessage(raw, "relay-message@icloud.com"),
+        mailboxEnv,
+        {} as ExecutionContext,
+      );
 
-    const operatorCookie = await createOperatorSession();
-    const listResponse = await SELF.fetch(
-      "https://example.com/api/operator/messages",
-      { headers: { Cookie: operatorCookie } },
-    );
-    const listPayload = (await listResponse.json()) as {
-      messages: Array<{
-        id: string;
-        hasHtml: boolean;
-        attachments: Array<{
+      if (legacyExpiry) {
+        await mailboxEnv.DB.prepare(
+          "UPDATE messages SET expires_at = 1 WHERE retention_class = 'permanent'",
+        ).run();
+      }
+      await worker.email?.(
+        emailMessage(raw, "relay-message@icloud.com"),
+        mailboxEnv,
+        {} as ExecutionContext,
+      );
+
+      const operatorCookie = await createOperatorSession();
+      const listResponse = await SELF.fetch(
+        "https://example.com/api/operator/messages",
+        { headers: { Cookie: operatorCookie } },
+      );
+      const listPayload = (await listResponse.json()) as {
+        messages: Array<{
           id: string;
-          filename: string;
-          mimeType: string;
-          size: number;
+          hasHtml: boolean;
+          permanent: boolean;
+          expiresAt: string;
+          attachments: Array<{
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+          }>;
         }>;
-      }>;
-    };
-    expect(listPayload.messages).toHaveLength(1);
-    const archived = listPayload.messages[0];
-    expect(archived).toMatchObject({ hasHtml: true });
-    expect(archived).not.toHaveProperty("html");
-    expect(archived?.attachments).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          filename: "logo.png",
-          mimeType: "image/png",
-          inline: true,
-        }),
-        expect.objectContaining({
-          filename: "report.txt",
-          mimeType: "text/plain",
-          size: 16,
-          inline: false,
-        }),
-      ]),
-    );
-    const attachmentId =
-      archived?.attachments.find((item) => item.filename === "report.txt")
-        ?.id ?? "";
+      };
+      expect(listPayload.messages).toHaveLength(1);
+      const archived = listPayload.messages[0];
+      expect(archived).toMatchObject({ hasHtml: true, permanent: true });
+      if (legacyExpiry) {
+        expect(archived?.expiresAt).toBe("1970-01-01T00:00:01.000Z");
+      }
+      expect(archived).not.toHaveProperty("html");
+      expect(archived?.attachments).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            filename: "logo.png",
+            mimeType: "image/png",
+            inline: true,
+          }),
+          expect.objectContaining({
+            filename: "report.txt",
+            mimeType: "text/plain",
+            size: 16,
+            inline: false,
+          }),
+        ]),
+      );
+      const attachmentId =
+        archived?.attachments.find((item) => item.filename === "report.txt")
+          ?.id ?? "";
 
-    const deniedHtml = await SELF.fetch(
-      `https://example.com/api/operator/messages/${archived?.id}/html`,
-    );
-    expect(deniedHtml.status).toBe(401);
-    const htmlResponse = await SELF.fetch(
-      `https://example.com/api/operator/messages/${archived?.id}/html`,
-      { headers: { Cookie: operatorCookie } },
-    );
-    expect(htmlResponse.status).toBe(200);
-    expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
-      "default-src 'none'",
-    );
-    expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
-      "sandbox",
-    );
-    expect(htmlResponse.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
-    const archivedHtml = await htmlResponse.text();
-    expect(archivedHtml).toContain("Original layout");
-    expect(archivedHtml).toContain("data:image/png;base64,");
-    expect(archivedHtml).not.toContain("cid:logo@example");
-    expect(archivedHtml).not.toContain("tracker.example");
-    expect(archivedHtml).not.toContain("<script");
+      const deniedHtml = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/html`,
+      );
+      expect(deniedHtml.status).toBe(401);
+      const userCookie = await createSession();
+      const deniedUserHtml = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/html`,
+        { headers: { Cookie: userCookie } },
+      );
+      expect(deniedUserHtml.status).toBe(401);
+      const htmlResponse = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/html`,
+        { headers: { Cookie: operatorCookie } },
+      );
+      expect(htmlResponse.status).toBe(200);
+      expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
+        "default-src 'none'",
+      );
+      expect(htmlResponse.headers.get("Content-Security-Policy")).toContain(
+        "sandbox",
+      );
+      expect(htmlResponse.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+      const archivedHtml = await htmlResponse.text();
+      expect(archivedHtml).toContain("Original layout");
+      expect(archivedHtml).toContain("data:image/png;base64,");
+      expect(archivedHtml).not.toContain("cid:logo@example");
+      expect(archivedHtml).not.toContain("tracker.example");
+      expect(archivedHtml).not.toContain("<script");
 
-    const deniedAttachment = await SELF.fetch(
-      `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
-    );
-    expect(deniedAttachment.status).toBe(401);
-    const attachmentResponse = await SELF.fetch(
-      `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
-      { headers: { Cookie: operatorCookie } },
-    );
-    expect(attachmentResponse.status).toBe(200);
-    expect(attachmentResponse.headers.get("Content-Type")).toContain(
-      "text/plain",
-    );
-    expect(attachmentResponse.headers.get("Content-Disposition")).toContain(
-      'filename="report.txt"',
-    );
-    expect(await attachmentResponse.text()).toBe("attachment-body\n");
-    const missingAttachment = await SELF.fetch(
-      `https://example.com/api/operator/messages/${archived?.id}/attachments/missing`,
-      { headers: { Cookie: operatorCookie } },
-    );
-    expect(missingAttachment.status).toBe(404);
+      const deniedAttachment = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
+      );
+      expect(deniedAttachment.status).toBe(401);
+      const deniedUserAttachment = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
+        { headers: { Cookie: userCookie } },
+      );
+      expect(deniedUserAttachment.status).toBe(401);
+      const attachmentResponse = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/attachments/${attachmentId}`,
+        { headers: { Cookie: operatorCookie } },
+      );
+      expect(attachmentResponse.status).toBe(200);
+      expect(attachmentResponse.headers.get("Content-Type")).toContain(
+        "text/plain",
+      );
+      expect(attachmentResponse.headers.get("Content-Disposition")).toContain(
+        'filename="report.txt"',
+      );
+      expect(await attachmentResponse.text()).toBe("attachment-body\n");
+      const missingAttachment = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/attachments/missing`,
+        { headers: { Cookie: operatorCookie } },
+      );
+      expect(missingAttachment.status).toBe(404);
 
-    const rowCount = await mailboxEnv.DB.prepare(
-      "SELECT COUNT(*) AS count FROM message_attachments",
-    ).first<{ count: number }>();
-    expect(rowCount?.count).toBe(2);
-    const storedObjects = await mailboxEnv.ATTACHMENTS.list({
-      prefix: "mail/",
-    });
-    expect(storedObjects.keys).toHaveLength(2);
-    const encryptedObject = await mailboxEnv.ATTACHMENTS.get(
-      storedObjects.keys[0]?.name ?? "",
-      "arrayBuffer",
-    );
-    expect(encryptedObject).not.toBeNull();
-    expect(
-      new TextDecoder().decode(encryptedObject ?? undefined),
-    ).not.toContain("attachment-body");
-    const storedMetadata = await mailboxEnv.DB.prepare(
-      `SELECT metadata_ciphertext
+      const rowCount = await mailboxEnv.DB.prepare(
+        "SELECT COUNT(*) AS count FROM message_attachments",
+      ).first<{ count: number }>();
+      expect(rowCount?.count).toBe(2);
+      const storedObjects = await mailboxEnv.ATTACHMENTS.list({
+        prefix: "mail/",
+      });
+      expect(storedObjects.keys).toHaveLength(2);
+      const encryptedObject = await mailboxEnv.ATTACHMENTS.get(
+        storedObjects.keys[0]?.name ?? "",
+        "arrayBuffer",
+      );
+      expect(encryptedObject).not.toBeNull();
+      expect(
+        new TextDecoder().decode(encryptedObject ?? undefined),
+      ).not.toContain("attachment-body");
+      const storedMetadata = await mailboxEnv.DB.prepare(
+        `SELECT metadata_ciphertext
          FROM message_attachments
         LIMIT 1`,
-    ).first<{ metadata_ciphertext: string }>();
-    expect(storedMetadata?.metadata_ciphertext).not.toContain("report.txt");
+      ).first<{ metadata_ciphertext: string }>();
+      expect(storedMetadata?.metadata_ciphertext).not.toContain("report.txt");
 
-    await mailboxEnv.DB.prepare(
-      "UPDATE messages SET expires_at = 1, retention_class = 'temporary'",
-    ).run();
-    await worker.scheduled?.(
-      {} as ScheduledController,
-      mailboxEnv,
-      {} as ExecutionContext,
-    );
-    expect(
       await mailboxEnv.DB.prepare(
-        "SELECT COUNT(*) AS count FROM message_attachments",
-      ).first<{ count: number }>(),
-    ).toMatchObject({ count: 0 });
-    expect(
-      (await mailboxEnv.ATTACHMENTS.list({ prefix: "mail/" })).keys,
-    ).toHaveLength(0);
-  });
+        "UPDATE messages SET expires_at = 1, retention_class = 'temporary'",
+      ).run();
+      const expiredList = await SELF.fetch(
+        "https://example.com/api/operator/messages",
+        { headers: { Cookie: operatorCookie } },
+      );
+      await expect(expiredList.json()).resolves.toMatchObject({ messages: [] });
+      for (const path of ["html", `attachments/${attachmentId}`]) {
+        const expiredResource = await SELF.fetch(
+          `https://example.com/api/operator/messages/${archived?.id}/${path}`,
+          { headers: { Cookie: operatorCookie } },
+        );
+        expect(expiredResource.status).toBe(404);
+      }
+      await worker.scheduled?.(
+        {} as ScheduledController,
+        mailboxEnv,
+        {} as ExecutionContext,
+      );
+      expect(
+        await mailboxEnv.DB.prepare(
+          "SELECT COUNT(*) AS count FROM message_attachments",
+        ).first<{ count: number }>(),
+      ).toMatchObject({ count: 0 });
+      expect(
+        (await mailboxEnv.ATTACHMENTS.list({ prefix: "mail/" })).keys,
+      ).toHaveLength(0);
+    },
+  );
 
   it("rejects invalid control tokens and invalidates sessions after key rotation", async () => {
     const denied = await SELF.fetch("https://example.com/control/v1/aliases", {

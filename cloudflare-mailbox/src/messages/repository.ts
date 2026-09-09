@@ -112,6 +112,8 @@ export class MessageRepository {
     return { id: existing.id, inserted: false };
   }
 
+  // Operator archive reads honor retention_class: legacy permanent rows can
+  // still carry the temporary expires_at value from before their migration.
   getById(messageId: string, now: number): Promise<MessageRow | null> {
     return this.database
       .prepare(
@@ -119,7 +121,7 @@ export class MessageRepository {
                 payload_iv, received_at, expires_at, created_at, category, has_code,
                 retention_class
            FROM messages
-          WHERE id = ? AND expires_at > ?`,
+          WHERE id = ? AND (retention_class = 'permanent' OR expires_at > ?)`,
       )
       .bind(messageId, now)
       .first<MessageRow>();
@@ -178,7 +180,8 @@ export class MessageRepository {
                 ma.metadata_iv, ma.size_bytes, ma.created_at
            FROM message_attachments AS ma
            JOIN messages AS m ON m.id = ma.message_id
-          WHERE ma.message_id = ? AND ma.id = ? AND m.expires_at > ?`,
+          WHERE ma.message_id = ? AND ma.id = ?
+            AND (m.retention_class = 'permanent' OR m.expires_at > ?)`,
       )
       .bind(messageId, attachmentId, now)
       .first<AttachmentRow>();
@@ -277,7 +280,7 @@ export class MessageRepository {
                 a.secret_iv AS alias_secret_iv
            FROM messages AS m
            JOIN aliases AS a ON a.alias_digest = m.alias_digest
-          WHERE m.expires_at > ?
+          WHERE (m.retention_class = 'permanent' OR m.expires_at > ?)
           ${cursorClause}
           ORDER BY m.received_at DESC, m.created_at DESC, m.id DESC
           LIMIT ?`,

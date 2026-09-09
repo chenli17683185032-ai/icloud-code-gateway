@@ -66,7 +66,10 @@ let refreshInFlight = false;
 let archiveLoadInFlight = false;
 let nextCursor = "";
 let hasMore = false;
-let loadedOlderPages = false;
+let historyRequested = false;
+let queuedArchiveLoad = false;
+let queuedRefresh = false;
+let mailboxGeneration = 0;
 let searchQuery = "";
 let searchTimer = 0;
 let searchGeneration = 0;
@@ -169,6 +172,29 @@ async function fetchMessagePage(cursor = "") {
   return api(`/api/operator/messages?${query.toString()}`);
 }
 
+async function fetchArchivePage(cursor, generation) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetchMessagePage(cursor);
+    } catch (error) {
+      const transient =
+        !(error instanceof ApiError) ||
+        error.status === 408 ||
+        error.status >= 500;
+      if (!transient || attempt === 2 || generation !== mailboxGeneration) {
+        throw error;
+      }
+      updateSearchState(
+        `连接暂时中断，正在重试 · 已加载 ${messages.length} 封`,
+      );
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, 400 * 2 ** attempt),
+      );
+      if (generation !== mailboxGeneration) throw error;
+    }
+  }
+}
+
 function updateSearchState(message = "") {
   if (message) {
     elements.searchState.textContent = message;
@@ -186,13 +212,18 @@ function updateSearchState(message = "") {
 }
 
 function resetArchiveState() {
+  mailboxGeneration += 1;
   messages = [];
   selectedId = "";
   renderedSignature = "";
   nextCursor = "";
   hasMore = false;
-  loadedOlderPages = false;
+  historyRequested = false;
+  queuedArchiveLoad = false;
+  queuedRefresh = false;
+  refreshInFlight = false;
   archiveLoadInFlight = false;
+  elements.refreshButton.disabled = false;
   searchQuery = "";
   searchGeneration += 1;
   readerModes.clear();
@@ -203,7 +234,6 @@ function resetArchiveState() {
 }
 
 function showEntry(message = "") {
-  if (redirectToUnifiedSession()) return;
   stopPolling();
   if (searchTimer) window.clearTimeout(searchTimer);
   resetArchiveState();
@@ -214,6 +244,7 @@ function showEntry(message = "") {
   elements.search.value = "";
   elements.searchState.textContent = "";
   elements.status.textContent = message;
+  if (redirectToUnifiedSession()) return;
   window.setTimeout(() => elements.token.focus(), 0);
 }
 
@@ -509,9 +540,16 @@ function renderMessages(nextMessages, options = {}) {
 }
 
 async function loadAllMessages() {
-  if (archiveLoadInFlight || !hasMore) return;
+  if (refreshInFlight) {
+    queuedArchiveLoad = true;
+    return;
+  }
+  if (archiveLoadInFlight || !hasMore || elements.view.hidden) return;
+  const generation = mailboxGeneration;
   archiveLoadInFlight = true;
-  loadedOlderPages = true;
+  historyRequested = true;
+  elements.refreshButton.disabled = true;
+  elements.error.hidden = true;
   stopPolling();
   renderMessages(messages, { force: true, animate: false });
   const seenCursors = new Set();
@@ -524,47 +562,85 @@ async function loadAllMessages() {
       seenCursors.add(nextCursor);
       pageCount += 1;
       updateSearchState(`正在加载全部邮件 · 第 ${pageCount + 1} 页`);
-      const payload = await fetchMessagePage(nextCursor);
-      messages = mergeMessages(messages, payload.messages);
+      const payload = await fetchArchivePage(nextCursor, generation);
+      if (generation !== mailboxGeneration) return;
       nextCursor = String(payload.next_cursor || "");
       hasMore = Boolean(payload.has_more);
+      renderMessages(mergeMessages(messages, payload.messages), {
+        force: true,
+        animate: false,
+      });
+      if (hasMore) {
+        updateSearchState(`正在加载全部邮件 · 已加载 ${messages.length} 封`);
+      }
     }
-    renderMessages(messages, { force: true, animate: false });
   } catch (error) {
+    if (generation !== mailboxGeneration) return;
     if (error instanceof ApiError && error.status === 401) {
-      if (!redirectToUnifiedSession()) showEntry(error.message);
+      showEntry(error.message);
       return;
     }
     elements.error.textContent =
-      error && error.message ? error.message : "加载全部邮件失败。";
+      (error && error.message ? error.message : "加载全部邮件失败。") +
+      " 已加载邮件已保留，可以继续加载，或点击刷新后重试。";
     elements.error.hidden = false;
   } finally {
-    archiveLoadInFlight = false;
-    renderMessages(messages, { force: true, animate: false });
-    schedulePolling();
+    if (generation === mailboxGeneration) {
+      archiveLoadInFlight = false;
+      elements.refreshButton.disabled = false;
+      renderMessages(messages, { force: true, animate: false });
+      if (queuedRefresh) {
+        queuedRefresh = false;
+        void refresh();
+      } else {
+        schedulePolling();
+      }
+    }
   }
 }
 
 async function refresh(options = {}) {
-  if (refreshInFlight) return;
+  if (refreshInFlight || archiveLoadInFlight) {
+    if (!options.quiet) queuedRefresh = true;
+    return;
+  }
+  const generation = mailboxGeneration;
+  let pollDelay = 3000;
+  let resumeArchive = false;
   refreshInFlight = true;
+  stopPolling();
   if (!options.quiet) elements.refreshState.textContent = "正在刷新";
   elements.refreshButton.disabled = true;
   try {
     const payload = await fetchMessagePage();
+    if (generation !== mailboxGeneration) return;
+    const firstPage = Array.isArray(payload.messages) ? payload.messages : [];
+    const previousIds = new Set(messages.map((message) => message.id));
+    const overlapsHistory = firstPage.some((message) =>
+      previousIds.has(message.id),
+    );
     let nextMessages;
-    if (loadedOlderPages) {
+    if (payload.has_more) {
       const now = Date.now();
       nextMessages = mergeMessages(
-        payload.messages,
         messages.filter(
-          (message) => new Date(message.expiresAt).getTime() > now,
+          (message) =>
+            message.permanent || new Date(message.expiresAt).getTime() > now,
         ),
+        firstPage,
       );
+      // A fresh first page can otherwise leave an unseen gap when more than
+      // 50 messages arrive. Manual refresh also repairs a failed/stale cursor.
+      if (!options.quiet || !overlapsHistory) {
+        nextCursor = String(payload.next_cursor || "");
+        hasMore = true;
+        resumeArchive = historyRequested;
+      }
     } else {
-      nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
-      nextCursor = String(payload.next_cursor || "");
-      hasMore = Boolean(payload.has_more);
+      nextMessages = firstPage;
+      nextCursor = "";
+      hasMore = false;
+      historyRequested = true;
     }
     showView();
     const hasNew = renderMessages(nextMessages, {
@@ -583,20 +659,32 @@ async function refresh(options = {}) {
     elements.refreshState.textContent = hasNew
       ? "刚收到新邮件"
       : "已同步 " + formatTime(new Date().toISOString());
-    schedulePolling();
   } catch (error) {
+    if (generation !== mailboxGeneration) return;
     if (error instanceof ApiError && error.status === 401) {
-      if (!redirectToUnifiedSession()) showEntry(error.message);
+      showEntry(error.message);
       return;
     }
     elements.error.textContent =
       error && error.message ? error.message : "后台刷新失败。";
     elements.error.hidden = false;
     elements.refreshState.textContent = "同步失败";
-    schedulePolling(5000);
+    pollDelay = 5000;
   } finally {
-    refreshInFlight = false;
-    elements.refreshButton.disabled = false;
+    if (generation === mailboxGeneration) {
+      refreshInFlight = false;
+      elements.refreshButton.disabled = false;
+      if (queuedRefresh) {
+        queuedRefresh = false;
+        void refresh();
+      } else if ((resumeArchive || queuedArchiveLoad) && hasMore) {
+        queuedArchiveLoad = false;
+        void loadAllMessages();
+      } else {
+        queuedArchiveLoad = false;
+        schedulePolling(pollDelay);
+      }
+    }
   }
 }
 
@@ -607,7 +695,13 @@ function stopPolling() {
 
 function schedulePolling(delay = 3000) {
   stopPolling();
-  if (elements.view.hidden || document.hidden) return;
+  if (
+    elements.view.hidden ||
+    document.hidden ||
+    archiveLoadInFlight ||
+    refreshInFlight
+  )
+    return;
   pollingTimer = window.setTimeout(() => refresh({ quiet: true }), delay);
 }
 
