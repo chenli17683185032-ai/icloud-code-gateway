@@ -619,6 +619,34 @@ def test_admin_operator_sso_failure_returns_safe_notice(settings, service) -> No
         assert "operator-token-canary" not in page.text
 
 
+def test_local_admin_operator_sso_uses_worker_fragment_handoff(settings, service) -> None:
+    cookie = (
+        f"{OPERATOR_SESSION_COOKIE}=operator-session; Path=/; Max-Age=900; "
+        "HttpOnly; Secure; SameSite=Strict"
+    )
+
+    class Broker:
+        @staticmethod
+        def exchange():
+            return OperatorSessionCookie(cookie)
+
+    configured = replace(
+        settings,
+        public_base_url="https://icloud.example.test",
+        operator_access_token=f"icg_{'o' * 43}",
+    )
+    app = create_app(configured, service=service, operator_sso_client=Broker())
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        _login(client, configured)
+        response = client.get("/admin/operator-session", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == (
+            "https://icloud.example.test/admin/mail/"
+            f"#key={configured.operator_access_token}"
+        )
+        assert "set-cookie" not in response.headers
+
+
 def test_admin_local_profile_capture_enabled_without_cdp(settings, service, tmp_path) -> None:
     local_settings = replace(
         settings,

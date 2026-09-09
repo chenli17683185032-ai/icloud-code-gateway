@@ -30,7 +30,10 @@ class OperatorSsoClient:
         self.settings = settings
         self.session = session or requests.Session()
         self.session.trust_env = False
-        proxy = str(settings.edge_proxy or settings.hme_proxy or "").strip()
+        # Operator SSO talks to the Cloudflare Worker, not Apple HME. Do not
+        # fall back to the HME proxy: server 2 routes Apple through cn-proxy,
+        # while Cloudflare is reachable directly and may reject that route.
+        proxy = str(settings.edge_proxy or "").strip()
         if proxy:
             self.session.proxies.update({"http": proxy, "https": proxy})
         else:

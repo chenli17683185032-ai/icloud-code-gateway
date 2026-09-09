@@ -300,6 +300,10 @@ ensure_playwright
 
 MASTER_KEY="$(read_env LOCAL_ICLOUD_GATEWAY_MASTER_KEY "$CREDS_FILE" || true)"
 CONTROL_TOKEN="$(read_env ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN "$CREDS_FILE" || true)"
+OPERATOR_TOKEN="$(read_env LOCAL_ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN "$CREDS_FILE" || true)"
+if [[ -z "$OPERATOR_TOKEN" ]]; then
+  OPERATOR_TOKEN="$(read_env ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN "$CREDS_FILE" || true)"
+fi
 
 if [[ -z "$MASTER_KEY" ]]; then
   MASTER_KEY="$(read_env ICLOUD_GATEWAY_MASTER_KEY "$ENV_FILE" || true)"
@@ -307,9 +311,25 @@ fi
 if [[ -z "$CONTROL_TOKEN" ]]; then
   CONTROL_TOKEN="$(read_env ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN "$ENV_FILE" || true)"
 fi
+if [[ -z "$OPERATOR_TOKEN" ]]; then
+  OPERATOR_TOKEN="$(read_env LOCAL_ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN "$ENV_FILE" || true)"
+fi
+if [[ -z "$OPERATOR_TOKEN" ]]; then
+  OPERATOR_TOKEN="$(read_env ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN "$ENV_FILE" || true)"
+fi
+if [[ -z "$OPERATOR_TOKEN" ]] && command -v security >/dev/null 2>&1; then
+  # Keychain fallback is intentionally memory-only; never write or echo the
+  # operator token into the project env, logs, URL, or browser storage.
+  OPERATOR_TOKEN="$(security find-generic-password -w -s icloud-mailbox-worker -a OPERATOR_TOKEN 2>/dev/null || true)"
+fi
 
 export_required ICLOUD_GATEWAY_MASTER_KEY "$MASTER_KEY"
 export_required ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN "$CONTROL_TOKEN"
+if [[ -n "$OPERATOR_TOKEN" ]]; then
+  export ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN="$OPERATOR_TOKEN"
+else
+  unset ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN 2>/dev/null || true
+fi
 # 本地 control：免管理员密码（线上 edge 不启用此开关）
 export ICLOUD_GATEWAY_ADMIN_OPEN=1
 # 占位即可，open 模式下不会校验密码

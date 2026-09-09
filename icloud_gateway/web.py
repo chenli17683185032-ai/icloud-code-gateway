@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import unquote, urlencode
+from urllib.parse import quote, unquote, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -910,6 +910,25 @@ def create_app(
         except OperatorSsoError:
             gateway.database.record_audit_event("operator_sso", "failed")
             return _redirect_notice("operator_sso_error")
+        # A local HTTP control console cannot accept the Worker __Host- cookie:
+        # it is Secure and host-only. Send local operators directly to the
+        # Worker mailbox using its existing fragment handoff instead. The
+        # fragment is never included in an HTTP request or server access log.
+        if (
+            request.url.hostname in {"localhost", "127.0.0.1", "::1"}
+            and settings.public_base_url
+            and settings.operator_access_token
+        ):
+            target = (
+                f"{settings.public_base_url.rstrip('/')}/admin/mail/"
+                f"#key={quote(settings.operator_access_token, safe='')}"
+            )
+            response = RedirectResponse(target, status_code=303)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            gateway.database.record_audit_event("operator_sso", "succeeded")
+            _ensure_open_admin_cookie(request, response)
+            return response
         response = RedirectResponse("/admin/mail/", status_code=303)
         response.headers.append("Set-Cookie", issued.header_value)
         response.headers["Cache-Control"] = "no-store"

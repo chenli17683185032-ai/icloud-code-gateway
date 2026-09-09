@@ -86,3 +86,17 @@ def test_operator_sso_requires_server_only_token(tmp_path: Path) -> None:
 
     with pytest.raises(OperatorSsoError):
         client.exchange()
+
+
+def test_operator_sso_does_not_fall_back_to_hme_proxy(tmp_path: Path) -> None:
+    session = _Session(_Response())
+    OperatorSsoClient(
+        _settings(
+            tmp_path,
+            hme_proxy="socks5h://127.0.0.1:7891",
+            edge_proxy="",
+        ),
+        session=session,
+    )
+
+    assert session.proxies == {}
