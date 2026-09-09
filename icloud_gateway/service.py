@@ -1326,6 +1326,7 @@ class GatewayService:
             if self._remote_write_active:
                 raise GatewayBusyError("alias lifecycle operation is in progress")
             alias = self.database.get_alias(alias_id)
+            had_local_key = bool(alias.get("has_access_key"))
             if (
                 not bool(alias.get("has_access_key"))
                 and self.edge_sync_client is not None
@@ -1362,7 +1363,11 @@ class GatewayService:
                 alias,
                 access_key=issued.access_key,
                 action="issue_key",
-                confirm_remote_replacement=confirm_remote_replacement,
+                # Rotating a locally recoverable key is already an explicit
+                # operator action. A cloud-only key requires the separate
+                # confirmation gate above; once a local key exists, the new
+                # key must be allowed to replace a different remote key.
+                confirm_remote_replacement=confirm_remote_replacement or had_local_key,
             )
             return issued
 
@@ -1452,6 +1457,12 @@ class GatewayService:
 
             def _push(entry: tuple[dict[str, Any], str | None]) -> None:
                 alias, key = entry
+                # A remote-present key is authoritative when the local key is
+                # missing or has drifted. Sending no key makes Worker upsert
+                # preserve it; only absent/unknown remote states may receive a
+                # local key during automatic backfill.
+                if str(alias.get("edge_key_status") or "unknown") == "present":
+                    key = None
                 client.upsert_alias(
                     alias_id=str(alias["id"]),
                     email=str(alias.get("email") or ""),

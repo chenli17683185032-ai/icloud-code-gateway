@@ -315,6 +315,34 @@ def test_control_plane_reconciles_remote_key_presence_without_overwriting(tmp_pa
     service.shutdown(timeout=1, close_database=True)
 
 
+def test_explicit_local_rotation_replaces_a_different_remote_key(tmp_path: Path):
+    fake = _StatusFakeSession()
+    settings = _settings(
+        tmp_path,
+        deployment_mode="control",
+        edge_base_url="https://icloud.yunbay.xyz",
+        edge_sync_enabled=True,
+    )
+    edge = EdgeSyncClient(settings, session=fake)
+    service = GatewayService(settings, start_maintenance=False, edge_sync_client=edge)
+    alias = service.database.upsert_alias(
+        email="rotate@icloud.com",
+        remote_metadata={"anonymousId": "rotate", "isActive": True},
+        state="active",
+    )
+    service.database.issue_access_key(alias["id"])
+    updated = service.issue_access_key(alias["id"])
+
+    issue_calls = [
+        call
+        for call in fake.calls
+        if call["url"].endswith("/control/v1/aliases/by-email/rotate%40icloud.com/key")
+    ]
+    assert issue_calls[-1]["json"]["replace_existing"] is True
+    assert updated.access_key.startswith("icg_")
+    service.shutdown(timeout=1, close_database=True)
+
+
 def test_local_control_uploads_validated_hme_session_to_remote_server(tmp_path: Path):
     fake = _FakeSession()
     settings = _settings(
