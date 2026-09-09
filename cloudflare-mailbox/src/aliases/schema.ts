@@ -19,6 +19,10 @@ export const controlAliasSchema = z.object({
 export const controlKeySchema = z.object({
   access_key: accessToken,
   id: z.string().trim().max(64).default(""),
+  // Direct key-rotation calls historically replaced the key. The control
+  // client now sends false explicitly for background syncs, which preserves
+  // existing cloud keys while keeping this endpoint backward compatible.
+  replace_existing: z.boolean().default(true),
 });
 
 export const controlStateSchema = z.object({

@@ -1,4 +1,8 @@
-import { NotFoundError, UnauthorizedError } from "../shared/errors";
+import {
+  ConflictError,
+  NotFoundError,
+  UnauthorizedError,
+} from "../shared/errors";
 import {
   accessTokenDigest,
   accessTokenLookupDigest,
@@ -91,8 +95,17 @@ export class AliasService {
       tokenLookupDigest,
       state,
       now,
+      replaceToken: state === "inactive",
     });
     const row = await this.requireByDigest(digest);
+    if (
+      state === "active" &&
+      input.access_key &&
+      existing?.token_digest &&
+      !(await safeEqual(existing.token_digest, tokenDigest!))
+    ) {
+      throw new ConflictError("云端已有不同 key；如需轮换，请明确确认后重试。");
+    }
     return this.result(row, email);
   }
 
@@ -100,6 +113,7 @@ export class AliasService {
     emailValue: string,
     accessKey: string,
     externalId = "",
+    replaceExistingKey = false,
     now = Math.floor(Date.now() / 1000),
   ): Promise<AliasResult> {
     const email = normalizeEmail(emailValue);
@@ -134,7 +148,20 @@ export class AliasService {
         ),
         state: "active",
         now,
+        replaceToken: replaceExistingKey,
       });
+      if (
+        row.token_digest &&
+        !replaceExistingKey &&
+        !(await safeEqual(
+          row.token_digest,
+          await accessTokenDigest(this.config, digest, accessKey),
+        ))
+      ) {
+        throw new ConflictError(
+          "云端已有不同 key；如需轮换，请明确确认后重试。",
+        );
+      }
     }
     row = await this.requireByDigest(digest);
     return this.result(row, email);

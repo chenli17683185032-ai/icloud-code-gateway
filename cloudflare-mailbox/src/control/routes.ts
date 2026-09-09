@@ -73,6 +73,7 @@ controlRoutes.post("/v1/aliases/by-email/:email/key", async (context) => {
     pathEmail(context.req.param("email")),
     input.access_key,
     input.id,
+    input.replace_existing,
   );
   return context.json({
     status: "ok",

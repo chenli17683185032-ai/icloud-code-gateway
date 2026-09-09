@@ -195,6 +195,70 @@ describe("worker integration", () => {
     expect(JSON.stringify(payload)).not.toContain(token);
   });
 
+  it("never replaces a remote key during an unconfirmed sync", async () => {
+    await upsertAlias();
+    const replacement = `icg_${"r".repeat(43)}`;
+    const sync = await SELF.fetch("https://example.com/control/v1/aliases", {
+      method: "POST",
+      headers: controlHeaders,
+      body: JSON.stringify({
+        id: "local-1",
+        email: "hidden.one@icloud.com",
+        state: "active",
+        access_key: replacement,
+      }),
+    });
+    expect(sync.status).toBe(409);
+
+    const oldKey = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    expect(oldKey.status).toBe(200);
+    const newKey = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "hidden.one@icloud.com",
+          key: replacement,
+        }),
+      },
+    );
+    expect(newKey.status).toBe(401);
+
+    const rotate = await SELF.fetch(
+      "https://example.com/control/v1/aliases/by-email/hidden.one%40icloud.com/key",
+      {
+        method: "POST",
+        headers: controlHeaders,
+        body: JSON.stringify({
+          id: "local-1",
+          access_key: replacement,
+          replace_existing: true,
+        }),
+      },
+    );
+    expect(rotate.status).toBe(200);
+    const rotated = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "hidden.one@icloud.com",
+          key: replacement,
+        }),
+      },
+    );
+    expect(rotated.status).toBe(200);
+  });
+
   it("serves the stateless standard verification-code API", async () => {
     await upsertAlias();
     const waiting = await SELF.fetch(

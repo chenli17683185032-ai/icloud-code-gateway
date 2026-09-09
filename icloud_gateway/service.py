@@ -1165,6 +1165,7 @@ class GatewayService:
         *,
         access_key: str | None = None,
         action: str = "upsert",
+        confirm_remote_replacement: bool = False,
     ) -> None:
         if self.edge_sync_client is None or not self.settings.edge_sync_enabled:
             return
@@ -1181,6 +1182,7 @@ class GatewayService:
                     alias_id=str(alias["id"]),
                     email=email,
                     access_key=access_key,
+                    replace_existing=confirm_remote_replacement,
                 )
             else:
                 self.edge_sync_client.upsert_alias(
@@ -1356,7 +1358,12 @@ class GatewayService:
             issued = self.database.issue_access_key(alias_id)
             self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
             alias = self.database.get_alias(alias_id)
-            self._push_alias_to_edge(alias, access_key=issued.access_key, action="issue_key")
+            self._push_alias_to_edge(
+                alias,
+                access_key=issued.access_key,
+                action="issue_key",
+                confirm_remote_replacement=confirm_remote_replacement,
+            )
             return issued
 
     def reconcile_edge_key_status(self) -> dict[str, int]:

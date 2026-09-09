@@ -32,3 +32,9 @@ export class RateLimitError extends AppError {
     super("rate_limited", 429, "尝试次数过多，请一分钟后再试。");
   }
 }
+
+export class ConflictError extends AppError {
+  constructor(message = "记录冲突，请先核对当前状态。") {
+    super("conflict", 409, message);
+  }
+}

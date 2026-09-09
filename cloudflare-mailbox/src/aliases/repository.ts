@@ -19,6 +19,7 @@ export interface AliasWrite {
   tokenLookupDigest: string | null;
   state: "active" | "inactive";
   now: number;
+  replaceToken?: boolean;
 }
 
 export class AliasRepository {
@@ -59,10 +60,20 @@ export class AliasRepository {
             external_id = excluded.external_id,
             secret_ciphertext = excluded.secret_ciphertext,
             secret_iv = excluded.secret_iv,
-            token_digest = excluded.token_digest,
-            token_lookup_digest = excluded.token_lookup_digest,
+            token_digest = CASE
+              WHEN ? = 1 THEN excluded.token_digest
+              ELSE aliases.token_digest
+            END,
+            token_lookup_digest = CASE
+              WHEN ? = 1 THEN excluded.token_lookup_digest
+              ELSE aliases.token_lookup_digest
+            END,
             state = excluded.state,
-            updated_at = excluded.updated_at`,
+            updated_at = excluded.updated_at
+          WHERE ? = 1
+             OR aliases.token_digest IS NULL
+             OR excluded.token_digest IS NULL
+             OR aliases.token_digest = excluded.token_digest`,
       )
       .bind(
         value.aliasDigest,
@@ -74,6 +85,9 @@ export class AliasRepository {
         value.state,
         value.now,
         value.now,
+        value.replaceToken ? 1 : 0,
+        value.replaceToken ? 1 : 0,
+        value.replaceToken ? 1 : 0,
       )
       .run();
   }

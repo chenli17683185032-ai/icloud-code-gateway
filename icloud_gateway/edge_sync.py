@@ -130,11 +130,22 @@ class EdgeSyncClient:
             payload["access_key"] = validate_access_key(str(access_key))
         return self._request("POST", "/control/v1/aliases", payload)
 
-    def issue_access_key(self, *, alias_id: str, email: str, access_key: str) -> dict[str, Any]:
+    def issue_access_key(
+        self,
+        *,
+        alias_id: str,
+        email: str,
+        access_key: str,
+        replace_existing: bool = False,
+    ) -> dict[str, Any]:
         return self._request(
             "POST",
             f"/control/v1/aliases/by-email/{self._email_path(email)}/key",
-            {"access_key": validate_access_key(access_key), "id": str(alias_id)},
+            {
+                "access_key": validate_access_key(access_key),
+                "id": str(alias_id),
+                "replace_existing": bool(replace_existing),
+            },
         )
 
     def revoke_access_key(self, *, email: str) -> dict[str, Any]:
