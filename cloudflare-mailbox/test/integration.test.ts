@@ -162,6 +162,39 @@ describe("worker integration", () => {
     });
   });
 
+  it("exposes remote key presence without exposing the key", async () => {
+    await upsertAlias();
+    const response = await SELF.fetch(
+      "https://example.com/control/v1/aliases/status",
+      {
+        method: "POST",
+        headers: controlHeaders,
+        body: JSON.stringify({
+          emails: ["hidden.one@icloud.com", "missing@icloud.com"],
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      aliases: Array<Record<string, unknown>>;
+    };
+    expect(payload.aliases).toEqual(
+      expect.arrayContaining([
+        {
+          email: "hidden.one@icloud.com",
+          state: "active",
+          has_access_key: true,
+        },
+        {
+          email: "missing@icloud.com",
+          state: "not_found",
+          has_access_key: false,
+        },
+      ]),
+    );
+    expect(JSON.stringify(payload)).not.toContain(token);
+  });
+
   it("serves the stateless standard verification-code API", async () => {
     await upsertAlias();
     const waiting = await SELF.fetch(

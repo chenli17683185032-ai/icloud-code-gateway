@@ -205,6 +205,7 @@ Content-Type: application/json
 - `DELETE /control/v1/aliases/by-email/{email}/key`
 - `POST /control/v1/aliases/by-email/{email}/state`
 - `DELETE /control/v1/aliases/by-email/{email}`
+- `POST /control/v1/aliases/status`：只返回邮箱状态和 key 是否存在，不返回 key 或摘要。
 
 所有控制面接口都要求 `Authorization: Bearer <CONTROL_PLANE_TOKEN>`。
 

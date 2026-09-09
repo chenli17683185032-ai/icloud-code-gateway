@@ -605,9 +605,22 @@
 
   document.querySelectorAll(".issue-key-button").forEach((button) => {
     button.addEventListener("click", async () => {
+      const cloudKeyPresent =
+        button.dataset.edgeKeyStatus === "present" && button.dataset.localKey !== "true";
+      if (
+        cloudKeyPresent &&
+        !window.confirm(
+          "云端已经保存这个邮箱的 key，但本地无法恢复原 key。确认生成新 key 并让旧 key 失效吗？",
+        )
+      ) {
+        return;
+      }
       button.disabled = true;
       try {
-        const data = await api(`/admin/api/aliases/${button.dataset.aliasId}/key`, {
+        const endpoint = cloudKeyPresent
+          ? `/admin/api/aliases/${button.dataset.aliasId}/key?confirm_remote=1`
+          : `/admin/api/aliases/${button.dataset.aliasId}/key`;
+        const data = await api(endpoint, {
           method: "POST",
         });
         openModal([data], "密钥已签发，可在 Alias 列表再次查看。");
@@ -616,6 +629,10 @@
         toast(
           error.message === "edge_sync_error"
             ? "密钥已在本地签发，但同步云端失败，请稍后用「同步到云端」重试。"
+            : error.message === "remote_key_exists"
+              ? "云端已有旧 key，已阻止覆盖；请先确认轮换。"
+            : error.message === "key_status_unavailable"
+              ? "云端 key 状态核对失败，尚未生成新 key，请稍后重试。"
             : "密钥签发失败。",
           "error",
         );

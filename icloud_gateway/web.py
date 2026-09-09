@@ -48,9 +48,11 @@ from .service import (
     GatewayBusyError,
     GatewayEdgeSyncError,
     GatewayError,
+    GatewayKeyStatusUnavailableError,
     GatewayNotAllowedError,
     GatewayNotConfiguredError,
     GatewayRateLimitedError,
+    GatewayRemoteKeyExistsError,
     GatewayService,
     PreparedLookup,
 )
@@ -75,6 +77,7 @@ NOTICE_MESSAGES = {
     "alias_error": "Alias 配置未保存。",
     "edge_sync_empty": "云端同步完成：没有可推送的已签发密钥。",
     "edge_sync_error": "云端同步失败：请确认 edge sync 已启用且 Clash 代理可用。",
+    "edge_status_error": "云端 key 状态核对失败：本地状态保持不变。",
     "operator_sso_error": "邮件后台会话建立失败，请稍后重试。",
     "tags_error": "标签更新失败：请确认 IMAP 已配置。",
 }
@@ -96,6 +99,18 @@ def _build_admin_notice(notice: str, params: Mapping[str, str] | None = None) ->
         return (
             f"云端同步成功：已推送 {ok} 个密钥，跳过 {skip} 个。",
             "success",
+        )
+    if notice == "edge_status_ok":
+        checked = _notice_int(params.get("checked"))
+        present = _notice_int(params.get("present"))
+        absent = _notice_int(params.get("absent"))
+        not_found = _notice_int(params.get("not_found"))
+        failed = _notice_int(params.get("failed"))
+        suffix = f"，失败 {failed} 个" if failed else ""
+        return (
+            f"云端 key 状态已核对：检查 {checked} 个，云端有 key {present} 个，"
+            f"无 key {absent} 个，云端不存在 {not_found} 个{suffix}。",
+            "error" if failed else "success",
         )
     if notice == "edge_sync_partial":
         ok = _notice_int(params.get("ok"))
@@ -480,6 +495,13 @@ class ControlKeyRequest(BaseModel):
 
 class ControlStateRequest(BaseModel):
     state: Literal["active", "inactive"]
+
+
+class ControlAliasStatusRequest(BaseModel):
+    emails: Annotated[
+        list[Annotated[str, Field(min_length=3, max_length=254)]],
+        Field(min_length=1, max_length=100),
+    ]
 
 
 class HmeSessionImportRequest(BaseModel):
@@ -1117,6 +1139,29 @@ def create_app(
             )
         return _redirect_notice("edge_sync_ok", ok=ok, skip=skip)
 
+    @app.post("/admin/edge/status")
+    async def check_edge_status(request: Request):
+        """Refresh remote key presence without changing any key."""
+        session = _admin_session(request, session_codec, settings=settings)
+        if session is None:
+            return RedirectResponse("/admin/login", status_code=303)
+        form = await request.form()
+        _validate_form_csrf(session, form.get("csrf_token"), open_mode=settings.admin_open)
+        if not settings.is_control or not settings.edge_sync_enabled:
+            return _redirect_notice("edge_status_error")
+        try:
+            result = await asyncio.to_thread(gateway.reconcile_edge_key_status)
+        except Exception:
+            return _redirect_notice("edge_status_error")
+        return _redirect_notice(
+            "edge_status_ok",
+            checked=int(result.get("checked") or 0),
+            present=int(result.get("present") or 0),
+            absent=int(result.get("absent") or 0),
+            not_found=int(result.get("not_found") or 0),
+            failed=int(result.get("failed") or 0),
+        )
+
     def _idempotency_key(request: Request) -> str | None:
         value = request.headers.get("Idempotency-Key")
         if value is not None and (not value.strip() or len(value) > 200):
@@ -1203,13 +1248,21 @@ def create_app(
         return job
 
     @app.post("/admin/api/aliases/{alias_id}/key")
-    async def issue_alias_key(alias_id: str, request: Request):
+    async def issue_alias_key(alias_id: str, request: Request, confirm_remote: bool = False):
         _require_admin_json(request, session_codec, settings=settings)
         try:
-            issued = await asyncio.to_thread(gateway.issue_access_key, alias_id)
+            issued = await asyncio.to_thread(
+                gateway.issue_access_key,
+                alias_id,
+                confirm_remote_replacement=bool(confirm_remote),
+            )
             alias = gateway.database.get_alias(alias_id)
         except ConflictError:
             return JSONResponse({"status": "conflict"}, status_code=409)
+        except GatewayRemoteKeyExistsError:
+            return JSONResponse({"status": "remote_key_exists"}, status_code=409)
+        except GatewayKeyStatusUnavailableError:
+            return JSONResponse({"status": "key_status_unavailable"}, status_code=503)
         except GatewayNotAllowedError:
             return JSONResponse({"status": "not_allowed"}, status_code=403)
         except GatewayEdgeSyncError:
@@ -1424,6 +1477,15 @@ def create_app(
             "state": alias["state"],
             "has_access_key": bool(alias.get("has_access_key")),
         }
+
+    @app.post("/control/v1/aliases/status")
+    async def control_alias_status(request: Request, payload: ControlAliasStatusRequest):
+        _require_control_token(request, settings)
+        try:
+            aliases = await asyncio.to_thread(gateway.database.alias_key_statuses, payload.emails)
+        except ValueError:
+            return JSONResponse({"status": "invalid_request"}, status_code=422)
+        return {"status": "ok", "aliases": aliases}
 
     @app.post("/control/v1/aliases/by-email/{email}/key")
     async def control_issue_key(email: str, request: Request, payload: ControlKeyRequest):

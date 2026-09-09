@@ -25,6 +25,10 @@ export const controlStateSchema = z.object({
   state: z.enum(["active", "inactive"]),
 });
 
+export const controlAliasStatusSchema = z.object({
+  emails: z.array(email).min(1).max(100),
+});
+
 export const mailboxSessionSchema = z.object({
   email: z.union([email, z.literal("")]).default(""),
   token: accessToken,

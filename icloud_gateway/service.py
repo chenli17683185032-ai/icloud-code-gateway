@@ -90,6 +90,14 @@ class GatewayEdgeSyncError(GatewayError):
     code = "edge_sync_error"
 
 
+class GatewayRemoteKeyExistsError(GatewayError):
+    code = "remote_key_exists"
+
+
+class GatewayKeyStatusUnavailableError(GatewayError):
+    code = "key_status_unavailable"
+
+
 @dataclass(frozen=True)
 class CodeLookupResult:
     status: str
@@ -997,7 +1005,10 @@ class GatewayService:
             for alias_id in ids:
                 try:
                     if action == "issue_keys":
-                        issued = self.issue_access_key(alias_id)
+                        issued = self.issue_access_key(
+                            alias_id,
+                            confirm_remote_replacement=confirmed,
+                        )
                         alias = self.database.get_alias(alias_id)
                         result = {
                             "id": alias_id,
@@ -1035,6 +1046,10 @@ class GatewayService:
                     result = {"id": alias_id, "status": "not_found"}
                 except ConflictError:
                     result = {"id": alias_id, "status": "conflict"}
+                except GatewayRemoteKeyExistsError:
+                    result = {"id": alias_id, "status": "remote_key_exists"}
+                except GatewayKeyStatusUnavailableError:
+                    result = {"id": alias_id, "status": "key_status_unavailable"}
                 except (HmeError, HmeSessionError, GatewayError):
                     result = {"id": alias_id, "status": "unknown"}
                 except Exception:
@@ -1157,11 +1172,9 @@ class GatewayService:
             email = str(alias.get("email") or "").strip()
             if action == "delete":
                 self.edge_sync_client.delete_alias(email=email)
-                return
-            if action == "revoke_key":
+            elif action == "revoke_key":
                 self.edge_sync_client.revoke_access_key(email=email)
-                return
-            if action == "issue_key":
+            elif action == "issue_key":
                 if not access_key:
                     raise GatewayEdgeSyncError("access key is required for edge issue")
                 self.edge_sync_client.issue_access_key(
@@ -1169,16 +1182,16 @@ class GatewayService:
                     email=email,
                     access_key=access_key,
                 )
-                return
-            self.edge_sync_client.upsert_alias(
-                alias_id=str(alias["id"]),
-                email=email,
-                label=str(alias.get("label") or email),
-                note=str(alias.get("note") or ""),
-                sender_filter=str(alias.get("sender_filter") or ""),
-                state=str(alias.get("state") or "active"),
-                access_key=access_key,
-            )
+            else:
+                self.edge_sync_client.upsert_alias(
+                    alias_id=str(alias["id"]),
+                    email=email,
+                    label=str(alias.get("label") or email),
+                    note=str(alias.get("note") or ""),
+                    sender_filter=str(alias.get("sender_filter") or ""),
+                    state=str(alias.get("state") or "active"),
+                    access_key=access_key,
+                )
         except EdgeSyncError as exc:
             self.database.record_audit_event(
                 "edge_sync",
@@ -1191,6 +1204,17 @@ class GatewayService:
             action,
             alias_id=str(alias.get("id") or "") or None,
         )
+        if action in {"issue_key", "revoke_key", "delete"} or (
+            action == "upsert" and access_key
+        ):
+            status = {
+                "issue_key": "present",
+                "revoke_key": "absent",
+                "delete": "not_found",
+                "upsert": "present",
+            }[action]
+            with suppress(Exception):
+                self.database.update_edge_key_status(str(alias.get("id") or ""), status)
 
     def register_control_alias(
         self,
@@ -1286,7 +1310,12 @@ class GatewayService:
         )
         self.database.delete_alias(alias_id)
 
-    def issue_access_key(self, alias_id: str) -> IssuedAccessKey:
+    def issue_access_key(
+        self,
+        alias_id: str,
+        *,
+        confirm_remote_replacement: bool = False,
+    ) -> IssuedAccessKey:
         if self.settings.is_edge:
             raise GatewayNotAllowedError("edge mode only imports keys from the control plane")
         if self._remote_write_active:
@@ -1294,11 +1323,95 @@ class GatewayService:
         with self._hme_lock:
             if self._remote_write_active:
                 raise GatewayBusyError("alias lifecycle operation is in progress")
+            alias = self.database.get_alias(alias_id)
+            if (
+                not bool(alias.get("has_access_key"))
+                and self.edge_sync_client is not None
+                and self.settings.edge_sync_enabled
+            ):
+                try:
+                    remote = self.edge_sync_client.get_alias_key_statuses([alias["email"]])
+                except EdgeSyncError as exc:
+                    raise GatewayKeyStatusUnavailableError(
+                        "cannot verify the existing cloud key"
+                    ) from exc
+                current = remote.get(str(alias["email"]).strip().casefold())
+                if current is None:
+                    raise GatewayKeyStatusUnavailableError("cloud key status is unavailable")
+                status = (
+                    "not_found"
+                    if str(current.get("state") or "") == "not_found"
+                    else "present" if bool(current.get("has_access_key")) else "absent"
+                )
+                self.database.update_edge_key_status(alias_id, status)
+                alias = self.database.get_alias(alias_id)
+            if (
+                not bool(alias.get("has_access_key"))
+                and str(alias.get("edge_key_status") or "unknown") == "present"
+                and not confirm_remote_replacement
+            ):
+                raise GatewayRemoteKeyExistsError(
+                    "cloud edge already has an access key; explicit replacement is required"
+                )
             issued = self.database.issue_access_key(alias_id)
             self.database.record_audit_event("access_key", "issued", alias_id=str(alias_id))
             alias = self.database.get_alias(alias_id)
             self._push_alias_to_edge(alias, access_key=issued.access_key, action="issue_key")
             return issued
+
+    def reconcile_edge_key_status(self) -> dict[str, int]:
+        """Compare local aliases with the edge without moving or replacing keys."""
+        if self.edge_sync_client is None or not self.settings.edge_sync_enabled:
+            raise GatewayNotAllowedError("edge sync is not enabled")
+        if self.settings.is_edge:
+            raise GatewayNotAllowedError("edge mode cannot query itself")
+        aliases = self.database.list_aliases()
+        checked = 0
+        present = 0
+        absent = 0
+        not_found = 0
+        failed = 0
+        checked_at = _timestamp()
+        # The Worker intentionally bounds JSON bodies to 16 KiB. Fifty email
+        # addresses stay below that limit while keeping reconciliation quick.
+        for offset in range(0, len(aliases), 50):
+            batch = aliases[offset : offset + 50]
+            emails = [str(alias.get("email") or "") for alias in batch]
+            try:
+                remote = self.edge_sync_client.get_alias_key_statuses(emails)
+            except EdgeSyncError:
+                failed += len(batch)
+                continue
+            statuses: dict[str, str] = {}
+            for alias in batch:
+                email = str(alias.get("email") or "").strip().casefold()
+                value = remote.get(email)
+                if value is None:
+                    continue
+                if str(value.get("state") or "") == "not_found":
+                    status = "not_found"
+                    not_found += 1
+                elif bool(value.get("has_access_key")):
+                    status = "present"
+                    present += 1
+                else:
+                    status = "absent"
+                    absent += 1
+                statuses[email] = status
+            checked += len(statuses)
+            if statuses:
+                self.database.update_edge_key_statuses(statuses, checked_at=checked_at)
+        self.database.record_audit_event(
+            "edge_sync",
+            "status_checked" if failed == 0 else "status_partial",
+        )
+        return {
+            "checked": checked,
+            "present": present,
+            "absent": absent,
+            "not_found": not_found,
+            "failed": failed,
+        }
 
     def push_all_access_keys_to_edge(self) -> dict[str, int]:
         """Reconcile every active local alias (with key when available) to the edge.
@@ -1402,6 +1515,8 @@ class GatewayService:
         if self._stop_event.wait(30.0):
             return
         while True:
+            with suppress(Exception):
+                self.reconcile_edge_key_status()
             with suppress(Exception):
                 self.push_all_access_keys_to_edge()
             if self._stop_event.wait(max(300, int(self.settings.edge_reconcile_seconds))):
@@ -1944,6 +2059,14 @@ class GatewayService:
                 "total": len(aliases),
                 "active": sum(item["state"] == "active" for item in aliases),
                 "keyed": sum(item["has_access_key"] for item in aliases),
+                "edge_keyed": sum(item["edge_key_status"] == "present" for item in aliases),
+                "edge_checked": sum(
+                    item["edge_key_status"] != "unknown" for item in aliases
+                ),
+                "edge_only_keyed": sum(
+                    item["edge_key_status"] == "present" and not item["has_access_key"]
+                    for item in aliases
+                ),
             },
             "query_history": query_history,
             "query_counts": {
@@ -1983,6 +2106,8 @@ __all__ = [
     "CreatedAlias",
     "GatewayBusyError",
     "GatewayEdgeSyncError",
+    "GatewayRemoteKeyExistsError",
+    "GatewayKeyStatusUnavailableError",
     "GatewayNotAllowedError",
     "GatewayError",
     "GatewayNotConfiguredError",

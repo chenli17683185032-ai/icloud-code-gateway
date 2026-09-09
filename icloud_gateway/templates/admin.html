@@ -121,7 +121,7 @@
     <div class="section-toolbar">
       <div class="section-heading">
         <h2 id="aliases-title">Alias</h2>
-        <p>{{ counts.active }} 条活动，{{ counts.total - counts.active }} 条失活，{{ counts.keyed }} 条已签发密钥</p>
+        <p>{{ counts.active }} 条活动，{{ counts.total - counts.active }} 条失活，{{ counts.keyed }} 条本地 key{% if deployment_mode == 'control' %} · {{ counts.edge_keyed }} 条云端 key{% if counts.edge_only_keyed %}（{{ counts.edge_only_keyed }} 条本地不可恢复）{% endif %}{% endif %}</p>
       </div>
       <div class="toolbar-actions">
         <label class="search-control" for="alias-filter">
@@ -146,6 +146,19 @@
           </button>
         </form>
         {% if deployment_mode == 'control' %}
+        <form method="post" action="/admin/edge/status">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button
+            class="secondary-button"
+            type="submit"
+            aria-label="核对云端 key 状态"
+            title="只读取云端 key 状态，不生成或覆盖任何密钥"
+            {% if not edge_sync_enabled %}disabled{% endif %}
+          >
+            <img src="/static/icons/shield-check.svg" alt="" aria-hidden="true">
+            <span>核对云端 key</span>
+          </button>
+        </form>
         <form method="post" action="/admin/edge/sync">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button
@@ -286,6 +299,11 @@
           {% if alias.has_access_key %}
           <span>末 4 位 {{ alias.access_key_hint }}</span>
             {% if not alias.access_key_recoverable %}<span class="legacy-key-note">轮换后可查看</span>{% endif %}
+          {% elif alias.edge_key_status == 'present' %}
+          <span class="legacy-key-note">云端已有 key</span>
+          <span class="muted-text">本地不可恢复</span>
+          {% elif alias.edge_key_status == 'unknown' and deployment_mode == 'control' %}
+          <span class="muted-text">未核对云端</span>
           {% else %}
           <span class="muted-text">未签发</span>
           {% endif %}
@@ -310,7 +328,9 @@
             type="button"
             data-alias-id="{{ alias.id }}"
             aria-label="{% if alias.has_access_key %}轮换密钥{% else %}签发密钥{% endif %}"
-            title="{% if alias.has_access_key %}轮换密钥{% else %}签发密钥{% endif %}"
+            title="{% if alias.has_access_key %}轮换密钥{% elif alias.edge_key_status == 'present' %}云端已有 key，确认后轮换{% else %}签发密钥{% endif %}"
+            data-edge-key-status="{{ alias.edge_key_status }}"
+            data-local-key="{{ 'true' if alias.has_access_key else 'false' }}"
             {% if alias.state != 'active' %}disabled{% endif %}
           >
             <img src="/static/icons/{% if alias.has_access_key %}rotate-ccw{% else %}key-round{% endif %}.svg" alt="" aria-hidden="true">

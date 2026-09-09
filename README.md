@@ -56,6 +56,7 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 控制面同步接口（仅 token 鉴权，不走管理员 Cookie）：
 
 - `POST /control/v1/aliases`
+- `POST /control/v1/aliases/status`（只读返回云端是否已有 key）
 - `POST /control/v1/aliases/by-email/{email}/key`
 - `DELETE /control/v1/aliases/by-email/{email}/key`
 - `POST /control/v1/aliases/by-email/{email}/state`
@@ -203,6 +204,7 @@ docker compose ps
 4. 配置转发邮箱 IMAP 和 App 专用密码；如需覆盖垃圾邮件，填写服务端显示的准确文件夹
    名称。保存动作会只读测试所有已配置文件夹。
 5. Session 捕获成功后会自动导入已有 Alias；也可点击“导入 / 刷新”重新对账，随后为需要使用的活动 Alias 签发访问密钥。新签发/轮换的密钥可由管理员随时显式查看和复制；升级前只有哈希的旧密钥需先轮换。点击 Alias 邮箱可直接复制，并可用 GPT、Grok 或自定义用途按钮做本地标记。
+   在 `control` 模式下点“核对云端 key”只读检查本地与 Worker 的密钥状态；若显示“云端已有 key / 本地不可恢复”，系统会阻止无确认覆盖，必须再次确认轮换。
 6. 在“验证码”栏目手动读取全部 Alias 最近 5 分钟的验证码；该操作不要求 Alias 已配置访问密钥，也不会保存验证码。
 7. 在“查询记录”查看哪些 Alias 被公开查询、查询结果、脱敏来源指纹和北京时间；已删除 Alias 的既有记录仍保留当时邮箱快照。
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
@@ -153,6 +153,49 @@ class EdgeSyncClient:
             "DELETE",
             f"/control/v1/aliases/by-email/{self._email_path(email)}",
         )
+
+    def get_alias_key_statuses(self, emails: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Read only key presence/state from the remote edge.
+
+        The edge never returns a key or token digest. Batching keeps a dashboard
+        reconciliation to a small number of authenticated requests while the
+        caller can safely persist the result locally.
+        """
+        values = [
+            str(email or "").strip().casefold()
+            for email in emails
+            if str(email or "").strip()
+        ]
+        if not values:
+            return {}
+        response = self._request(
+            "POST",
+            "/control/v1/aliases/status",
+            {"emails": values},
+        )
+        raw = response.get("aliases")
+        if not isinstance(raw, list):
+            raise EdgeSyncError("edge status response is invalid")
+        statuses: dict[str, dict[str, Any]] = {}
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise EdgeSyncError("edge status response is invalid")
+            email = str(item.get("email") or "").strip().casefold()
+            state = str(item.get("state") or "")
+            has_key = item.get("has_access_key")
+            if (
+                not email
+                or state not in {"active", "inactive", "not_found"}
+                or not isinstance(has_key, bool)
+            ):
+                raise EdgeSyncError("edge status response is invalid")
+            statuses[email] = {
+                "state": state,
+                "has_access_key": has_key,
+            }
+        if set(statuses) != set(values):
+            raise EdgeSyncError("edge status response is incomplete")
+        return statuses
 
     def import_hme_session(self, session: ICloudHmeSession) -> dict[str, Any]:
         """Upload a locally captured Apple session to the remote control server."""

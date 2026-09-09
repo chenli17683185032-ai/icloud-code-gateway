@@ -19,7 +19,13 @@ from .hme import (
     HmeSessionError,
     ICloudHmeSession,
 )
-from .service import GatewayError, GatewayRetryableError, GatewayStoppingError
+from .service import (
+    GatewayError,
+    GatewayKeyStatusUnavailableError,
+    GatewayRemoteKeyExistsError,
+    GatewayRetryableError,
+    GatewayStoppingError,
+)
 
 TERMINAL_JOB_STATUSES = {
     "completed",
@@ -226,7 +232,7 @@ class BatchJobManager:
             kind="bulk_aliases",
             action=action,
             fingerprint=request_fingerprint("bulk_aliases", payload),
-            items=[{"alias_id": alias_id} for alias_id in ids],
+            items=[{"alias_id": alias_id, "confirmed": bool(confirmed)} for alias_id in ids],
             idempotency_key=idempotency_key,
         )
         if created:
@@ -316,6 +322,10 @@ class BatchJobManager:
             return "capacity_reached"
         if item.get("error") in {"not_found", "conflict"}:
             return str(item["error"])
+        if item.get("error") == "remote_key_exists":
+            return "remote_key_exists"
+        if item.get("error") == "key_status_unavailable":
+            return "key_status_unavailable"
         if str(item.get("error")) == "remote write was not attempted":
             return "remote_write_not_attempted"
         return "operation_failed"
@@ -830,7 +840,12 @@ class BatchJobManager:
     def _run_item(self, job: Mapping[str, Any], item: Mapping[str, Any]) -> str:
         if job["kind"] == "create_aliases":
             return self._create_alias(item, job_id=job["id"])
-        return "unknown" if self._bulk_alias(item, job_id=job["id"], action=job["action"]) else "ok"
+        return "unknown" if self._bulk_alias(
+            item,
+            job_id=job["id"],
+            action=job["action"],
+            confirmed=bool(job.get("confirmed")),
+        ) else "ok"
 
     def _close_create_client(self, client: Any, original_session: Any) -> None:
         if client is None:
@@ -1259,9 +1274,23 @@ class BatchJobManager:
             if remote_write_started:
                 self.gateway._finish_remote_write()
 
-    def _bulk_alias(self, item: Mapping[str, Any], *, job_id: str, action: str) -> bool:
+    def _bulk_alias(
+        self,
+        item: Mapping[str, Any],
+        *,
+        job_id: str,
+        action: str,
+        confirmed: bool = False,
+    ) -> bool:
         index = int(item["index"])
         alias_id = str(item["input"]["alias_id"])
+        item_confirmed = bool(
+            confirmed
+            or (
+                isinstance(item.get("input"), Mapping)
+                and item["input"].get("confirmed") is True
+            )
+        )
         remote_write = action in {"deactivate", "delete"}
         try:
             self._raise_if_stopping()
@@ -1274,7 +1303,10 @@ class BatchJobManager:
                 job_id, index, stage="executing", status="running", alias_id=alias_id
             )
             if action == "issue_keys":
-                self.gateway.issue_access_key(alias_id)
+                self.gateway.issue_access_key(
+                    alias_id,
+                    confirm_remote_replacement=item_confirmed,
+                )
                 alias = self.database.get_alias(alias_id)
             elif action == "reveal_keys":
                 self.gateway.reveal_access_key(alias_id)
@@ -1313,6 +1345,26 @@ class BatchJobManager:
         except ConflictError:
             self.database.update_batch_item(
                 job_id, index, stage="failed", status="failed", alias_id=alias_id, error="conflict"
+            )
+            return False
+        except GatewayRemoteKeyExistsError:
+            self.database.update_batch_item(
+                job_id,
+                index,
+                stage="failed",
+                status="failed",
+                alias_id=alias_id,
+                error="remote_key_exists",
+            )
+            return False
+        except GatewayKeyStatusUnavailableError:
+            self.database.update_batch_item(
+                job_id,
+                index,
+                stage="failed",
+                status="failed",
+                alias_id=alias_id,
+                error="key_status_unavailable",
             )
             return False
         except GatewayRetryableError as exc:

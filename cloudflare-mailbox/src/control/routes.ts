@@ -5,11 +5,12 @@ import {
   ValidationError,
 } from "../shared/errors";
 import { parseJson } from "../shared/http";
-import { safeEqual } from "../shared/security";
+import { aliasDigest, safeEqual } from "../shared/security";
 import { services } from "../shared/services";
 import type { WorkerContext } from "../shared/types";
 import {
   controlAliasSchema,
+  controlAliasStatusSchema,
   controlKeySchema,
   controlStateSchema,
 } from "../aliases/schema";
@@ -46,6 +47,24 @@ controlRoutes.post("/v1/aliases", async (context) => {
     state: result.state,
     has_access_key: result.hasAccessKey,
   });
+});
+
+controlRoutes.post("/v1/aliases/status", async (context) => {
+  const input = await parseJson(context, controlAliasStatusSchema);
+  const { aliases, config } = services(context.env);
+  const results = await Promise.all(
+    input.emails.map(async (email) => {
+      const normalized = pathEmail(email).trim().toLowerCase();
+      const digest = await aliasDigest(config, normalized);
+      const row = await aliases.getByDigest(digest);
+      return {
+        email: normalized,
+        state: row?.state ?? "not_found",
+        has_access_key: Boolean(row?.token_digest),
+      };
+    }),
+  );
+  return context.json({ status: "ok", aliases: results });
 });
 
 controlRoutes.post("/v1/aliases/by-email/:email/key", async (context) => {

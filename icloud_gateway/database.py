@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -180,6 +180,9 @@ class Database:
                     access_key_blob BLOB,
                     key_issued_at TEXT,
                     key_revoked_at TEXT,
+                    edge_key_status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (edge_key_status IN ('unknown', 'present', 'absent', 'not_found')),
+                    edge_status_checked_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_synced_at TEXT
@@ -268,6 +271,12 @@ class Database:
                 connection.execute(
                     "ALTER TABLE aliases ADD COLUMN usage_label TEXT NOT NULL DEFAULT ''"
                 )
+            if "edge_key_status" not in alias_columns:
+                connection.execute(
+                    "ALTER TABLE aliases ADD COLUMN edge_key_status TEXT NOT NULL DEFAULT 'unknown'"
+                )
+            if "edge_status_checked_at" not in alias_columns:
+                connection.execute("ALTER TABLE aliases ADD COLUMN edge_status_checked_at TEXT")
             audit_columns = {
                 str(row["name"]) for row in connection.execute("PRAGMA table_info(audit_events)")
             }
@@ -626,6 +635,25 @@ class Database:
         )
         return None if row is None else self._alias_from_row(row)
 
+    def alias_key_statuses(self, emails: Sequence[str]) -> list[dict[str, Any]]:
+        """Return only presence and state for control-plane reconciliation."""
+        statuses: list[dict[str, Any]] = []
+        for value in emails:
+            email = _normalize_email(value)
+            digest = self.secret_box.digest(email, "alias-email-index")
+            row = self._connect().execute(
+                "SELECT state, access_key_hash FROM aliases WHERE email_hash = ?",
+                (sqlite3.Binary(digest),),
+            ).fetchone()
+            statuses.append(
+                {
+                    "email": email,
+                    "state": "not_found" if row is None else str(row["state"]),
+                    "has_access_key": row is not None and row["access_key_hash"] is not None,
+                }
+            )
+        return statuses
+
     def import_access_key(self, alias_id: str, access_key: str) -> IssuedAccessKey:
         clean_alias_id = str(alias_id)
         key = validate_access_key(access_key)
@@ -761,6 +789,56 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise NotFoundError("alias not found")
+
+    def update_edge_key_status(
+        self,
+        alias_id: str,
+        status: str,
+        *,
+        checked_at: str | None = None,
+    ) -> None:
+        clean_status = str(status or "").strip()
+        if clean_status not in {"unknown", "present", "absent", "not_found"}:
+            raise ValueError("edge key status is invalid")
+        timestamp = checked_at or _now()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE aliases
+                SET edge_key_status = ?, edge_status_checked_at = ?
+                WHERE id = ?
+                """,
+                (clean_status, timestamp, str(alias_id)),
+            )
+            if cursor.rowcount != 1:
+                raise NotFoundError("alias not found")
+
+    def update_edge_key_statuses(
+        self,
+        statuses: Mapping[str, str],
+        *,
+        checked_at: str | None = None,
+    ) -> int:
+        timestamp = checked_at or _now()
+        updated = 0
+        with self.transaction() as connection:
+            for email, status in statuses.items():
+                clean_status = str(status or "").strip()
+                if clean_status not in {"unknown", "present", "absent", "not_found"}:
+                    raise ValueError("edge key status is invalid")
+                email_hash = self.secret_box.digest(
+                    _normalize_email(email), "alias-email-index"
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE aliases
+                    SET edge_key_status = ?, edge_status_checked_at = ?
+                    WHERE email_hash = ?
+                    """,
+                    (clean_status, timestamp, sqlite3.Binary(email_hash)),
+                )
+                updated += max(0, int(cursor.rowcount))
+        return updated
 
     def update_alias_configuration(
         self,
@@ -1414,6 +1492,8 @@ class Database:
             ),
             "key_issued_at": row["key_issued_at"],
             "key_revoked_at": row["key_revoked_at"],
+            "edge_key_status": str(row["edge_key_status"] or "unknown"),
+            "edge_status_checked_at": row["edge_status_checked_at"],
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
             "last_synced_at": row["last_synced_at"],

@@ -179,6 +179,45 @@ class _FakeSession:
                 "timeout": timeout,
             }
         )
+        if url.endswith("/control/v1/aliases/status"):
+            return _FakeResponse(
+                payload={
+                    "status": "ok",
+                    "aliases": [
+                        {"email": email, "state": "not_found", "has_access_key": False}
+                        for email in (json or {}).get("emails", [])
+                    ],
+                }
+            )
+        return _FakeResponse()
+
+
+class _StatusFakeSession(_FakeSession):
+    def request(self, method, url, headers=None, json=None, timeout=None):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "timeout": timeout,
+            }
+        )
+        if url.endswith("/control/v1/aliases/status"):
+            emails = list((json or {}).get("emails") or [])
+            return _FakeResponse(
+                payload={
+                    "status": "ok",
+                    "aliases": [
+                        {
+                            "email": email,
+                            "state": "active",
+                            "has_access_key": email.startswith("cloud."),
+                        }
+                        for email in emails
+                    ],
+                }
+            )
         return _FakeResponse()
 
 
@@ -224,7 +263,42 @@ def test_control_plane_pushes_issued_key_to_edge(tmp_path: Path):
     assert call["url"].endswith("/control/v1/aliases/by-email/local.hidden%40icloud.com/key")
     assert call["json"]["access_key"] == issued.access_key
     assert call["headers"]["Authorization"].startswith("Bearer ")
+    assert service.database.get_alias(alias["id"])["edge_key_status"] == "present"
 
+    service.shutdown(timeout=1, close_database=True)
+
+
+def test_control_plane_reconciles_remote_key_presence_without_overwriting(tmp_path: Path):
+    fake = _StatusFakeSession()
+    settings = _settings(
+        tmp_path,
+        deployment_mode="control",
+        edge_base_url="https://icloud.yunbay.xyz",
+        edge_sync_enabled=True,
+    )
+    edge = EdgeSyncClient(settings, session=fake)
+    service = GatewayService(settings, start_maintenance=False, edge_sync_client=edge)
+    local = service.database.upsert_alias(
+        email="cloud.old@icloud.com",
+        remote_metadata={"anonymousId": "old", "isActive": True},
+        state="active",
+    )
+
+    result = service.reconcile_edge_key_status()
+
+    assert result == {
+        "checked": 1,
+        "present": 1,
+        "absent": 0,
+        "not_found": 0,
+        "failed": 0,
+    }
+    assert service.database.get_alias(local["id"])["edge_key_status"] == "present"
+    with pytest.raises(Exception, match="explicit replacement"):
+        service.issue_access_key(local["id"])
+    issued = service.issue_access_key(local["id"], confirm_remote_replacement=True)
+    assert issued.access_key.startswith("icg_")
+    assert service.database.get_alias(local["id"])["has_access_key"] is True
     service.shutdown(timeout=1, close_database=True)
 
 
