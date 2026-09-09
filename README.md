@@ -61,6 +61,8 @@ ICLOUD_GATEWAY_CONTROL_PLANE_TOKEN=<same-shared-secret>
 - `DELETE /control/v1/aliases/by-email/{email}/key`
 - `POST /control/v1/aliases/by-email/{email}/state`
 - `DELETE /control/v1/aliases/by-email/{email}`
+
+控制面普通同步不会覆盖云端已有的不同 key；需要轮换时才调用邮箱 key 接口并显式确认替换。
 - `POST /admin/api/hme-session/import`：本地浏览器捕获后，把结构化 HME Session 通过 HTTPS 上传远程 control；服务器会再次只读验证 Apple 列表，再加密落盘。
 
 本地签发或轮换 access key 后，会自动把密钥同步到云端 edge；公开用户仍然只访问云端 `https://icloud.yunbay.xyz/` 输入密钥取码。

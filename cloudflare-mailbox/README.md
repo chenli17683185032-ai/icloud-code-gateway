@@ -207,6 +207,8 @@ Content-Type: application/json
 - `DELETE /control/v1/aliases/by-email/{email}`
 - `POST /control/v1/aliases/status`：只返回邮箱状态和 key 是否存在，不返回 key 或摘要。
 
+后台同步调用 `POST /control/v1/aliases` 时，如果邮箱已有不同的云端 key，Worker 会保留原 key 并返回 `409 conflict`；只有调用邮箱 key 接口并携带 `replace_existing: true` 才允许明确轮换。
+
 所有控制面接口都要求 `Authorization: Bearer <CONTROL_PLANE_TOKEN>`。
 
 ## 回滚
