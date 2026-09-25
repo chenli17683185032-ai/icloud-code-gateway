@@ -13,8 +13,9 @@
 
 - 用户主入口：`https://icloud.yunbay.xyz`
 - 维护入口：`https://mailbox.yunbay.xyz`
-- 域名收件地址：`otp@yunbay.xyz`
-- Email Routing：`otp@yunbay.xyz → icloud-mailbox-worker`
+- 域名收件地址：`subteam@tokenopen.top`
+- Email Routing：`subteam@tokenopen.top → icloud-mailbox-worker`
+- 直达收件地址 `subteam@tokenopen.top` 在别名库中保持 `active`，不签发公开 Token；Apple 地址验证邮件通过 `https://icloud.yunbay.xyz/admin/mail/` 查看。网站与 API 域名仍为 `icloud.yunbay.xyz`。
 - D1：`icloud-mailbox`（APAC）
 - 旧链接兼容：`/#key=<Token>` 会通过全局 HMAC 索引自动找到邮箱；新链接继续使用 `/#email=<邮箱>&key=<Token>`。
 - 统一管理员工作区：`https://icloud.yunbay.xyz/admin` 管理 Alias，`https://icloud.yunbay.xyz/admin/mail/` 查看全部邮件；两页顶部直接切换，邮件页由 VPS 管理员会话静默换取 Worker Cookie，不向浏览器暴露操作员 Token。
