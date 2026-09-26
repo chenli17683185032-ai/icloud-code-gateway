@@ -62,6 +62,9 @@ let messages = [];
 let selectedId = "";
 let renderedSignature = "";
 let pollingTimer = 0;
+const POLL_INTERVAL_MS = 10000;
+const MAX_POLL_DELAY_MS = 60000;
+let consecutiveRefreshFailures = 0;
 let refreshInFlight = false;
 let archiveLoadInFlight = false;
 let nextCursor = "";
@@ -221,6 +224,7 @@ function resetArchiveState() {
   historyRequested = false;
   queuedArchiveLoad = false;
   queuedRefresh = false;
+  consecutiveRefreshFailures = 0;
   refreshInFlight = false;
   archiveLoadInFlight = false;
   elements.refreshButton.disabled = false;
@@ -483,7 +487,7 @@ function renderMessages(nextMessages, options = {}) {
     : "还没有收到邮件";
   elements.empty.querySelector("p").textContent = searchQuery
     ? "换一个邮箱、发件人、标题或正文关键词。"
-    : "后台会静默刷新，新邮件到达后会立即出现。";
+    : "后台定期检查新邮件，也可以点击刷新。";
 
   for (const message of visible) {
     const row = makeElement("button", "message-row");
@@ -605,7 +609,6 @@ async function refresh(options = {}) {
     return;
   }
   const generation = mailboxGeneration;
-  let pollDelay = 3000;
   let resumeArchive = false;
   refreshInFlight = true;
   stopPolling();
@@ -659,6 +662,7 @@ async function refresh(options = {}) {
     elements.refreshState.textContent = hasNew
       ? "刚收到新邮件"
       : "已同步 " + formatTime(new Date().toISOString());
+    consecutiveRefreshFailures = 0;
   } catch (error) {
     if (generation !== mailboxGeneration) return;
     if (error instanceof ApiError && error.status === 401) {
@@ -669,7 +673,7 @@ async function refresh(options = {}) {
       error && error.message ? error.message : "后台刷新失败。";
     elements.error.hidden = false;
     elements.refreshState.textContent = "同步失败";
-    pollDelay = 5000;
+    consecutiveRefreshFailures = Math.min(consecutiveRefreshFailures + 1, 4);
   } finally {
     if (generation === mailboxGeneration) {
       refreshInFlight = false;
@@ -682,7 +686,7 @@ async function refresh(options = {}) {
         void loadAllMessages();
       } else {
         queuedArchiveLoad = false;
-        schedulePolling(pollDelay);
+        schedulePolling();
       }
     }
   }
@@ -693,7 +697,14 @@ function stopPolling() {
   pollingTimer = 0;
 }
 
-function schedulePolling(delay = 3000) {
+function pollingDelay() {
+  return Math.min(
+    POLL_INTERVAL_MS * 2 ** Math.max(0, consecutiveRefreshFailures - 1),
+    MAX_POLL_DELAY_MS,
+  );
+}
+
+function schedulePolling(delay = pollingDelay()) {
   stopPolling();
   if (
     elements.view.hidden ||

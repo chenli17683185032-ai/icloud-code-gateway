@@ -252,18 +252,11 @@ export class MessageRepository {
     cursor: AdminMessageCursor | null = null,
   ): Promise<AdminMessageRowsPage> {
     const cursorClause = cursor
-      ? `AND (
-            m.received_at < ? OR
-            (m.received_at = ? AND m.created_at < ?) OR
-            (m.received_at = ? AND m.created_at = ? AND m.id < ?)
-         )`
+      ? "AND (m.received_at, m.created_at, m.id) < (?, ?, ?)"
       : "";
     const bindings: Array<string | number> = [now];
     if (cursor) {
       bindings.push(
-        cursor.receivedAt,
-        cursor.receivedAt,
-        cursor.createdAt,
         cursor.receivedAt,
         cursor.createdAt,
         cursor.id,

@@ -85,12 +85,15 @@ function inbox(handler, { unified = false } = {}) {
   const timers = new Map();
   const calls = [];
   const redirects = [];
+  const documentListeners = new Map();
+  const windowListeners = new Map();
   let timerId = 0;
   const document = {
     hidden: false,
     body: new Element(),
     createElement: () => new Element(),
-    addEventListener() {},
+    addEventListener: (event, listener) =>
+      documentListeners.set(event, listener),
     querySelector(selector) {
       if (!nodes.has(selector)) nodes.set(selector, new Element());
       return nodes.get(selector);
@@ -117,7 +120,8 @@ function inbox(handler, { unified = false } = {}) {
         return id;
       },
       clearTimeout: (id) => timers.delete(id),
-      addEventListener() {},
+      addEventListener: (event, listener) =>
+        windowListeners.set(event, listener),
     },
     fetch: async (path) => {
       // Keep the real startup/restore path, without making it load a mailbox.
@@ -162,6 +166,26 @@ function inbox(handler, { unified = false } = {}) {
     calls,
     redirects,
     timers,
+    pollingDelays: () =>
+      [...timers.values()]
+        .map((timer) => timer.delay)
+        .filter((delay) => [10000, 20000, 40000, 60000].includes(delay)),
+    async firePolling() {
+      const entries = [...timers].filter(([, timer]) =>
+        [10000, 20000, 40000, 60000].includes(timer.delay),
+      );
+      assert.equal(entries.length, 1, "Exactly one polling timer should exist");
+      const [id, timer] = entries[0];
+      timers.delete(id);
+      await timer.callback();
+    },
+    clickRefresh: () =>
+      nodes.get("#operator-refresh-button").listeners.get("click")(),
+    setHidden(hidden) {
+      document.hidden = hidden;
+      documentListeners.get("visibilitychange")();
+    },
+    pagehide: () => windowListeners.get("pagehide")(),
     state: () => JSON.parse(api.snapshot()),
     async turn() {
       await new Promise(setImmediate);
@@ -318,7 +342,7 @@ test("refresh and polling cannot race an active archive load", async () => {
   await app.api.refresh();
   assert.deepEqual(app.calls, ["", "4"]);
   assert.equal(
-    [...app.timers.values()].some((timer) => timer.delay === 3000),
+    [...app.timers.values()].some((timer) => timer.delay === 10000),
     false,
   );
   older.resolve(response(page([message(3)])));
@@ -401,7 +425,7 @@ for (const unified of [false, true]) {
     assert.equal(app.state().readerLength, 0);
     assert.equal(app.state().archiveLoadInFlight, false);
     assert.equal(
-      [...app.timers.values()].some((timer) => timer.delay === 3000),
+      [...app.timers.values()].some((timer) => timer.delay === 10000),
       false,
     );
     if (unified) assert.deepEqual(app.redirects, ["/admin/operator-session"]);
@@ -441,4 +465,75 @@ test("repeated cursor errors can be repaired by a manual refresh", async () => {
   await app.settle();
   assert.equal(app.state().hasMore, false);
   assert.deepEqual(app.state().ids, ["5", "4", "3"]);
+});
+
+test("normal polling uses ten seconds and failures back off until success resets them", async () => {
+  let failing = false;
+  const app = inbox(() =>
+    failing
+      ? response({ message: "服务暂时不可用。" }, 500)
+      : response(page([message(3)])),
+  );
+  await app.api.refresh();
+  assert.deepEqual(app.pollingDelays(), [10000]);
+  failing = true;
+  for (const delay of [10000, 20000, 40000, 60000, 60000]) {
+    await app.firePolling();
+    assert.deepEqual(app.pollingDelays(), [delay]);
+    assert.deepEqual(app.state().ids, ["3"]);
+    assert.match(app.state().error, /暂时不可用/);
+  }
+  failing = false;
+  await app.firePolling();
+  assert.deepEqual(app.pollingDelays(), [10000]);
+  assert.equal(app.state().error, null);
+  failing = true;
+  await app.firePolling();
+  assert.deepEqual(app.pollingDelays(), [10000]);
+});
+
+test("manual refresh runs immediately during maximum backoff", async () => {
+  let failing = false;
+  const app = inbox(() =>
+    failing
+      ? response({ message: "请求过于频繁。" }, 429)
+      : response(page([message(3)])),
+  );
+  await app.api.refresh();
+  failing = true;
+  for (let attempt = 0; attempt < 4; attempt += 1) await app.firePolling();
+  assert.deepEqual(app.pollingDelays(), [60000]);
+  const before = app.calls.length;
+  failing = false;
+  await app.clickRefresh();
+  assert.equal(app.calls.length, before + 1);
+  assert.deepEqual(app.pollingDelays(), [10000]);
+  assert.equal(app.state().error, null);
+});
+
+test("hiding the page pauses polling and returning refreshes without duplicate timers", async () => {
+  const app = inbox(() => response(page([message(3)])));
+  await app.api.refresh();
+  assert.deepEqual(app.pollingDelays(), [10000]);
+  app.setHidden(true);
+  assert.deepEqual(app.pollingDelays(), []);
+  const before = app.calls.length;
+  await app.turn();
+  assert.equal(app.calls.length, before);
+  app.setHidden(false);
+  await app.settle();
+  assert.equal(app.calls.length, before + 1);
+  assert.deepEqual(app.pollingDelays(), [10000]);
+  app.pagehide();
+  assert.deepEqual(app.pollingDelays(), []);
+});
+
+test("a refresh finishing while hidden does not restart polling", async () => {
+  const pending = deferred();
+  const app = inbox(() => pending.promise);
+  const refreshing = app.api.refresh();
+  app.setHidden(true);
+  pending.resolve(response(page([message(3)])));
+  await refreshing;
+  assert.deepEqual(app.pollingDelays(), []);
 });
