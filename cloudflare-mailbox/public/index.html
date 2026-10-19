@@ -16,7 +16,7 @@
     />
     <meta
       name="description"
-      content="使用 iCloud 隐藏邮箱和 Token 查看最近收到的验证邮件。"
+      content="使用 iCloud 隐藏邮箱和 Token 只查看验证码。"
     />
     <title>隐邮收件箱</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -43,11 +43,10 @@
       <section id="entry-view" class="entry-view" aria-labelledby="entry-title">
         <div class="entry-intro">
           <p class="eyebrow">你的临时邮件，只在需要时打开</p>
-          <h1 id="entry-title">查看隐藏邮箱<br />最近收到的邮件</h1>
+          <h1 id="entry-title">查看隐藏邮箱<br />最近的验证码</h1>
           <p class="entry-copy">
             输入 iCloud 隐藏邮箱和配套
-            Token。无论是你自己的邮箱还是分享给他人的邮箱，
-            验证成功后都可以查看验证码、正文和收件时间。
+            Token。打开后只能看到验证码和到达时间，邮件正文、说明文档、文件变更和附件都不会出现。
           </p>
         </div>
 
@@ -88,7 +87,7 @@
           </label>
 
           <button id="lookup-button" class="primary-button" type="submit">
-            查看最近邮件
+            查看验证码
           </button>
           <p
             id="lookup-status"
@@ -120,13 +119,14 @@
       <section
         id="mailbox-view"
         class="mailbox-view"
+        data-mode="code_only"
         aria-labelledby="mailbox-title"
         hidden
       >
         <div class="mailbox-toolbar">
           <div>
             <p class="eyebrow">已验证的私人收件箱</p>
-            <h1 id="mailbox-title" tabindex="-1">最近邮件</h1>
+            <h1 id="mailbox-title" tabindex="-1">最近验证码</h1>
             <p id="mailbox-email" class="mailbox-email"></p>
           </div>
           <div class="toolbar-actions">
@@ -149,7 +149,7 @@
 
         <div class="mailbox-container">
           <div class="mailbox-workspace">
-            <aside class="message-index" aria-label="邮件列表">
+            <aside class="message-index" aria-label="验证码列表">
               <div class="index-heading">
                 <span id="index-label">验证码记录</span>
                 <span id="message-count">0 封</span>
@@ -163,17 +163,6 @@
                 </p>
               </div>
             </aside>
-
-            <article
-              id="message-reader"
-              class="message-reader"
-              aria-live="polite"
-            >
-              <div class="reader-placeholder">
-                <span aria-hidden="true">↙</span>
-                <p>选择左侧邮件查看验证码和正文。</p>
-              </div>
-            </article>
           </div>
         </div>
 
@@ -182,8 +171,8 @@
     </main>
 
     <footer class="site-footer">
-      <span>邮件正文以纯文本安全显示</span>
-      <span>附件不会保存</span>
+      <span>只显示验证码</span>
+      <span>正文、说明和附件不可见</span>
     </footer>
   </body>
 </html>

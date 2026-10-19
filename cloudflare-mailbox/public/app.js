@@ -23,7 +23,6 @@ const elements = {
   messageCount: document.querySelector("#message-count"),
   indexLabel: document.querySelector("#index-label"),
   emptyMailbox: document.querySelector("#empty-mailbox"),
-  reader: document.querySelector("#message-reader"),
   mailboxError: document.querySelector("#mailbox-error"),
 };
 
@@ -35,8 +34,10 @@ const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   hour12: false,
 });
 
+const VERIFICATION_CODE =
+  /^(?:\d{6}|(?=.*[A-Z])(?=.*\d)[A-Z0-9]{3}-[A-Z0-9]{3}|(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6})$/;
+
 let messages = [];
-let selectedId = "";
 let pollingTimer = 0;
 let refreshInFlight = false;
 let renderedSignature = "";
@@ -82,12 +83,12 @@ function showEntry(message = "", kind = "error") {
   window.setTimeout(() => elements.email.focus(), 0);
 }
 
-function showMailbox(email, mode = "code_only") {
+function showMailbox(email) {
   const shouldMoveFocus = !elements.entryView.hidden;
   elements.entryView.hidden = true;
   elements.mailboxView.hidden = false;
   elements.mailboxEmail.textContent = email;
-  elements.mailboxView.dataset.mode = mode;
+  elements.mailboxView.dataset.mode = "code_only";
   elements.mailboxError.hidden = true;
   if (shouldMoveFocus) {
     window.setTimeout(
@@ -136,37 +137,43 @@ async function copyText(value, button) {
   }, 1400);
 }
 
-function renderReader(animate = true) {
-  const message = messages.find((item) => item.id === selectedId);
-  elements.reader.replaceChildren();
-  if (!message) {
-    elements.reader.dataset.empty = "true";
-    const placeholder = makeElement("div", "reader-placeholder");
-    placeholder.append(
-      makeElement("span", "", "↙"),
-      makeElement("p", "", "选择邮件查看验证码和正文。"),
-    );
-    elements.reader.append(placeholder);
-    return;
-  }
-  delete elements.reader.dataset.empty;
+function visibleCode(message) {
+  const code = String(message && message.code ? message.code : "").trim();
+  return VERIFICATION_CODE.test(code) ? code : "";
+}
 
-  const article = makeElement("div", "reader-article");
-  if (animate) article.classList.add("is-animated");
-  const kicker = makeElement("div", "reader-kicker");
-  kicker.append(
-    makeElement("span", "", message.sender || "未知发件人"),
-    makeElement("time", "", formatTime(message.receivedAt)),
+function messageSignature(items) {
+  return JSON.stringify(
+    items.map((item) => [item.id, item.code, item.receivedAt]),
   );
-  const title = makeElement("h2", "", message.subject || "（无主题）");
-  article.append(kicker, title);
+}
 
-  if (message.code) {
-    const verification = makeElement("div", "verification-block");
-    const value = makeElement("div", "");
-    value.append(
-      makeElement("span", "verification-label", "识别到的验证码"),
-      makeElement("code", "verification-code", message.code),
+function renderMessages(nextMessages, options = {}) {
+  const previousIds = new Set(messages.map((message) => message.id));
+  const incoming = (Array.isArray(nextMessages) ? nextMessages : [])
+    .map((message) => ({
+      id: String(message && message.id ? message.id : ""),
+      code: visibleCode(message),
+      receivedAt: String(
+        message && message.receivedAt ? message.receivedAt : "",
+      ),
+    }))
+    .filter((message) => message.code);
+  const signature = messageSignature(incoming);
+  const changed = signature !== renderedSignature;
+  if (!changed && !options.force) return false;
+  messages = incoming;
+  renderedSignature = signature;
+  elements.messageCount.textContent = String(messages.length) + " 封";
+  elements.messageList.replaceChildren();
+  elements.emptyMailbox.hidden = messages.length !== 0;
+
+  for (const message of messages) {
+    const row = makeElement("div", "message-row code-only-row");
+    const value = makeElement("span", "code-only-value", message.code);
+    const meta = makeElement("span", "");
+    meta.append(
+      makeElement("span", "code-only-hint", formatTime(message.receivedAt)),
     );
     const copy = makeElement("button", "copy-button", "复制验证码");
     copy.type = "button";
@@ -175,97 +182,10 @@ function renderReader(animate = true) {
         copy.textContent = "复制失败";
       });
     });
-    verification.append(value, copy);
-    article.append(verification);
-  }
-
-  article.append(
-    makeElement(
-      "pre",
-      "message-body",
-      message.body || "这封邮件没有可显示的纯文本正文。",
-    ),
-  );
-  elements.reader.append(article);
-}
-
-function messageSignature(items) {
-  return JSON.stringify(
-    items.map((item) => [
-      item.id,
-      item.code,
-      item.receivedAt,
-      item.sender,
-      item.subject,
-      item.body,
-    ]),
-  );
-}
-
-function renderMessages(nextMessages, options = {}) {
-  const previousIds = new Set(messages.map((message) => message.id));
-  const incoming = Array.isArray(nextMessages) ? nextMessages : [];
-  const signature = messageSignature(incoming);
-  const changed = signature !== renderedSignature;
-  if (!changed && !options.force) return false;
-  messages = incoming;
-  renderedSignature = signature;
-  if (!messages.some((message) => message.id === selectedId)) {
-    selectedId = messages[0] ? messages[0].id : "";
-  }
-  elements.messageCount.textContent = String(messages.length) + " 封";
-  elements.messageList.replaceChildren();
-  elements.emptyMailbox.hidden = messages.length !== 0;
-
-  for (const message of messages) {
-    if (elements.mailboxView.dataset.mode === "code_only") {
-      const row = makeElement("div", "message-row code-only-row");
-      const value = makeElement("span", "code-only-value", message.code);
-      const meta = makeElement("span", "");
-      meta.append(
-        makeElement("span", "code-only-hint", formatTime(message.receivedAt)),
-      );
-      const copy = makeElement("button", "copy-button", "复制验证码");
-      copy.type = "button";
-      copy.addEventListener("click", () => {
-        copyText(message.code, copy).catch(() => {
-          copy.textContent = "复制失败";
-        });
-      });
-      meta.append(copy);
-      row.append(value, meta);
-      elements.messageList.append(row);
-      continue;
-    }
-    const row = makeElement("button", "message-row");
-    row.type = "button";
-    row.setAttribute(
-      "aria-current",
-      message.id === selectedId ? "true" : "false",
-    );
-    const meta = makeElement("span", "message-meta");
-    meta.append(
-      makeElement("span", "message-sender", message.sender || "未知发件人"),
-      makeElement("time", "message-time", formatTime(message.receivedAt)),
-    );
-    row.append(
-      meta,
-      makeElement("span", "message-subject", message.subject || "（无主题）"),
-      makeElement("span", "message-preview", message.body || "无纯文本正文"),
-    );
-    if (message.code)
-      row.append(makeElement("code", "code-chip", message.code));
-    row.addEventListener("click", () => {
-      selectedId = message.id;
-      renderMessages(messages, { force: true, animate: true });
-      renderReader(true);
-      if (window.matchMedia("(max-width: 760px)").matches) {
-        elements.reader.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    });
+    meta.append(copy);
+    row.append(value, meta);
     elements.messageList.append(row);
   }
-  renderReader(options.animate !== false);
   return messages.some((message) => !previousIds.has(message.id));
 }
 
@@ -276,7 +196,7 @@ async function refreshMailbox(options = {}) {
   elements.refreshButton.disabled = true;
   try {
     const payload = await api("/api/messages");
-    showMailbox(payload.mailbox.email, payload.mailbox.mode);
+    showMailbox(payload.mailbox.email);
     const hasNew = renderMessages(payload.messages, {
       force: !options.quiet,
       animate: !options.quiet,
@@ -291,7 +211,7 @@ async function refreshMailbox(options = {}) {
       );
     }
     elements.refreshState.textContent = hasNew
-      ? "刚收到新邮件"
+      ? "刚收到新验证码"
       : "已同步 " + formatTime(new Date().toISOString());
     schedulePolling();
   } catch (error) {
@@ -333,7 +253,7 @@ async function establishSession(credentials) {
       body: JSON.stringify(credentials),
     });
     elements.token.value = "";
-    showMailbox(payload.mailbox.email, payload.mailbox.mode);
+    showMailbox(payload.mailbox.email);
     await refreshMailbox();
   } catch (error) {
     setLookupStatus(
@@ -363,7 +283,7 @@ elements.logoutButton.addEventListener("click", async () => {
     // Clearing the local view is still safe if the network request fails.
   } finally {
     messages = [];
-    selectedId = "";
+    renderedSignature = "";
     elements.logoutButton.disabled = false;
     showEntry("已退出收件箱。", "success");
   }
@@ -392,7 +312,7 @@ async function restoreMailbox() {
   try {
     const session = await api("/api/session");
     if (!session.authenticated) return;
-    showMailbox(session.mailbox.email, session.mailbox.mode);
+    showMailbox(session.mailbox.email);
     await refreshMailbox({ quiet: true });
   } catch {
     showEntry();

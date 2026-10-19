@@ -16,6 +16,7 @@ from .browser_capture import CaptureManager
 from .config import Settings
 from .database import ConflictError, Database, DatabaseError, IssuedAccessKey, NotFoundError
 from .edge_sync import EdgeSyncClient, EdgeSyncError
+from .imap_bridge import ImapMailboxBridge
 from .hme import (
     HmeClient,
     HmeError,
@@ -35,7 +36,7 @@ from .imap_otp import (
 from .mail_tags import refresh_usage_tags as _refresh_usage_tags
 from .mailbox_watcher import MailboxWatcher
 from .rate_limit import SlidingWindowRateLimiter
-from .security import SecretBox, SecurityError, hash_access_key
+from .security import SecretBox, SecurityError, hash_access_key, secrets_equal
 
 _LOOKUP_OUTCOME_VIEW = {
     "found": ("已返回验证码", "success"),
@@ -275,6 +276,19 @@ class GatewayService:
             self.mailbox_watcher.start()
         self._edge_push_lock = threading.Lock()
         self._edge_reconcile_thread: threading.Thread | None = None
+        self._imap_bridge_thread: threading.Thread | None = None
+        if start_maintenance and settings.imap_bridge_enabled:
+            bridge = ImapMailboxBridge(
+                settings,
+                self._watcher_imap_config,
+                self._stop_event,
+            )
+            self._imap_bridge_thread = threading.Thread(
+                target=bridge.run,
+                name="icloud-imap-bridge",
+                daemon=True,
+            )
+            self._imap_bridge_thread.start()
         if start_maintenance and settings.manages_hme:
             self._maintenance_thread = threading.Thread(
                 target=self._maintenance_loop,
@@ -324,6 +338,11 @@ class GatewayService:
         ):
             reconcile.join(max(0.0, deadline - time.monotonic()))
         if reconcile is not None and reconcile.is_alive():
+            return False
+        bridge = self._imap_bridge_thread
+        if bridge is not None and bridge.is_alive() and bridge is not threading.current_thread():
+            bridge.join(max(0.0, deadline - time.monotonic()))
+        if bridge is not None and bridge.is_alive():
             return False
         if not self.capture_manager.shutdown(timeout=max(0.0, deadline - time.monotonic())):
             return False
@@ -1363,11 +1382,14 @@ class GatewayService:
                 alias,
                 access_key=issued.access_key,
                 action="issue_key",
-                # Rotating a locally recoverable key is already an explicit
-                # operator action. A cloud-only key requires the separate
-                # confirmation gate above; once a local key exists, the new
-                # key must be allowed to replace a different remote key.
-                confirm_remote_replacement=confirm_remote_replacement or had_local_key,
+                # A cloud alias with no key must receive this one. Rotating a
+                # locally recoverable key is already an explicit operator action.
+                # A cloud-only key still requires the confirmation gate above.
+                confirm_remote_replacement=(
+                    confirm_remote_replacement
+                    or had_local_key
+                    or str(alias.get("edge_key_status") or "") != "present"
+                ),
             )
             return issued
 
@@ -1737,7 +1759,35 @@ class GatewayService:
         The key remains the secret credential; the email is an explicit resource
         selector for integrations that cannot keep a browser session. A key
         belonging to another mailbox is treated exactly like an invalid key.
+        A configured mailbox API password is a parallel credential: it never
+        replaces the per-alias icg_ decode token.
         """
+        shared = str(self.settings.mailbox_api_password or "").strip()
+        if shared and secrets_equal(shared, str(access_key or "")):
+            self._require_public_otp()
+            ip_key = str(client_ip or "unknown")
+            ip_decision = self.rate_limiter.check(
+                "code-ip", ip_key, limit=30, window_seconds=60
+            )
+            if not ip_decision.allowed:
+                raise GatewayRateLimitedError(ip_decision.retry_after)
+            alias = self.database.find_alias_by_email(email)
+            if alias is None or str(alias.get("state") or "") != "active":
+                self._audit_lookup("invalid_key", client_ip=ip_key)
+                return None
+            if self.get_imap_config() is None:
+                self._audit_lookup(
+                    "not_configured",
+                    alias_id=str(alias["id"]),
+                    client_ip=ip_key,
+                )
+                raise GatewayNotConfiguredError("IMAP is not configured")
+            return PreparedLookup(
+                alias_id=str(alias["id"]),
+                email=str(alias["email"]),
+                sender_filter=str(alias["sender_filter"] or ""),
+                client_ip=ip_key,
+            )
         prepared = self.prepare_lookup(access_key, client_ip=client_ip)
         if prepared is None:
             return None

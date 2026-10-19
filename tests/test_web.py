@@ -310,6 +310,45 @@ def test_standard_verification_code_api_binds_email_to_key(client, service) -> N
     assert missing_auth.headers["www-authenticate"] == "Bearer"
 
 
+def test_shared_mailbox_api_password_does_not_replace_decode_key(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        master_key=bytes(range(32)),
+        admin_password="correct horse battery staple",
+        cookie_secure=False,
+        trusted_hosts=("testserver", "localhost", "127.0.0.1"),
+        mailbox_api_password="shared-api-password",
+    )
+    service = GatewayService(
+        settings,
+        hme_client_factory=FakeHmeClient,
+        hme_session_refresher=lambda session: session,
+        imap_reader_factory=FakeImapReader,
+        clock=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+    _configure_imap(service)
+    alias = service.database.upsert_alias(
+        email="kindly.vastest9l@icloud.com",
+        remote_metadata={"anonymousId": "kindly", "isActive": True},
+        label="Kindly",
+    )
+    FakeImapReader.result = OtpResult(
+        code="445566",
+        uid="57",
+        received_at=datetime.fromtimestamp(NOW - 1, tz=UTC),
+    )
+    with TestClient(create_app(settings, service=service), base_url="http://testserver") as client:
+        shared = client.post(
+            "/api/v1/verification-codes",
+            json={"email": alias["email"], "key": "shared-api-password"},
+        )
+        assert shared.status_code == 200
+        assert shared.json()["status"] == "found"
+        assert shared.json()["data"]["code"] == "445566"
+        assert alias["has_access_key"] is False
+
+
 def test_standard_verification_code_api_returns_waiting_without_mail(client, service) -> None:
     _configure_imap(service)
     alias, issued = _create_keyed_alias(service)
@@ -781,8 +820,17 @@ def test_admin_can_reveal_current_key_but_dashboard_never_embeds_it(
     dashboard = client.get("/admin")
     assert first not in dashboard.text
     assert first[-4:] in dashboard.text
-    assert "导出 person@icloud.com 的信息" in dashboard.text
-    assert "导出信息（邮箱 + 取码链接）" in dashboard.text
+    assert "导出 person@icloud.com 的账号 API" in dashboard.text
+    assert "导出账号 API（一行一个 email + key）" in dashboard.text
+    assert 'data-export-format="account-api"' in dashboard.text
+    assert "导出账号 API" in dashboard.text
+    assert 'data-export-format="delivery-key"' in dashboard.text
+    assert "导出密钥" in dashboard.text
+    assert 'aria-label="导出 person@icloud.com 的密钥"' in dashboard.text
+    key_export = dashboard.text.split('data-export-format="delivery-key"', 1)[0][-180:]
+    assert 'data-bulk-action="reveal_keys"' in key_export
+    assert "issue_keys" not in key_export
+    assert ">导出信息<" not in dashboard.text
     assert 'class="icon-button export-info-button"' in dashboard.text
     assert 'src="/static/icons/copy.svg"' in dashboard.text
 
@@ -795,6 +843,7 @@ def test_admin_can_reveal_current_key_but_dashboard_never_embeds_it(
     assert revealed.status_code == 200
     assert revealed.json()["access_key"] == first
     assert revealed.headers["cache-control"] == "no-store"
+    assert service.database.find_alias_by_access_key_hash(hash_access_key(first))["id"] == alias["id"]
 
     second_response = client.post(
         f"/admin/api/aliases/{alias['id']}/key",
@@ -1462,13 +1511,32 @@ def test_admin_script_redirects_expired_sessions_without_generic_action_errors()
     )
     assert 'createCopyButton(deliveryLinkList(items), "复制取码链接")' in script
     assert 'createCopyButton(emailList(items), "一键复制")' in script
-    assert 'createCopyButton(standardParameters(item), "导出信息")' in script
+    assert 'createCopyButton(accountApiList(items), "复制账号 API")' in script
+    assert 'createCopyButton(accountApi(item), "导出账号 API")' in script
+    assert 'createCopyButton(standardParameters(item), "导出密钥")' in script
+    assert 'createCopyButton(standardParameterList(items), "导出密钥")' in script
+    assert 'createCopyButton(standardParameters(item), "导出信息")' not in script
     assert "if (items.length > 1)" in script
-    assert "standardParameterList" not in script
+    assert "function accountApi" in script
+    assert "function accountApiList" in script
+    assert 'exportFormat === "account-api"' in script
+    assert 'exportFormat === "delivery-key"' in script
+    assert "已复制 ${successfulKeys.length} 条账号 API，一行一个。" in script
+    assert "function standardParameterList" in script
     assert 'querySelectorAll(".export-info-button")' in script
+    assert "function ensureExportKeyControls" in script
+    assert 'querySelectorAll(".export-key-button")' in script
+    assert "await writeClipboard(accountApi(data))" in script
     assert "await writeClipboard(standardParameters(data))" in script
+    key_export = script.split('querySelectorAll(".export-key-button")', 1)[1].split(
+        'querySelectorAll(".export-info-button")', 1
+    )[0]
+    assert "/key/reveal" in key_export
+    assert "/key`" not in key_export
+    assert "issue_access_key" not in key_export
     assert 'openModal([data], "当前有效密钥。")' not in script
-    assert "邮箱和取码链接已复制" in script
+    assert "的账号 API 已复制" in script
+    assert "的邮箱和取码链接已复制" in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script
     assert "window.prompt" not in script
@@ -1541,10 +1609,13 @@ const noop = () => {};
 global.document = {querySelector: () => null, querySelectorAll: () => [], addEventListener: noop};
 global.window = {location: {origin: "https://gateway.example"}, addEventListener: noop};
 const {
+  accountApi,
+  accountApiList,
   deliveryLinkList,
   emailList,
   jobCounts,
   jobSummary,
+  standardParameterList,
   standardParameters,
 } = require(process.argv[1]);
 const job = {
@@ -1587,6 +1658,9 @@ const items = [
 const one = "邮箱：one@icloud.com"
   + "；取码链接：https://gateway.example/#email=one%40icloud.com&key=icg_one";
 if (standardParameters(items[0]) !== one) process.exit(5);
+const two = "邮箱：two@icloud.com"
+  + "；取码链接：https://gateway.example/#email=two%40icloud.com&key=icg_two";
+if (standardParameterList(items) !== one + "\n" + two) process.exit(12);
 const expectedEmails = "one@icloud.com\ntwo@icloud.com";
 if (emailList(items) !== expectedEmails) process.exit(6);
 const expectedLinks = [
@@ -1594,6 +1668,12 @@ const expectedLinks = [
   "https://gateway.example/#email=two%40icloud.com&key=icg_two",
 ].join("\n");
 if (deliveryLinkList(items) !== expectedLinks) process.exit(7);
+const expectedApis = [
+  '{"email":"one@icloud.com","key":"icg_one"}',
+  '{"email":"two@icloud.com","key":"icg_two"}',
+].join("\n");
+if (accountApi(items[0]) !== expectedApis.split("\n")[0]) process.exit(10);
+if (accountApiList(items) !== expectedApis) process.exit(11);
 """
     subprocess.run([node, "-e", harness, str(script)], check=True)
 

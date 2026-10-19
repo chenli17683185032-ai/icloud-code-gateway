@@ -41,6 +41,20 @@ export interface PublicCodeMessage {
   expiresAt: string;
 }
 
+const PUBLIC_VERIFICATION_CODE =
+  /^(?:\d{6}|(?=.*[A-Z])(?=.*\d)[A-Z0-9]{3}-[A-Z0-9]{3}|(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6})$/;
+
+function toPublicCode(message: PublicCodeMessage): PublicCodeMessage | null {
+  const code = message.code.trim();
+  if (!PUBLIC_VERIFICATION_CODE.test(code)) return null;
+  return {
+    id: message.id,
+    code,
+    receivedAt: message.receivedAt,
+    expiresAt: message.expiresAt,
+  };
+}
+
 export interface AdminMessage extends PublicMessage {
   email: string;
   category: "gpt" | "grok" | "other";
@@ -375,14 +389,15 @@ export class MessageService {
     const messages = await Promise.all(
       rows.map((row) => this.decryptedMessage(row)),
     );
-    return messages.map(
-      ({ id, code, receivedAt, expiresAt }): PublicCodeMessage => ({
-        id,
-        code,
-        receivedAt,
-        expiresAt,
-      }),
-    );
+    return messages.flatMap((message) => {
+      const code = toPublicCode({
+        id: message.id,
+        code: message.code,
+        receivedAt: message.receivedAt,
+        expiresAt: message.expiresAt,
+      });
+      return code ? [code] : [];
+    });
   }
 
   async listAll(

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block head %}<meta name="csrf-token" content="{{ csrf_token }}"><meta name="public-base-url" content="{{ public_base_url }}"><meta name="alias-batch-limit" content="{{ alias_batch_limit }}">{% endblock %}
+{% block head %}<meta name="csrf-token" content="{{ csrf_token }}"><meta name="public-base-url" content="{{ public_base_url }}"><meta name="alias-batch-limit" content="{{ alias_batch_limit }}"><meta name="mailbox-api-password" content="{{ mailbox_api_password }}">{% endblock %}
 {% block body_class %}admin-page{% endblock %}
 
 {% block body %}
@@ -179,7 +179,20 @@
     {% if aliases %}
     <div class="bulk-toolbar" id="bulk-toolbar" data-alias-batch-limit="{{ alias_batch_limit }}" aria-live="polite">
       <strong><span id="selected-count">0</span> 条已选择</strong>
-      <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="reveal_keys">导出信息</button>
+      <button
+        class="secondary-button small-button bulk-action"
+        type="button"
+        data-bulk-action="reveal_keys"
+        data-export-format="account-api"
+        title="复制选中账号的验证码 API，一行一个 JSON：email + key"
+      >导出账号 API</button>
+      <button
+        class="secondary-button small-button bulk-action"
+        type="button"
+        data-bulk-action="reveal_keys"
+        data-export-format="delivery-key"
+        title="复制选中账号已有的邮箱和取码链接，不会更换密钥"
+      >导出密钥</button>
       <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="issue_keys">批量签发 / 轮换密钥</button>
       <button class="secondary-button small-button bulk-action" type="button" data-bulk-action="deactivate">批量停用</button>
       <button class="primary-button danger-command small-button bulk-action" type="button" data-bulk-action="delete">批量永久删除失活项</button>
@@ -208,6 +221,7 @@
         class="alias-row"
         role="row"
         data-alias-id="{{ alias.id }}"
+        data-alias-email="{{ alias.email }}"
         data-alias-base-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }}"
         data-alias-search="{{ alias.email }} {{ alias.label }} {{ alias.sender_filter }} {{ alias.usage_label }}"
       >
@@ -312,15 +326,27 @@
           <span class="state-label state-{{ alias.state }}">{% if alias.state == 'active' %}活动{% else %}失活{% endif %}</span>
         </div>
         <div class="alias-actions" role="cell">
-          {% if alias.has_access_key and alias.access_key_recoverable %}
+          {% if mailbox_api_password or (alias.has_access_key and alias.access_key_recoverable) %}
           <button
             class="icon-button export-info-button"
             type="button"
             data-alias-id="{{ alias.id }}"
-            aria-label="导出 {{ alias.email }} 的信息"
-            title="导出信息（邮箱 + 取码链接）"
+            data-alias-email="{{ alias.email }}"
+            aria-label="导出 {{ alias.email }} 的账号 API"
+            title="导出账号 API（一行一个 email + key）"
           >
             <img src="/static/icons/copy.svg" alt="" aria-hidden="true">
+          </button>
+          {% endif %}
+          {% if alias.has_access_key and alias.access_key_recoverable %}
+          <button
+            class="icon-button export-key-button"
+            type="button"
+            data-alias-id="{{ alias.id }}"
+            aria-label="导出 {{ alias.email }} 的密钥"
+            title="导出已有密钥和取码链接，不会更换密钥"
+          >
+            <img src="/static/icons/key-round.svg" alt="" aria-hidden="true">
           </button>
           {% endif %}
           <button

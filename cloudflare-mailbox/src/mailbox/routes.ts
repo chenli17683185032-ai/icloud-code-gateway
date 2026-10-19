@@ -15,6 +15,7 @@ import {
   hmacDigest,
   issueSession,
   readCookie,
+  safeEqual,
   SESSION_COOKIE,
   sessionCookie,
   verifySession,
@@ -88,7 +89,11 @@ async function directVerificationCode(
   }
   let authenticated;
   try {
-    authenticated = await aliases.authenticate(email, key);
+    authenticated =
+      config.mailboxApiPassword &&
+      (await safeEqual(config.mailboxApiPassword, key))
+        ? await aliases.authenticateActiveMailbox(email)
+        : await aliases.authenticate(email, key);
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       return apiError(context, "unauthorized", 401, {

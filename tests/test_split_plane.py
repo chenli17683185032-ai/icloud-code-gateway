@@ -275,9 +275,39 @@ def test_control_plane_pushes_issued_key_to_edge(tmp_path: Path):
     assert call["method"] == "POST"
     assert call["url"].endswith("/control/v1/aliases/by-email/local.hidden%40icloud.com/key")
     assert call["json"]["access_key"] == issued.access_key
+    assert call["json"]["replace_existing"] is True
     assert call["headers"]["Authorization"].startswith("Bearer ")
     assert service.database.get_alias(alias["id"])["edge_key_status"] == "present"
 
+    service.shutdown(timeout=1, close_database=True)
+
+
+def test_first_local_key_installs_onto_keyless_cloud_alias(tmp_path: Path):
+    fake = _StatusFakeSession()
+    settings = _settings(
+        tmp_path,
+        deployment_mode="control",
+        edge_base_url="https://icloud.yunbay.xyz",
+        edge_sync_enabled=True,
+    )
+    edge = EdgeSyncClient(settings, session=fake)
+    service = GatewayService(settings, start_maintenance=False, edge_sync_client=edge)
+    alias = service.database.upsert_alias(
+        email="plain.box@icloud.com",
+        remote_metadata={"anonymousId": "plain", "isActive": True},
+        state="active",
+    )
+
+    issued = service.issue_access_key(alias["id"])
+
+    issue_calls = [
+        call
+        for call in fake.calls
+        if call["url"].endswith("/control/v1/aliases/by-email/plain.box%40icloud.com/key")
+    ]
+    assert issue_calls[-1]["json"]["replace_existing"] is True
+    assert issue_calls[-1]["json"]["access_key"] == issued.access_key
+    assert service.database.get_alias(alias["id"])["edge_key_status"] == "present"
     service.shutdown(timeout=1, close_database=True)
 
 

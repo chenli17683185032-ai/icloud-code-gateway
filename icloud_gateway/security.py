@@ -102,6 +102,12 @@ def hash_access_key(value: str) -> bytes:
     return hashlib.sha256(key.encode("ascii")).digest()
 
 
+def secrets_equal(left: str, right: str) -> bool:
+    left_digest = hashlib.sha256(str(left).encode("utf-8")).digest()
+    right_digest = hashlib.sha256(str(right).encode("utf-8")).digest()
+    return hmac.compare_digest(left_digest, right_digest)
+
+
 @dataclass(frozen=True)
 class AdminSession:
     expires_at: int

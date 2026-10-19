@@ -40,10 +40,11 @@ export const mailboxSessionSchema = z.object({
 
 // Machine-to-machine callers use an explicit mailbox/key pair instead of a
 // browser session cookie. Keep this contract deliberately small so the API
-// never accepts or returns arbitrary mail query options.
+// never accepts or returns arbitrary mail query options. The key may be the
+// per-alias icg_ decode token or the shared mailbox API password.
 export const verificationCodeRequestSchema = z.object({
   email,
-  key: accessToken,
+  key: z.string().trim().min(1).max(128),
 });
 
 export const operatorSessionSchema = z.object({

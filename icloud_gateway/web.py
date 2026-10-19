@@ -883,6 +883,7 @@ def create_app(
                 "deployment_mode": settings.deployment_mode,
                 "manages_hme": settings.manages_hme,
                 "edge_sync_enabled": bool(context.get("edge_sync", {}).get("enabled")),
+                "mailbox_api_password": settings.mailbox_api_password,
             }
         )
         response = templates.TemplateResponse(

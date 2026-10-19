@@ -619,6 +619,18 @@ class Database:
             raise NotFoundError("alias not found")
         return self._alias_from_row(row)
 
+    def find_alias_by_email(self, email: str) -> dict[str, Any] | None:
+        digest = self.secret_box.digest(_normalize_email(email), "alias-email-index")
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM aliases WHERE email_hash = ?",
+                (sqlite3.Binary(digest),),
+            )
+            .fetchone()
+        )
+        return None if row is None else self._alias_from_row(row)
+
     def find_alias_by_access_key_hash(self, digest: bytes) -> dict[str, Any] | None:
         row = (
             self._connect()

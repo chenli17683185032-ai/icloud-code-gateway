@@ -95,9 +95,10 @@ npx wrangler secret put LOOKUP_HMAC_KEY
 npx wrangler secret put DATA_ENCRYPTION_KEY
 npx wrangler secret put SESSION_SIGNING_KEY
 npx wrangler secret put OPERATOR_ACCESS_TOKEN
+npx wrangler secret put MAILBOX_API_PASSWORD
 ```
 
-前三个加密/HMAC key 一旦更换，既有 Token 摘要、加密邮件或登录会话会失效。操作员 Token 轮换只会使后台会话失效。生产轮换前必须先设计迁移，不要直接覆盖前三个 key。
+前三个加密/HMAC key 一旦更换，既有 Token 摘要、加密邮件或登录会话会失效。操作员 Token 轮换只会使后台会话失效。`MAILBOX_API_PASSWORD` 只给机器取码 API 使用，不会替换每个 Alias 的 `icg_...` 解码密钥。生产轮换前必须先设计迁移，不要直接覆盖前三个 key。
 
 ### 3. 设置收件地址和保留时间
 

@@ -61,11 +61,11 @@ export class AliasRepository {
             secret_ciphertext = excluded.secret_ciphertext,
             secret_iv = excluded.secret_iv,
             token_digest = CASE
-              WHEN ? = 1 THEN excluded.token_digest
+              WHEN ? = 1 OR aliases.token_digest IS NULL THEN excluded.token_digest
               ELSE aliases.token_digest
             END,
             token_lookup_digest = CASE
-              WHEN ? = 1 THEN excluded.token_lookup_digest
+              WHEN ? = 1 OR aliases.token_digest IS NULL THEN excluded.token_lookup_digest
               ELSE aliases.token_lookup_digest
             END,
             state = excluded.state,

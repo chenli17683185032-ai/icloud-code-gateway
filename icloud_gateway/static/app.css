@@ -2033,6 +2033,13 @@ a:focus-visible {
   padding: 12px;
 }
 
+.issued-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .issued-key-identity {
   display: grid;
   gap: 3px;

@@ -96,6 +96,11 @@ class Settings:
     # Local-only convenience: skip admin password UI/auth. Must never be enabled on
     # public edge/full deployments.
     admin_open: bool = False
+    # Shared machine-to-machine API password. Empty keeps the per-alias icg_
+    # decode token as the only verification-code credential.
+    mailbox_api_password: str = ""
+    # Pull Apple IMAP and push raw messages into the existing mailbox API.
+    imap_bridge_enabled: bool = False
 
     @property
     def database_path(self) -> Path:
@@ -172,6 +177,11 @@ class Settings:
             len(operator_access_token) != 47 or not operator_access_token.startswith("icg_")
         ):
             raise ConfigurationError("ICLOUD_GATEWAY_OPERATOR_ACCESS_TOKEN is invalid")
+        mailbox_api_password = str(
+            os.environ.get("ICLOUD_GATEWAY_MAILBOX_API_PASSWORD") or ""
+        ).strip()
+        if mailbox_api_password and not (8 <= len(mailbox_api_password) <= 128):
+            raise ConfigurationError("ICLOUD_GATEWAY_MAILBOX_API_PASSWORD is invalid")
         if mode == "control":
             if not edge_base_url:
                 raise ConfigurationError("ICLOUD_GATEWAY_EDGE_BASE_URL is required in control mode")
@@ -256,6 +266,10 @@ class Settings:
                 maximum=24 * 60 * 60,
             ),
             admin_open=admin_open,
+            mailbox_api_password=mailbox_api_password,
+            imap_bridge_enabled=_boolean_environment(
+                "ICLOUD_GATEWAY_IMAP_BRIDGE", False
+            ),
         )
 
     @property

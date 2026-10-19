@@ -95,7 +95,9 @@ export class AliasService {
       tokenLookupDigest,
       state,
       now,
-      replaceToken: state === "inactive",
+      // An empty cloud token is not an existing key. Install the supplied one.
+      // Only a different stored token requires an explicit replacement.
+      replaceToken: state === "inactive" || !existing?.token_digest,
     });
     const row = await this.requireByDigest(digest);
     if (
@@ -148,7 +150,7 @@ export class AliasService {
         ),
         state: "active",
         now,
-        replaceToken: replaceExistingKey,
+        replaceToken: replaceExistingKey || !row.token_digest,
       });
       if (
         row.token_digest &&
@@ -203,6 +205,16 @@ export class AliasService {
     const digest = await aliasDigest(this.config, normalizeEmail(emailValue));
     await this.requireByDigest(digest);
     await this.repository.deleteByDigest(digest);
+  }
+
+  async authenticateActiveMailbox(
+    emailValue: string,
+  ): Promise<AuthenticatedAlias> {
+    const email = normalizeEmail(emailValue);
+    const digest = await aliasDigest(this.config, email);
+    const row = await this.repository.getByDigest(digest);
+    if (!row || row.state !== "active") throw new UnauthorizedError();
+    return { row, secret: await this.secretFor(row) };
   }
 
   async authenticate(

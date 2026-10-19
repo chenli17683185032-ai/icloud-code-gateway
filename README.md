@@ -214,7 +214,7 @@ docker compose ps
 
 ### 第三方验证码 API
 
-每个 Alias 的访问密钥（`icg_...`）同时作为 API key。推荐服务端使用无 Cookie 的标准 REST 接口：
+每个 Alias 的访问密钥（`icg_...`）仍是网页取码链接的解码密钥。机器取码 API 可以继续用这把 key，也可以改用单独配置的共用 API 密码（`MAILBOX_API_PASSWORD` / `ICLOUD_GATEWAY_MAILBOX_API_PASSWORD`）。两套平行：改 API 密码不会轮换或失效原来的 `icg_...` 解码密钥。推荐服务端使用无 Cookie 的标准 REST 接口：
 
 ```http
 GET /api/v1/mailboxes/{邮箱地址}/verification-code

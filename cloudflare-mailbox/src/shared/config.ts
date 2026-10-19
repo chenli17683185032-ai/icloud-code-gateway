@@ -89,6 +89,17 @@ export function loadConfig(env: Env): RuntimeConfig {
       }
       return token;
     })(),
+    mailboxApiPassword: (() => {
+      const password = String(env.MAILBOX_API_PASSWORD ?? "").trim();
+      if (password && (password.length < 8 || password.length > 128)) {
+        throw new AppError(
+          "configuration_error",
+          500,
+          "MAILBOX_API_PASSWORD is invalid.",
+        );
+      }
+      return password;
+    })(),
     emailRetentionSeconds: boundedInteger(
       env.EMAIL_RETENTION_SECONDS,
       24 * 60 * 60,

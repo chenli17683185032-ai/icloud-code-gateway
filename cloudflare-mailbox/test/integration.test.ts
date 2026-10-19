@@ -94,12 +94,17 @@ describe("worker integration", () => {
     );
     const html = await page.text();
     expect(html).toContain("隐邮收件箱");
+    expect(html).toContain("只显示验证码");
+    expect(html).not.toContain('id="message-reader"');
 
     const script = await (
       await SELF.fetch("https://example.com/app.js")
     ).text();
     expect(script).not.toContain("localStorage");
     expect(script).not.toContain("sessionStorage");
+    expect(script).not.toContain("message.body");
+    expect(script).not.toContain("message.subject");
+    expect(script).not.toContain("message.html");
 
     const stylesheet = await (
       await SELF.fetch("https://example.com/app.css")
@@ -259,6 +264,69 @@ describe("worker integration", () => {
     expect(rotated.status).toBe(200);
   });
 
+  it("installs the first key onto an alias that does not have one", async () => {
+    const created = await SELF.fetch("https://example.com/control/v1/aliases", {
+      method: "POST",
+      headers: controlHeaders,
+      body: JSON.stringify({
+        id: "keyless-1",
+        email: "keyless.box@icloud.com",
+        state: "active",
+      }),
+    });
+    expect(created.status).toBe(200);
+    expect(await created.json()).toMatchObject({ has_access_key: false });
+
+    const key = `icg_${"k".repeat(43)}`;
+    const issued = await SELF.fetch(
+      "https://example.com/control/v1/aliases/by-email/keyless.box%40icloud.com/key",
+      {
+        method: "POST",
+        headers: controlHeaders,
+        body: JSON.stringify({
+          id: "keyless-1",
+          access_key: key,
+          replace_existing: false,
+        }),
+      },
+    );
+    expect(issued.status).toBe(200);
+
+    const session = await SELF.fetch("https://example.com/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.41",
+      },
+      body: JSON.stringify({ email: "keyless.box@icloud.com", token: key }),
+    });
+    expect(session.status).toBe(200);
+
+    const other = `icg_${"z".repeat(43)}`;
+    const blocked = await SELF.fetch(
+      "https://example.com/control/v1/aliases/by-email/keyless.box%40icloud.com/key",
+      {
+        method: "POST",
+        headers: controlHeaders,
+        body: JSON.stringify({
+          access_key: other,
+          replace_existing: false,
+        }),
+      },
+    );
+    expect(blocked.status).toBe(409);
+
+    const stillOriginal = await SELF.fetch("https://example.com/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.42",
+      },
+      body: JSON.stringify({ email: "keyless.box@icloud.com", token: key }),
+    });
+    expect(stillOriginal.status).toBe(200);
+  });
+
   it("serves the stateless standard verification-code API", async () => {
     await upsertAlias();
     const waiting = await SELF.fetch(
@@ -354,6 +422,78 @@ describe("worker integration", () => {
     });
   });
 
+  it("accepts the shared mailbox API password without replacing decode tokens", async () => {
+    await upsertAlias();
+    const keyless = await SELF.fetch("https://example.com/control/v1/aliases", {
+      method: "POST",
+      headers: controlHeaders,
+      body: JSON.stringify({
+        id: "local-2",
+        email: "kindly.vastest9l@icloud.com",
+        label: "keyless",
+        state: "active",
+      }),
+    });
+    expect(keyless.status).toBe(200);
+    expect(await keyless.json()).toMatchObject({ has_access_key: false });
+
+    const shared = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "hidden.one@icloud.com",
+          key: "shared-api-password",
+        }),
+      },
+    );
+    expect(shared.status).toBe(200);
+    await expect(shared.json()).resolves.toMatchObject({
+      status: "waiting",
+      data: { email: "hidden.one@icloud.com", code: null },
+    });
+
+    const keylessShared = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "kindly.vastest9l@icloud.com",
+          key: "shared-api-password",
+        }),
+      },
+    );
+    expect(keylessShared.status).toBe(200);
+
+    const decodeToken = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "hidden.one@icloud.com",
+          key: token,
+        }),
+      },
+    );
+    expect(decodeToken.status).toBe(200);
+
+    const sessionDenied = await SELF.fetch("https://example.com/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.40",
+      },
+      body: JSON.stringify({
+        email: "hidden.one@icloud.com",
+        token: "shared-api-password",
+      }),
+    });
+    expect(sessionDenied.status).toBe(422);
+  });
+
   it("opens historical key-only links without requiring the email", async () => {
     await upsertAlias();
     const response = await SELF.fetch("https://example.com/api/session", {
@@ -409,6 +549,137 @@ describe("worker integration", () => {
     expect(payload.messages[0]).not.toHaveProperty("sender");
     expect(payload.messages[0]).not.toHaveProperty("html");
     expect(payload.messages[0]).not.toHaveProperty("attachments");
+  });
+
+  it("shows users only the verification code when mail also carries documents and file changes", async () => {
+    await upsertAlias();
+    const boundary = "user-boundary";
+    const guide = "SETUP-GUIDE-DO-NOT-LEAK";
+    const diff =
+      "diff --git a/secrets/config.txt\n+changed-file-contents-DO-NOT-LEAK";
+    const attachmentName = "setup-guide.txt";
+    const attachmentBody = "guide-file-bytes-DO-NOT-LEAK";
+    const verification = [
+      "From: OpenAI <relay-message@icloud.com>",
+      "To: hidden.one@icloud.com",
+      "X-Apple-Original-Recipient: hidden.one@icloud.com",
+      "Subject: Your ChatGPT verification code",
+      "Message-ID: <code-with-guide@example.com>",
+      `Content-Type: multipart/mixed; boundary=${boundary}`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Your OpenAI verification code is 246810.",
+      guide,
+      diff,
+      `--${boundary}`,
+      `Content-Type: text/plain; name="${attachmentName}"`,
+      `Content-Disposition: attachment; filename="${attachmentName}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      btoa(`${attachmentBody}\n`),
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    const instructions = [
+      "From: Docs <docs@example.com>",
+      "To: hidden.one@icloud.com",
+      "X-Original-To: hidden.one@icloud.com",
+      "Subject: 说明文件已更新",
+      "Message-ID: <instructions@example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "完整说明文档。verification code 135790。",
+      "文件变更：changed-file-contents-DO-NOT-LEAK",
+    ].join("\r\n");
+    await worker.email?.(
+      emailMessage(verification, "relay-message@icloud.com"),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+    await worker.email?.(
+      emailMessage(instructions),
+      mailboxEnv,
+      {} as ExecutionContext,
+    );
+
+    const userCookie = await createSession();
+    const userResponse = await SELF.fetch("https://example.com/api/messages", {
+      headers: { Cookie: userCookie },
+    });
+    const userText = await userResponse.text();
+    const userPayload = JSON.parse(userText) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    expect(userPayload.messages).toHaveLength(1);
+    expect(Object.keys(userPayload.messages[0] ?? {}).sort()).toEqual([
+      "code",
+      "expiresAt",
+      "id",
+      "receivedAt",
+    ]);
+    expect(userPayload.messages[0]).toMatchObject({ code: "246810" });
+    for (const secret of [
+      guide,
+      diff,
+      attachmentName,
+      attachmentBody,
+      "135790",
+    ]) {
+      expect(userText).not.toContain(secret);
+    }
+
+    const direct = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    const directText = await direct.text();
+    expect(directText).toContain("246810");
+    for (const secret of [
+      guide,
+      diff,
+      attachmentName,
+      attachmentBody,
+      "135790",
+    ]) {
+      expect(directText).not.toContain(secret);
+    }
+
+    const operatorCookie = await createOperatorSession();
+    const operatorResponse = await SELF.fetch(
+      "https://example.com/api/operator/messages",
+      { headers: { Cookie: operatorCookie } },
+    );
+    const operatorPayload = (await operatorResponse.json()) as {
+      messages: Array<{
+        id: string;
+        subject: string;
+        body: string;
+        attachments: Array<{ id: string; filename: string }>;
+      }>;
+    };
+    const archived = operatorPayload.messages.find((item) =>
+      item.body.includes(guide),
+    );
+    expect(archived?.body).toContain(diff);
+    expect(archived?.attachments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ filename: attachmentName }),
+      ]),
+    );
+    const attachmentId = archived?.attachments[0]?.id ?? "";
+    for (const path of ["html", `attachments/${attachmentId}`]) {
+      const denied = await SELF.fetch(
+        `https://example.com/api/operator/messages/${archived?.id}/${path}`,
+        { headers: { Cookie: userCookie } },
+      );
+      expect(denied.status).toBe(401);
+    }
   });
 
   it("hides other mail from users while the operator sees all and retention", async () => {
@@ -821,5 +1092,62 @@ describe("worker integration", () => {
       headers: { Cookie: cookie },
     });
     expect(staleSession.status).toBe(401);
+  });
+
+  it("stores an Apple IMAP message through the control plane", async () => {
+    await upsertAlias();
+    const raw = [
+      "From: OpenAI <relay-message@icloud.com>",
+      "To: hidden.one@icloud.com",
+      "X-Apple-Original-Recipient: hidden.one@icloud.com",
+      "Subject: Your ChatGPT verification code",
+      "Message-ID: <imap-bridge@example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Your OpenAI verification code is 246810.",
+    ].join("\r\n");
+    const denied = await SELF.fetch("https://example.com/control/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "message/rfc822" },
+      body: raw,
+    });
+    expect(denied.status).toBe(401);
+
+    const ingested = await SELF.fetch(
+      "https://example.com/control/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          Authorization: controlHeaders.Authorization,
+          "Content-Type": "message/rfc822",
+          "X-Envelope-From": "relay-message@icloud.com",
+        },
+        body: raw,
+      },
+    );
+    expect(ingested.status).toBe(200);
+    await expect(ingested.json()).resolves.toMatchObject({
+      status: "ok",
+      stored: 1,
+      matched: 1,
+      duplicate: 0,
+    });
+
+    const found = await SELF.fetch(
+      "https://example.com/api/v1/verification-codes",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "198.51.100.44",
+        },
+        body: JSON.stringify({ email: "hidden.one@icloud.com", key: token }),
+      },
+    );
+    expect(found.status).toBe(200);
+    await expect(found.json()).resolves.toMatchObject({
+      status: "found",
+      data: { code: "246810" },
+    });
   });
 });

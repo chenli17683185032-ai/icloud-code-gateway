@@ -102,6 +102,43 @@ controlRoutes.post("/v1/aliases/by-email/:email/state", async (context) => {
   });
 });
 
+controlRoutes.post("/v1/messages", async (context) => {
+  const { config, messages } = services(context.env);
+  const declared = Number(context.req.header("content-length") || "0");
+  if (
+    !Number.isFinite(declared) ||
+    declared <= 0 ||
+    declared > config.maxEmailBytes
+  ) {
+    throw new ValidationError("邮件大小不正确。");
+  }
+  const raw = await context.req.arrayBuffer();
+  if (raw.byteLength !== declared || raw.byteLength > config.maxEmailBytes) {
+    throw new ValidationError("邮件大小不正确。");
+  }
+  const fromHeader = (context.req.header("X-Envelope-From") || "")
+    .trim()
+    .toLowerCase();
+  const envelopeFrom = /^[^\s@<>]+@[^\s@<>]+$/.test(fromHeader)
+    ? fromHeader
+    : "imap-bridge@icloud.com";
+  // Apple IMAP delivers to the forwarding mailbox, not the domain inbox.
+  // Keep the existing alias parser, and satisfy the domain envelope gate
+  // with the configured inbox address.
+  const result = await messages.ingest({
+    raw: new Blob([raw]).stream(),
+    rawSize: raw.byteLength,
+    envelopeFrom,
+    envelopeTo: config.inboxAddress || "imap-bridge@local",
+  });
+  return context.json({
+    status: "ok",
+    stored: result.stored,
+    matched: result.matched,
+    duplicate: result.duplicate,
+  });
+});
+
 controlRoutes.delete("/v1/aliases/by-email/:email", async (context) => {
   try {
     await services(context.env).aliases.delete(

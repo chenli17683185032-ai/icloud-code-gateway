@@ -18,6 +18,7 @@ export default defineConfig({
           DATA_ENCRYPTION_KEY: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
           SESSION_SIGNING_KEY: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
           OPERATOR_ACCESS_TOKEN: `icg_${"o".repeat(43)}`,
+          MAILBOX_API_PASSWORD: "shared-api-password",
           EMAIL_RETENTION_SECONDS: "86400",
           SESSION_TTL_SECONDS: "900",
           MESSAGE_QUERY_LIMIT: "20",

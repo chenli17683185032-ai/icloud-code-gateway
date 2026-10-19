@@ -13,6 +13,9 @@
     Number.isSafeInteger(configuredAliasBatchLimit) && configuredAliasBatchLimit > 0
       ? configuredAliasBatchLimit
       : 100;
+  const mailboxApiPassword =
+    document.querySelector('meta[name="mailbox-api-password"]')?.content || "";
+  ensureExportKeyControls();
   const modal = document.querySelector("#key-modal");
   const modalMessage = document.querySelector("#key-modal-message");
   const issuedList = document.querySelector("#issued-key-list");
@@ -107,8 +110,25 @@
     return items.map(deliveryLink).join("\n");
   }
 
+  // One line per account: the documented POST /api/v1/verification-codes body.
+  // The key stays in the JSON, not in a query string that servers log.
+  function accountApi(item) {
+    return JSON.stringify({
+      email: item.email,
+      key: mailboxApiPassword || item.access_key,
+    });
+  }
+
+  function accountApiList(items) {
+    return items.map(accountApi).join("\n");
+  }
+
   function standardParameters(item) {
     return `邮箱：${item.email}；取码链接：${deliveryLink(item)}`;
+  }
+
+  function standardParameterList(items) {
+    return items.map(standardParameters).join("\n");
   }
 
   async function writeClipboard(value) {
@@ -227,6 +247,10 @@
     modalReturnFocus = document.activeElement;
     modalMessage.textContent = message;
     issuedList.replaceChildren();
+    if (items.length) {
+      issuedList.append(createCopyButton(accountApiList(items), "复制账号 API"));
+      issuedList.append(createCopyButton(standardParameterList(items), "导出密钥"));
+    }
     if (items.length > 1) {
       issuedList.append(createCopyButton(deliveryLinkList(items), "复制取码链接"));
       issuedList.append(createCopyButton(emailList(items), "一键复制"));
@@ -243,9 +267,14 @@
       email.textContent = item.email;
       identity.append(label, email);
 
-      const copy = createCopyButton(standardParameters(item), "导出信息");
+      const actions = document.createElement("div");
+      actions.className = "issued-key-actions";
+      actions.append(
+        createCopyButton(accountApi(item), "导出账号 API"),
+        createCopyButton(standardParameters(item), "导出密钥"),
+      );
 
-      row.append(identity, copy);
+      row.append(identity, actions);
       issuedList.append(row);
     });
     modal.hidden = false;
@@ -414,12 +443,27 @@
     });
   }
 
-  function showCompletedJob(job, messageElement) {
+  async function showCompletedJob(job, messageElement, options = {}) {
     const successfulKeys = job.results
       .filter((item) => item.status === "success" && item.access_key)
       .map((item) => ({ ...item, public_url: job.public_url }));
     const summary = jobSummary(job);
     if (successfulKeys.length) {
+      if (options.copyDeliveryKey) {
+        try {
+          await writeClipboard(standardParameterList(successfulKeys));
+          toast(`已复制 ${successfulKeys.length} 条密钥，每条包含邮箱和取码链接。`);
+        } catch (_error) {
+          toast("密钥已读取，但浏览器未允许复制，请在弹窗中再点一次。", "error");
+        }
+      } else if (options.copyAccountApi) {
+        try {
+          await writeClipboard(accountApiList(successfulKeys));
+          toast(`已复制 ${successfulKeys.length} 条账号 API，一行一个。`);
+        } catch (_error) {
+          toast("账号 API 已生成，但浏览器未允许复制，请在弹窗中再点一次。", "error");
+        }
+      }
       openModal(successfulKeys, summary);
       return;
     }
@@ -457,7 +501,7 @@
         body: JSON.stringify(payload),
       });
       const job = await pollJob(data.job_id, createMessage);
-      showCompletedJob(await revealCompletedJob(job), createMessage);
+      await showCompletedJob(await revealCompletedJob(job), createMessage);
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) return;
       createMessage.textContent = "创建失败，未完成的 Alias 可通过对账恢复。";
@@ -641,6 +685,82 @@
     });
   });
 
+  function ensureExportKeyControls() {
+    const apiBulk =
+      document.querySelector('.bulk-action[data-export-format="account-api"]') ||
+      [...document.querySelectorAll(".bulk-action")].find((button) => {
+        const label = button.textContent || "";
+        return (
+          button.dataset.bulkAction === "reveal_keys" &&
+          button.dataset.exportFormat !== "delivery-key" &&
+          (label.includes("导出") || label.includes("API"))
+        );
+      });
+    if (
+      apiBulk &&
+      !document.querySelector('.bulk-action[data-export-format="delivery-key"]')
+    ) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button small-button bulk-action";
+      button.dataset.bulkAction = "reveal_keys";
+      button.dataset.exportFormat = "delivery-key";
+      button.title = "复制选中账号已有的邮箱和取码链接，不会更换密钥";
+      button.textContent = "导出密钥";
+      apiBulk.insertAdjacentElement("afterend", button);
+    }
+    document.querySelectorAll(".alias-row").forEach((row) => {
+      if (row.querySelector(".export-key-button")) return;
+      const apiButton = row.querySelector(".export-info-button");
+      if (!apiButton) return;
+      const keyText = row.querySelector(".alias-key")?.textContent || "";
+      if (!keyText.includes("末 4 位") || keyText.includes("轮换后可查看")) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "icon-button export-key-button";
+      button.dataset.aliasId = apiButton.dataset.aliasId || "";
+      const email = row.dataset.aliasEmail || apiButton.dataset.aliasEmail || "";
+      button.setAttribute("aria-label", `导出 ${email} 的密钥`);
+      button.title = "导出已有密钥和取码链接，不会更换密钥";
+      const icon = document.createElement("img");
+      icon.src = "/static/icons/key-round.svg";
+      icon.alt = "";
+      icon.setAttribute("aria-hidden", "true");
+      button.append(icon);
+      apiButton.insertAdjacentElement("afterend", button);
+    });
+  }
+  document.querySelectorAll(".export-key-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.classList.add("is-busy");
+      button.setAttribute("aria-busy", "true");
+      let data = null;
+      try {
+        // Read the key already stored for this alias. POST /key would rotate it.
+        data = await api(`/admin/api/aliases/${button.dataset.aliasId}/key/reveal`, {
+          method: "POST",
+        });
+        await writeClipboard(standardParameters(data));
+        toast(`${data.email} 的邮箱和取码链接已复制。`);
+      } catch (error) {
+        if (error instanceof AuthenticationRequiredError) return;
+        toast(
+          data
+            ? "信息已读取，但浏览器未允许复制，请再点一次。"
+            : error.message === "conflict"
+              ? "该密钥由旧版本签发，轮换后即可导出。"
+              : "导出密钥失败。",
+          "error",
+        );
+      } finally {
+        button.disabled = false;
+        button.classList.remove("is-busy");
+        button.removeAttribute("aria-busy");
+      }
+    });
+  });
+
   document.querySelectorAll(".export-info-button").forEach((button) => {
     button.addEventListener("click", async () => {
       button.disabled = true;
@@ -648,12 +768,16 @@
       button.setAttribute("aria-busy", "true");
       let data = null;
       try {
-        data = await api(
-          `/admin/api/aliases/${button.dataset.aliasId}/key/reveal`,
-          { method: "POST" },
-        );
-        await writeClipboard(standardParameters(data));
-        toast(`${data.email} 的邮箱和取码链接已复制。`);
+        if (mailboxApiPassword && button.dataset.aliasEmail) {
+          data = { email: button.dataset.aliasEmail };
+        } else {
+          data = await api(
+            `/admin/api/aliases/${button.dataset.aliasId}/key/reveal`,
+            { method: "POST" },
+          );
+        }
+        await writeClipboard(accountApi(data));
+        toast(`${data.email} 的账号 API 已复制。`);
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
         toast(
@@ -866,6 +990,23 @@
         confirmed = window.confirm("将从 iCloud 永久删除所有选中的失活项。此操作无法恢复，确定继续？");
         if (!confirmed) return;
       }
+      const exportFormat = button.dataset.exportFormat || "";
+      const copyAccountApi = exportFormat === "account-api";
+      const copyDeliveryKey = exportFormat === "delivery-key";
+      if (copyAccountApi && mailboxApiPassword) {
+        const items = selectedAliases
+          .map((checkbox) => ({
+            email: checkbox.closest(".alias-row")?.dataset.aliasEmail || "",
+          }))
+          .filter((item) => item.email);
+        try {
+          await writeClipboard(accountApiList(items));
+          bulkMessage.textContent = `已复制 ${items.length} 条账号 API。`;
+        } catch (_error) {
+          bulkMessage.textContent = "复制失败，请再试一次。";
+        }
+        return;
+      }
       document.querySelectorAll(".bulk-action").forEach((item) => (item.disabled = true));
       bulkMessage.textContent = `正在创建 ${aliasIds.length} 项持久任务…`;
       try {
@@ -875,7 +1016,10 @@
           body: JSON.stringify({ action, alias_ids: aliasIds, confirmed }),
         });
         const job = await pollJob(data.job_id, bulkMessage);
-        showCompletedJob(await revealCompletedJob(job), bulkMessage);
+        await showCompletedJob(await revealCompletedJob(job), bulkMessage, {
+          copyAccountApi,
+          copyDeliveryKey,
+        });
       } catch (error) {
         if (error instanceof AuthenticationRequiredError) return;
         bulkMessage.textContent = "批量操作失败，请刷新确认每项状态。";
@@ -905,7 +1049,7 @@
       if (!messageElement) return;
       messageElement.textContent = `正在恢复任务 ${job.current}/${job.requested}…`;
       const completed = await pollJob(job.job_id, messageElement);
-      showCompletedJob(await revealCompletedJob(completed), messageElement);
+      await showCompletedJob(await revealCompletedJob(completed), messageElement);
     } catch (error) {
       if (error?.constructor !== AuthenticationRequiredError && createMessage) {
         createMessage.textContent = "恢复后台任务状态失败，请刷新重试。";
@@ -1195,6 +1339,8 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      accountApi,
+      accountApiList,
       composeUsage,
       deliveryLink,
       deliveryLinkList,
@@ -1204,6 +1350,7 @@
       jobSummary,
       limitedVisibleSelectionCount,
       splitUsageTokens,
+      standardParameterList,
       standardParameters,
       usageKind,
     };

@@ -7,6 +7,7 @@ export interface Env {
   DATA_ENCRYPTION_KEY: string;
   SESSION_SIGNING_KEY: string;
   OPERATOR_ACCESS_TOKEN: string;
+  MAILBOX_API_PASSWORD?: string;
   EMAIL_RETENTION_SECONDS?: string;
   SESSION_TTL_SECONDS?: string;
   OPERATOR_SESSION_TTL_SECONDS?: string;
@@ -25,6 +26,7 @@ export interface RuntimeConfig {
   dataEncryptionKey: string;
   sessionSigningKey: string;
   operatorAccessToken: string;
+  mailboxApiPassword: string;
   emailRetentionSeconds: number;
   sessionTtlSeconds: number;
   operatorSessionTtlSeconds: number;
