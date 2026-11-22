@@ -10,7 +10,9 @@
 - 域名另有一条已启用的全收路由，指向独立的 `grok-moemail-email-receiver-worker`。全收路由不等于已在 iCloud 收件箱登记所有地址。
 - 已确认当前账户存在已验证的收件目标，可新增精确地址转发规则。
 - 本操作不需要修改或重新部署 Worker，也不需要调整 MX、密钥、iCloud 转发设置或数据库。
-- 先将本记录上传 GitHub，再保存新地址规则；保存后补充实际目标类型、启用状态和验证结果，并再次同步 GitHub。
+- 操作计划已先以提交 `1c414d3` 上传 GitHub 分支 `codex/add-domain-mailbox-20261122`，随后保存新地址规则。
+- 新增精确地址规则：`codes@tokenopen.top` → 当前账户既有、已验证的主 Gmail。完整个人收件地址仅保存在 Cloudflare 配置及本地私有截图中。
+- 新地址的邮件在该 Gmail 收件箱查看，不进入 iCloud 接码后台。
 
 ## 遇到的坑
 
@@ -24,7 +26,14 @@
 - 使用已验证的既有收件目标，可以让新地址直接进入用户已有的收件箱。
 - 无需部署应用的邮箱规则变更，也应保留本地及 GitHub 操作记录。
 
-## 验收状态
+## 验收结果
 
-- 配置前核查完成；新规则尚未保存。
+- 北京时间 2026-11-22，Cloudflare 控制台保存成功，并显示 `codes@tokenopen.top` 为“活跃”；规则类型为发送到电子邮件，目标为选定的已验证主 Gmail。
+- 同一规则列表显示原 `subteam@tokenopen.top` → `icloud-mailbox-worker` 规则及全收规则均保持“活跃”。
+- 仅新增一条精确地址转发规则，未更新 Worker、DNS、原有收件规则、访问密钥或数据库。
+- 配置截图保存在本地忽略目录 `outputs/domain-mailbox-20261122/codes-active.jpg`，不上传包含个人收件地址的截图。
 - 本次未发送测试邮件，不将控制台检查视为真实新邮件送达验收。
+
+## 回退说明
+
+如需取消新地址的 Gmail 转发，可在 Cloudflare Email Routing 中停用本次新增的 `codes@tokenopen.top` 精确规则。停用后该地址将重新受既有全收规则处理，不等于停止该地址的一切收件。回退操作不涉及原 `subteam@tokenopen.top` 规则或全收规则。
